@@ -172,10 +172,14 @@ No server needed. Output goes directly to the terminal.
 ```json
 {
   "taskId": "unique-id",
-  "browsers": 3,
+  "browsers": 10,
+  "concurrency": 3,
   "steps": [ ...steps ]
 }
 ```
+
+- **`browsers`** — total number of profiles to run the task across
+- **`concurrency`** — how many browsers run at the same time (optional, defaults to `browsers` — all at once). Use this to cap parallel load on low-spec machines.
 
 ### Step shape
 

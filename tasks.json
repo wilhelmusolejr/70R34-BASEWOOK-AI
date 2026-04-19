@@ -1,6 +1,7 @@
 {
   "taskId": "homepage_test",
   "browsers": 1,
+  "concurrency": 1,
   "steps": [
     {
       "type": "homepage_interaction",

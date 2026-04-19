@@ -127,24 +127,42 @@ async function runBrowser(browserInfo, steps) {
 }
 
 /**
+ * Run browserInfos with a sliding concurrency window.
+ * At most `limit` browsers run at the same time; as each finishes the next starts.
+ */
+async function runWithConcurrency(browserInfos, steps, limit) {
+  const results = new Array(browserInfos.length);
+  const queue = [...browserInfos.entries()]; // [[index, browserInfo], ...]
+
+  async function worker() {
+    while (queue.length > 0) {
+      const [index, browserInfo] = queue.shift();
+      results[index] = await Promise.allSettled([runBrowser(browserInfo, steps)]).then(r => r[0]);
+    }
+  }
+
+  const workers = Array.from({ length: limit }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+/**
  * Run a complete task across multiple browsers in parallel.
  *
- * @param {Object} task - Task object with taskId, browsers, steps
+ * @param {Object} task - Task object with taskId, browsers, concurrency, steps
  * @returns {Promise<{taskId, results}>}
  */
 async function runTask(task) {
-  const { taskId, browsers: browserCount, steps } = task;
+  const { taskId, browsers: browserCount, concurrency, steps } = task;
+  const limit = concurrency && concurrency > 0 ? concurrency : browserCount;
 
-  console.log(`\n=== Task ${taskId}: Starting with ${browserCount} browser(s) ===\n`);
+  console.log(`\n=== Task ${taskId}: Starting with ${browserCount} browser(s), concurrency: ${limit} ===\n`);
 
   // Connect to Hidemium profiles
   const browserInfos = await launchBrowsers(browserCount);
   console.log(`Connected to ${browserInfos.length} browser(s)\n`);
 
-  // Run steps on each browser in parallel
-  const results = await Promise.allSettled(
-    browserInfos.map(browserInfo => runBrowser(browserInfo, steps))
-  );
+  const results = await runWithConcurrency(browserInfos, steps, limit);
 
   // Format results
   const formattedResults = results.map((result, index) => {
