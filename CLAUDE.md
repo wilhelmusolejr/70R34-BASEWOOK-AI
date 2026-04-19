@@ -43,6 +43,7 @@ JSON and hits the same endpoint.
 │   └── setup_cover.js           # Upload cover photo from URL
 ├── utils/
 │   ├── browserManager.js        # The ONLY file that knows about Hidemium
+│   ├── userApi.js               # Fetches user profile data from 3rd party API
 │   ├── humanBehavior.js         # Human-like interaction utilities
 │   ├── claudeApi.js             # Stubbed — extractPostContext still used by share_post.js
 │   └── generateMessage.js       # GitHub Models API — generates share messages
@@ -98,71 +99,130 @@ happens via the `steps` array in JSON, not via code.
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `taskId` | yes | — | Unique identifier for the task |
-| `browsers` | yes | — | Total number of profiles to run across |
-| `concurrency` | no | `browsers` | Max browsers running at the same time |
-| `blockMedia` | no | `true` | Block images/video/audio/fonts to save bandwidth. Set `false` for `setup_avatar`/`setup_cover` |
+| `profiles` | yes | — | Explicit list of user IDs (from 3rd party API) to run |
+| `concurrency` | no | all | Max browsers running at the same time |
+| `blockMedia` | no | `true` | Block images/video/audio/fonts to save bandwidth |
 | `steps` | yes | — | Array of step objects |
 
-**Simple — visit profile and add friend:**
+**Simple — 1 profile, account setup:**
 ```json
 {
-  "taskId": "t1",
-  "browsers": 5,
-  "concurrency": 3,
+  "taskId": "setup-megan",
+  "profiles": ["69e4a3378c3f0a567140fbcd"],
+  "concurrency": 1,
   "blockMedia": true,
   "steps": [
+    { "type": "random_preset" },
+    { "type": "setup_avatar" },
+    { "type": "setup_about" },
+    { "type": "setup_cover" },
     {
       "type": "visit_profile",
-      "params": { "url": "https://www.basewook.com/john.smith" },
+      "params": { "random": true },
       "steps": [{ "type": "add_friend" }]
     }
   ]
 }
 ```
 
-**Complex — multi-step with concurrency cap:**
+**Multi-profile batch — 2 users, 1 at a time:**
 ```json
 {
-  "taskId": "t2",
-  "browsers": 10,
-  "concurrency": 3,
+  "taskId": "setup-batch",
+  "profiles": ["69e4a3378c3f0a567140fbcd", "69e21c9bbb8fecced7bfda04"],
+  "concurrency": 1,
   "blockMedia": true,
   "steps": [
-    {
-      "type": "homepage_interaction",
-      "steps": [
-        { "type": "scroll", "params": { "duration": 30 } },
-        { "type": "share_posts", "params": { "count": 2 } }
-      ]
-    },
+    { "type": "random_preset" },
+    { "type": "setup_avatar" },
+    { "type": "setup_about" },
+    { "type": "setup_cover" },
     {
       "type": "visit_profile",
-      "params": { "url": "https://www.basewook.com/john.smith" },
+      "params": { "random": true },
       "steps": [{ "type": "add_friend" }]
     }
   ]
 }
 ```
+
+Note: `setup_avatar`, `setup_about`, and `setup_cover` params are **auto-injected** from
+the user API response — no need to specify them in `tasks.json`. Explicit params always
+take priority if provided.
 
 ## Hidemium integration
 
 `utils/browserManager.js` is the **only** file that knows about Hidemium.
 Handlers receive a Playwright `page` object and don't care where it came from.
 
-Profiles must be launched in Hidemium (manually or via its API) before the
-server tries to attach. Playwright connects via CDP:
+### Flow: userId → browser session
 
-```javascript
-const browser = await chromium.connectOverCDP(`http://127.0.0.1:${profile.port}`);
+```
+tasks.json profiles[]
+  → fetchUser(userId)       via utils/userApi.js  →  GET /api/profiles/:id
+  → user.browsers[0]        { browserId, provider }
+  → openProfile(browserId)  via Hidemium API      →  CDP port
+  → chromium.connectOverCDP
+  → session { page, user, profileId }
 ```
 
-`config/profiles.json` lists available profiles. Only `id` and `label` are needed —
-the CDP port is assigned dynamically by Hidemium at open time (`data.data.remote_port`):
+Each session carries the full user object. `runner.js` uses it to auto-inject
+params into `setup_avatar`, `setup_about`, and `setup_cover` steps.
+
+### User API — `utils/userApi.js`
+
+Fetches user data from the 3rd party API. Configure in `.env`:
+
+```
+USER_API_BASE_URL=http://localhost:4000   # local
+USER_API_BASE_URL=https://yourdomain.com  # dev/prod
+```
+
+Endpoint: `GET ${USER_API_BASE_URL}/api/profiles/:id`
+
+Expected user shape (relevant fields):
+
+```json
+{
+  "_id": "69e4a3378c3f0a567140fbcd",
+  "firstName": "Megan", "lastName": "Walker",
+  "bio": "...", "city": "...", "hometown": "...",
+  "personal": { "relationshipStatus": "...", "relationshipStatusSince": "...", "languages": [] },
+  "work": [...], "education": { "college": {...}, "highSchool": {...} },
+  "hobbies": [...], "travel": [...],
+  "images": [
+    { "imageId": { "filename": "/images/avatar.jpg" }, ... },
+    { "imageId": { "filename": "/images/cover.jpg"  }, ... }
+  ],
+  "browsers": [
+    { "browserId": "local-uuid-here", "provider": "hidemium" }
+  ]
+}
+```
+
+- `images[0]` → avatar (has face annotation)
+- `images[1]` → cover photo
+- `browsers[0]` → always used (one provider per user)
+
+Image URLs are built as `IMAGE_SERVER_BASE_URL + imageId.filename`.
+
+### `config/profiles.json` — human reference only
+
+No longer imported by code. Just a convenience lookup for operators:
+
 ```json
 [
-  { "id": "profile_001", "label": "US Account 1" },
-  { "id": "profile_002", "label": "US Account 2" }
+  { "name": "Rosalba Wren",  "userId": "69e21c9bbb8fecced7bfda04" },
+  { "name": "Megan Walker",  "userId": "69e4a3378c3f0a567140fbcd" }
 ]
+```
+
+### Hidemium CDP connection
+
+Playwright connects via CDP — port assigned dynamically by Hidemium at open time:
+
+```javascript
+const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
 ```
 
 ## Playwright conventions (learned from hidemium-autopilot)
@@ -404,12 +464,24 @@ facebook.com/me  →  Add cover photo  →  Upload photo (menuitem, file chooser
   `:not([aria-disabled="true"])` before clicking, then use direct `.click()`.
 - Same `filechooser` intercept pattern as `setup_avatar`.
 
+### Key implementation notes
+
+- FB renders **2 elements** matching `[aria-label="Save changes"]` — `waitForSelector` confuses
+  Playwright when there are duplicates. Use `waitForFunction` + `querySelectorAll` instead:
+  ```javascript
+  await page.waitForFunction(() => {
+    const btns = Array.from(document.querySelectorAll('[aria-label="Save changes"]'));
+    return btns.some(btn => btn.getAttribute('aria-disabled') !== 'true');
+  }, { timeout: 45000 });
+  ```
+- Click the enabled button via `evaluateHandle` to avoid strict-mode selector issues.
+
 ### Confirmed selectors
 
 ```
 Add cover photo btn:    [aria-label="Add cover photo"]
 Upload photo menuitem:  xpath=//div[@role="menuitem"][.//span[text()="Upload photo"]]
-Save changes (enabled): div[role="button"][aria-label="Save changes"]:not([aria-disabled="true"])
+Save changes (polling): querySelectorAll('[aria-label="Save changes"]') via waitForFunction
 ```
 
 ## `visit_profile` + `add_friend` — Profile visit and friend request
@@ -576,6 +648,29 @@ All other errors (selector not found, bad params, DOM errors) wait 5s then retry
 Before any steps run, `runBrowser` checks the current URL. If the tab is not already
 on basewook.com, it navigates there first so no step ever starts on a blank or wrong page.
 
+### Between-step and post-task delays
+
+Every step pause is randomized to simulate human browsing pace:
+
+```
+Between top-level steps : 5–15s random
+Between child steps     : 5–15s random
+After all steps done    : 10–15s cooldown before browser closes
+```
+
+### User param injection — `injectUserParams(steps, user)`
+
+Runs inside `runBrowser` before steps execute. Walks the step tree and fills missing
+params from the fetched user object:
+
+| Step type | Injected from user |
+|-----------|-------------------|
+| `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `travel` |
+| `setup_avatar` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[0].imageId.filename` |
+| `setup_cover` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[1].imageId.filename` |
+
+Explicit params in `tasks.json` always take priority over injected values.
+
 ## `homepage_interaction` — Home button selector
 
 Uses `a[href="/"][role="link"]` — **not** `aria-label="Home"`. The aria-label changes
@@ -619,6 +714,13 @@ The href is always `"/"` regardless of notification state.
 - [x] `blockMedia` task field — toggle image/video/font blocking per task
 - [x] All step errors retry (not just network) — selector errors wait 5s, network 60s
 - [x] Auto-navigate to basewook.com before first step if tab is on wrong page
+- [x] `profiles` array in tasks.json — explicit user IDs instead of browser count
+- [x] `utils/userApi.js` — fetch user from 3rd party API (`GET /api/profiles/:id`)
+- [x] `browserManager` resolves `user.browsers[0].browserId` + `user.browsers[0].provider`
+- [x] `injectUserParams` — auto-fills `setup_about/avatar/cover` params from user data
+- [x] Between-step delays (5–15s) and post-task cooldown (10–15s)
+- [x] `setup_cover` fixed for duplicate `[aria-label="Save changes"]` elements
+- [x] `IMAGE_SERVER_BASE_URL` + `USER_API_BASE_URL` + `NODE_ENV` in `.env`
 - [ ] `comment_post`, `follow`, `join_group`, `send_message`
 - [ ] Enable Claude API for comment/share generation
 - [ ] Task state tracking (SQLite)

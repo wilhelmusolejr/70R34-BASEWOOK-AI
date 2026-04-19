@@ -64,21 +64,27 @@ module.exports = async function setup_cover(page, params) {
     await fileChooser.setFiles(tmpPath);
     console.log('File input set, waiting for save button...');
 
-    // 4. Wait for "Save changes" to appear, then poll until it's not aria-disabled
-    await page.waitForSelector('[aria-label="Save changes"]', { timeout: 15000 });
+    // 4. Poll until a "Save changes" button exists and is not aria-disabled
+    // (FB renders 2 matching elements — querySelector handles this cleanly)
+    console.log('Waiting for Save changes to become enabled...');
     await page.waitForFunction(() => {
-      const btn = document.querySelector('[aria-label="Save changes"]');
-      return btn && btn.getAttribute('aria-disabled') !== 'true';
-    }, { timeout: 30000 });
+      const btns = Array.from(document.querySelectorAll('[aria-label="Save changes"]'));
+      return btns.some(btn => btn.getAttribute('aria-disabled') !== 'true');
+    }, { timeout: 45000 });
 
-    const saveBtn = await page.$('[aria-label="Save changes"]');
+    const saveBtn = await page.evaluateHandle(() =>
+      Array.from(document.querySelectorAll('[aria-label="Save changes"]'))
+        .find(btn => btn.getAttribute('aria-disabled') !== 'true')
+    );
     await humanWait(page, 1500, 2500);
     await saveBtn.click();
     console.log('Save changes clicked');
 
     // 5. Wait for save to complete
-    await page.waitForSelector('[aria-label="Save changes"]', { state: 'detached', timeout: 15000 })
-      .catch(() => {});
+    await page.waitForFunction(() =>
+      !document.querySelector('[aria-label="Save changes"]'),
+      { timeout: 15000 }
+    ).catch(() => {});
 
     await humanWait(page, 2000, 3500);
     console.log('Cover photo upload complete');

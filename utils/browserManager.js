@@ -3,13 +3,13 @@
  * Opens profiles via Hidemium API and connects via CDP.
  */
 
-const axios = require("axios");
-const { chromium } = require("playwright");
-const profiles = require("../config/profiles.json");
+const axios = require('axios');
+const { chromium } = require('playwright');
+const { fetchUser } = require('./userApi');
 
 // Hidemium API configuration
-const API = "http://127.0.0.1:2222";
-const API_TOKEN = "pMgajBtFminGid3d6Wh0zFu2gPGx3BhUt3KX0S"; // Edit this: Hidemium Settings > Generate token
+const API = 'http://127.0.0.1:2222';
+const API_TOKEN = 'pMgajBtFminGid3d6Wh0zFu2gPGx3BhUt3KX0S'; // Edit this: Hidemium Settings > Generate token
 
 const headers = { Authorization: `Bearer ${API_TOKEN}` };
 
@@ -23,7 +23,7 @@ function sleep(ms) {
 /**
  * Open a single Hidemium profile via API and connect via CDP.
  *
- * @param {string} uuid - Profile UUID
+ * @param {string} uuid - Hidemium profile UUID
  * @returns {Promise<{browser, context, page, port, profileId}>}
  */
 async function openProfile(uuid) {
@@ -33,63 +33,65 @@ async function openProfile(uuid) {
     let browser;
 
     try {
-      const { data } = await axios.get(`${API}/openProfile?uuid=${uuid}`, {
-        headers,
-      });
+      const { data } = await axios.get(`${API}/openProfile?uuid=${uuid}`, { headers });
 
-      if (data.status !== "successfully") {
+      if (data.status !== 'successfully') {
         throw new Error(`Failed to open ${uuid}: ${JSON.stringify(data)}`);
       }
 
       const port = data.data.remote_port;
-      console.log(
-        `[browserManager] Profile ${uuid.slice(-8)} opened on port ${port}`,
-      );
+      console.log(`[browserManager] Profile ${uuid.slice(-8)} opened on port ${port}`);
 
       browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
 
-      // Get existing context or use first one
       const context = browser.contexts()[0];
-      if (!context) {
-        throw new Error("No browser context available after connecting");
-      }
+      if (!context) throw new Error('No browser context available after connecting');
 
-      // Get existing page or create one
       let page = context.pages()[0];
-      if (!page) {
-        page = await context.newPage();
-      }
+      if (!page) page = await context.newPage();
 
-      return {
-        browser,
-        context,
-        page,
-        port,
-        profileId: uuid,
-      };
+      return { browser, context, page, port, profileId: uuid };
+
     } catch (error) {
       lastError = error;
+      if (browser) await browser.close().catch(() => {});
 
-      if (browser) {
-        await browser.close().catch(() => {});
-      }
+      console.error(`[browserManager] Open profile failed for ${uuid.slice(-8)} (attempt ${attempt}/${OPEN_PROFILE_ATTEMPTS}): ${error.message}`);
 
-      console.error(
-        `[browserManager] Open profile failed for ${uuid.slice(-8)} (attempt ${attempt}/${OPEN_PROFILE_ATTEMPTS}): ${error.message}`,
-      );
+      if (attempt >= OPEN_PROFILE_ATTEMPTS) break;
 
-      if (attempt >= OPEN_PROFILE_ATTEMPTS) {
-        break;
-      }
-
-      console.log(
-        `[browserManager] Retrying in ${OPEN_PROFILE_RETRY_MS / 1000}s...`,
-      );
+      console.log(`[browserManager] Retrying in ${OPEN_PROFILE_RETRY_MS / 1000}s...`);
       await sleep(OPEN_PROFILE_RETRY_MS);
     }
   }
 
   throw lastError;
+}
+
+/**
+ * Open a browser for a given userId.
+ * Fetches the user from the API, resolves provider + browsers[0], connects.
+ *
+ * @param {string} userId - 3rd party API user ID
+ * @returns {Promise<{browser, context, page, port, profileId, user}>}
+ */
+async function openBrowserForUser(userId) {
+  const user = await fetchUser(userId);
+
+  if (!user.browsers || user.browsers.length === 0) {
+    throw new Error(`User ${userId} (${user.firstName} ${user.lastName}) has no browsers configured`);
+  }
+
+  const { browserId, provider = 'hidemium' } = user.browsers[0];
+
+  if (provider !== 'hidemium') {
+    throw new Error(`Unsupported browser provider: "${provider}"`);
+  }
+
+  console.log(`[browserManager] Opening browser for ${user.firstName} ${user.lastName} (${provider}: ${browserId.slice(-8)})`);
+
+  const session = await openProfile(browserId);
+  return { ...session, user };
 }
 
 /**
@@ -99,63 +101,42 @@ async function openProfile(uuid) {
  * @param {object} browser - Playwright browser instance (optional)
  */
 async function closeProfile(uuid, browser) {
-  if (browser) {
-    await browser.close().catch(() => {});
-  }
-  await axios
-    .get(`${API}/closeProfile?uuid=${uuid}`, { headers })
-    .catch(() => {});
+  if (browser) await browser.close().catch(() => {});
+  await axios.get(`${API}/closeProfile?uuid=${uuid}`, { headers }).catch(() => {});
   console.log(`[browserManager] Profile ${uuid.slice(-8)} closed`);
 }
 
 /**
- * List all profiles from Hidemium API.
+ * Open browsers for an explicit list of userIds.
+ * Fetches each user from the API, resolves their browser, connects.
  *
- * @returns {Promise<Array>}
+ * @param {string[]} userIds - Array of 3rd party API user IDs
+ * @returns {Promise<Array<{browser, context, page, port, profileId, user}>>}
  */
-async function listProfiles() {
-  const { data } = await axios.get(`${API}/profiles`, { headers });
-  return data.data || [];
-}
-
-/**
- * Open `count` Hidemium profiles and return connected browser instances.
- * Uses profiles from config/profiles.json.
- *
- * @param {number} count - Number of browsers to open
- * @returns {Promise<Array<{browser, context, page, port, profileId}>>}
- */
-async function launchBrowsers(count) {
-  const availableProfiles = profiles.slice(0, count);
-
-  if (availableProfiles.length < count) {
-    console.warn(
-      `[browserManager] Requested ${count} browsers but only ${availableProfiles.length} profiles configured`,
-    );
-  }
-
+async function launchBrowsers(userIds) {
   const connections = await Promise.allSettled(
-    availableProfiles.map((profile) => openProfile(profile.id)),
+    userIds.map((userId) => openBrowserForUser(userId))
   );
 
-  // Filter successful connections
   const successful = [];
   for (let i = 0; i < connections.length; i++) {
     const result = connections[i];
-    if (result.status === "fulfilled") {
+    if (result.status === 'fulfilled') {
       successful.push(result.value);
     } else {
-      console.error(
-        `[browserManager] Failed to connect to profile ${availableProfiles[i].id}:`,
-        result.reason.message,
-      );
+      const err = result.reason;
+      console.error(`[browserManager] Failed for userId ${userIds[i]}:`);
+      console.error(`  message : ${err.message || '(none)'}`);
+      if (err.response) {
+        console.error(`  API status : ${err.response.status}`);
+        console.error(`  API body   :`, err.response.data);
+      }
+      console.error(`  stack   :`, err.stack);
     }
   }
 
   if (successful.length === 0) {
-    throw new Error(
-      "Could not connect to any Hidemium profiles. Make sure Hidemium is running and API token is correct.",
-    );
+    throw new Error('Could not connect to any profiles. Make sure Hidemium is running and API token is correct.');
   }
 
   return successful;
@@ -168,14 +149,13 @@ async function launchBrowsers(count) {
  */
 async function closeBrowsers(sessions) {
   await Promise.allSettled(
-    sessions.map((session) => closeProfile(session.profileId, session.browser)),
+    sessions.map((session) => closeProfile(session.profileId, session.browser))
   );
 }
 
 module.exports = {
   openProfile,
   closeProfile,
-  listProfiles,
   launchBrowsers,
   closeBrowsers,
 };

@@ -3,8 +3,11 @@
  * Walks the step tree and executes handlers.
  */
 
-const { launchBrowsers } = require('./utils/browserManager');
+require('dotenv').config();
+const { launchBrowsers, closeBrowsers } = require('./utils/browserManager');
 const presets = require('./config/presets.json');
+
+const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
 
 // Handler registry - add new handlers here
 const handlers = {
@@ -17,7 +20,7 @@ const handlers = {
   setup_cover: require('./actions/setup_cover'),
   add_friend: require('./actions/add_friend'),
   visit_profile: require('./actions/visit_profile'),
-  share_post: require('./actions/share_post')
+  share_post: require('./actions/share_post'),
 };
 
 // Network-related error patterns that are worth retrying
@@ -33,16 +36,16 @@ const NETWORK_ERROR_PATTERNS = [
   'ECONNREFUSED',
   'ETIMEDOUT',
   'Timeout',
-  'timeout'
+  'timeout',
 ];
 
 const STEP_RETRY_ATTEMPTS = 3;
-const NETWORK_RETRY_WAIT_MS = 60000; // 1 minute — covers brief proxy disconnections
-const SELECTOR_RETRY_WAIT_MS = 5000; // 5 seconds — gives FB DOM time to settle
+const NETWORK_RETRY_WAIT_MS = 60000;
+const SELECTOR_RETRY_WAIT_MS = 5000;
 
 function isNetworkError(err) {
   const msg = err.message || '';
-  return NETWORK_ERROR_PATTERNS.some(pattern => msg.includes(pattern));
+  return NETWORK_ERROR_PATTERNS.some((pattern) => msg.includes(pattern));
 }
 
 /**
@@ -65,7 +68,7 @@ async function runWithRetry(fn, profileId, stepType) {
       const kind = isNetworkError(err) ? 'Network' : 'Step';
       console.warn(`[${profileId}] ${kind} error on ${stepType} (attempt ${attempt}/${STEP_RETRY_ATTEMPTS}): ${err.message}`);
       console.warn(`[${profileId}] Retrying in ${waitMs / 1000}s...`);
-      await new Promise(resolve => setTimeout(resolve, waitMs));
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
   }
 
@@ -73,13 +76,64 @@ async function runWithRetry(fn, profileId, stepType) {
 }
 
 /**
+ * Walk the step tree and inject user data into setup steps that have no explicit params.
+ * setup_about  — filled from user fields
+ * setup_avatar — photoUrl built from user.images[0]
+ * setup_cover  — photoUrl built from user.images[1]
+ *
+ * Explicit params in tasks.json always take priority.
+ */
+function injectUserParams(steps, user) {
+  return steps.map((step) => {
+    const s = { ...step };
+
+    if (step.type === 'setup_about' && !step.params) {
+      s.params = {
+        bio: user.bio,
+        city: user.city,
+        hometown: user.hometown,
+        personal: user.personal,
+        work: user.work,
+        education: user.education,
+        hobbies: user.hobbies,
+        travel: user.travel,
+      };
+    }
+
+    if (step.type === 'setup_avatar' && !(step.params && step.params.photoUrl)) {
+      const img = user.images && user.images[0];
+      if (img) {
+        s.params = {
+          ...(step.params || {}),
+          photoUrl: `${IMAGE_SERVER_BASE_URL}${img.imageId.filename}`,
+        };
+      }
+    }
+
+    if (step.type === 'setup_cover' && !(step.params && step.params.photoUrl)) {
+      const img = user.images && user.images[1];
+      if (img) {
+        s.params = {
+          ...(step.params || {}),
+          photoUrl: `${IMAGE_SERVER_BASE_URL}${img.imageId.filename}`,
+        };
+      }
+    }
+
+    if (s.steps) {
+      s.steps = injectUserParams(s.steps, user);
+    }
+
+    return s;
+  });
+}
+
+/**
  * Resolve a random_preset step into a preset and run its steps.
- * Params:
- *   from {string[]} — optional list of preset keys to pick from (defaults to all)
  */
 async function runRandomPreset(page, step, profileId) {
   const pool = (step.params && step.params.from) || Object.keys(presets);
-  const validKeys = pool.filter(k => presets[k]);
+  const validKeys = pool.filter((k) => presets[k]);
 
   if (!validKeys.length) throw new Error('random_preset: no valid presets available');
 
@@ -97,17 +151,13 @@ async function runRandomPreset(page, step, profileId) {
  * Execute a single step and recurse into child steps.
  */
 async function runStep(page, step, profileId) {
-  // random_preset is handled specially — resolves to a preset's steps
   if (step.type === 'random_preset') {
     await runRandomPreset(page, step, profileId);
     return;
   }
 
   const handler = handlers[step.type];
-
-  if (!handler) {
-    throw new Error(`Unknown step type: ${step.type}`);
-  }
+  if (!handler) throw new Error(`Unknown step type: ${step.type}`);
 
   console.log(`[${profileId}] Starting: ${step.type}`);
 
@@ -119,25 +169,25 @@ async function runStep(page, step, profileId) {
 
   console.log(`[${profileId}] Completed: ${step.type}`);
 
-  // Recurse into child steps if present
   if (step.steps && step.steps.length > 0) {
     for (const childStep of step.steps) {
+      const betweenMs = 5000 + Math.random() * 10000;
+      console.log(`[${profileId}] Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
+      await new Promise(r => setTimeout(r, betweenMs));
       await runStep(page, childStep, profileId);
     }
   }
 }
 
 /**
- * Execute all steps for a single browser.
+ * Execute all steps for a single browser session.
  */
-async function runBrowser(browserInfo, steps, options = {}) {
-  const { page, profileId } = browserInfo;
+async function runBrowser(session, steps, options = {}) {
+  const { page, profileId, user } = session;
 
-  // Slow proxy tolerance — extend default navigation and action timeouts
-  page.setDefaultNavigationTimeout(90000); // 90s for page loads
-  page.setDefaultTimeout(60000);           // 60s for selectors/actions
+  page.setDefaultNavigationTimeout(90000);
+  page.setDefaultTimeout(60000);
 
-  // Block media resources to save bandwidth (images, video, audio, fonts)
   if (options.blockMedia !== false) {
     const BLOCKED_TYPES = new Set(['image', 'media', 'font']);
     console.log(`[${profileId}] Media blocking: ON`);
@@ -152,34 +202,45 @@ async function runBrowser(browserInfo, steps, options = {}) {
     console.log(`[${profileId}] Media blocking: OFF`);
   }
 
-  // Ensure the browser starts on Facebook before any steps run
   const currentUrl = page.url();
-  const isOnFacebook = currentUrl.includes('facebook.com');
-  if (!isOnFacebook) {
+  if (!currentUrl.includes('facebook.com')) {
     console.log(`[${profileId}] Not on Facebook — navigating to homepage first...`);
     await page.goto('https://www.facebook.com', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2000 + Math.random() * 1500);
   }
 
-  for (const step of steps) {
-    await runStep(page, step, profileId);
+  const injectedSteps = user ? injectUserParams(steps, user) : steps;
+
+  for (let i = 0; i < injectedSteps.length; i++) {
+    if (i > 0) {
+      const betweenMs = 5000 + Math.random() * 10000;
+      console.log(`[${profileId}] Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
+      await new Promise(r => setTimeout(r, betweenMs));
+    }
+    await runStep(page, injectedSteps[i], profileId);
   }
+
+  const doneMs = 10000 + Math.random() * 5000;
+  console.log(`[${profileId}] Task done — cooling down ${(doneMs / 1000).toFixed(1)}s...`);
+  await new Promise(r => setTimeout(r, doneMs));
 
   return { profileId, status: 'success' };
 }
 
 /**
- * Run browserInfos with a sliding concurrency window.
- * At most `limit` browsers run at the same time; as each finishes the next starts.
+ * Run sessions with a sliding concurrency window.
+ * Each session has its own steps (with user params already injected).
  */
-async function runWithConcurrency(browserInfos, steps, limit, options = {}) {
-  const results = new Array(browserInfos.length);
-  const queue = [...browserInfos.entries()]; // [[index, browserInfo], ...]
+async function runWithConcurrency(sessions, limit, options = {}) {
+  const results = new Array(sessions.length);
+  const queue = [...sessions.entries()];
 
   async function worker() {
     while (queue.length > 0) {
-      const [index, browserInfo] = queue.shift();
-      results[index] = await Promise.allSettled([runBrowser(browserInfo, steps, options)]).then(r => r[0]);
+      const [index, session] = queue.shift();
+      results[index] = await Promise.allSettled([
+        runBrowser(session, session.steps, options),
+      ]).then((r) => r[0]);
     }
   }
 
@@ -191,26 +252,29 @@ async function runWithConcurrency(browserInfos, steps, limit, options = {}) {
 /**
  * Run a complete task across multiple browsers in parallel.
  *
- * @param {Object} task - Task object with taskId, browsers, concurrency, steps
- * @returns {Promise<{taskId, results}>}
+ * @param {Object} task - Task object
+ *   browsers    {string[]} — explicit list of user IDs to run
+ *   concurrency {number}  — max parallel browsers (default: all)
+ *   blockMedia  {boolean} — block images/video/fonts (default: true)
+ *   steps       {Array}   — step tree
  */
 async function runTask(task) {
-  const { taskId, browsers: browserCount, concurrency, blockMedia, steps } = task;
-  const limit = concurrency && concurrency > 0 ? concurrency : browserCount;
-  const options = { blockMedia: blockMedia !== false }; // default true
+  const { taskId, profiles: userIds, concurrency, blockMedia, steps } = task;
+  const limit = concurrency && concurrency > 0 ? concurrency : userIds.length;
+  const options = { blockMedia: blockMedia !== false };
 
-  console.log(`\n=== Task ${taskId}: Starting with ${browserCount} browser(s), concurrency: ${limit}, blockMedia: ${options.blockMedia} ===\n`);
+  console.log(`\n=== Task ${taskId}: ${userIds.length} profile(s), concurrency: ${limit}, blockMedia: ${options.blockMedia} ===\n`);
 
-  // Connect to Hidemium profiles
-  const browserInfos = await launchBrowsers(browserCount);
+  const browserInfos = await launchBrowsers(userIds);
   console.log(`Connected to ${browserInfos.length} browser(s)\n`);
 
-  const results = await runWithConcurrency(browserInfos, steps, limit, options);
+  // Attach the base steps to each session; injectUserParams runs inside runBrowser
+  const sessions = browserInfos.map((info) => ({ ...info, steps }));
 
-  // Format results
+  const results = await runWithConcurrency(sessions, limit, options);
+
   const formattedResults = results.map((result, index) => {
     const profileId = browserInfos[index].profileId;
-
     if (result.status === 'fulfilled') {
       return { profileId, status: 'success' };
     } else {
@@ -219,12 +283,10 @@ async function runTask(task) {
     }
   });
 
-  console.log(`\n=== Task ${taskId}: Completed ===\n`);
+  await closeBrowsers(browserInfos);
 
-  return {
-    taskId,
-    results: formattedResults
-  };
+  console.log(`\n=== Task ${taskId}: Completed ===\n`);
+  return { taskId, results: formattedResults };
 }
 
 module.exports = { runTask, runStep };
