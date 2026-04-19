@@ -2,6 +2,7 @@
   "taskId": "homepage_test",
   "browsers": 1,
   "concurrency": 1,
+  "blockMedia": true,
   "steps": [
     {
       "type": "homepage_interaction",

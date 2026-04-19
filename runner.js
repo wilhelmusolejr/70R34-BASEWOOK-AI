@@ -102,22 +102,27 @@ async function runStep(page, step, profileId) {
 /**
  * Execute all steps for a single browser.
  */
-async function runBrowser(browserInfo, steps) {
+async function runBrowser(browserInfo, steps, options = {}) {
   const { page, profileId } = browserInfo;
 
   // Slow proxy tolerance — extend default navigation and action timeouts
   page.setDefaultNavigationTimeout(90000); // 90s for page loads
   page.setDefaultTimeout(60000);           // 60s for selectors/actions
 
-  // Block media resources to save data — images, video, audio, fonts
-  const BLOCKED_TYPES = new Set(['image', 'media', 'font']);
-  await page.route('**/*', (route) => {
-    if (BLOCKED_TYPES.has(route.request().resourceType())) {
-      route.abort();
-    } else {
-      route.continue();
-    }
-  });
+  // Block media resources to save bandwidth (images, video, audio, fonts)
+  if (options.blockMedia !== false) {
+    const BLOCKED_TYPES = new Set(['image', 'media', 'font']);
+    console.log(`[${profileId}] Media blocking: ON`);
+    await page.route('**/*', (route) => {
+      if (BLOCKED_TYPES.has(route.request().resourceType())) {
+        route.abort();
+      } else {
+        route.continue();
+      }
+    });
+  } else {
+    console.log(`[${profileId}] Media blocking: OFF`);
+  }
 
   // Ensure the browser starts on Facebook before any steps run
   const currentUrl = page.url();
@@ -139,14 +144,14 @@ async function runBrowser(browserInfo, steps) {
  * Run browserInfos with a sliding concurrency window.
  * At most `limit` browsers run at the same time; as each finishes the next starts.
  */
-async function runWithConcurrency(browserInfos, steps, limit) {
+async function runWithConcurrency(browserInfos, steps, limit, options = {}) {
   const results = new Array(browserInfos.length);
   const queue = [...browserInfos.entries()]; // [[index, browserInfo], ...]
 
   async function worker() {
     while (queue.length > 0) {
       const [index, browserInfo] = queue.shift();
-      results[index] = await Promise.allSettled([runBrowser(browserInfo, steps)]).then(r => r[0]);
+      results[index] = await Promise.allSettled([runBrowser(browserInfo, steps, options)]).then(r => r[0]);
     }
   }
 
@@ -162,16 +167,17 @@ async function runWithConcurrency(browserInfos, steps, limit) {
  * @returns {Promise<{taskId, results}>}
  */
 async function runTask(task) {
-  const { taskId, browsers: browserCount, concurrency, steps } = task;
+  const { taskId, browsers: browserCount, concurrency, blockMedia, steps } = task;
   const limit = concurrency && concurrency > 0 ? concurrency : browserCount;
+  const options = { blockMedia: blockMedia !== false }; // default true
 
-  console.log(`\n=== Task ${taskId}: Starting with ${browserCount} browser(s), concurrency: ${limit} ===\n`);
+  console.log(`\n=== Task ${taskId}: Starting with ${browserCount} browser(s), concurrency: ${limit}, blockMedia: ${options.blockMedia} ===\n`);
 
   // Connect to Hidemium profiles
   const browserInfos = await launchBrowsers(browserCount);
   console.log(`Connected to ${browserInfos.length} browser(s)\n`);
 
-  const results = await runWithConcurrency(browserInfos, steps, limit);
+  const results = await runWithConcurrency(browserInfos, steps, limit, options);
 
   // Format results
   const formattedResults = results.map((result, index) => {

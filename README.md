@@ -180,6 +180,7 @@ No server needed. Output goes directly to the terminal.
 
 - **`browsers`** — total number of profiles to run the task across
 - **`concurrency`** — how many browsers run at the same time (optional, defaults to `browsers` — all at once). Use this to cap parallel load on low-spec machines.
+- **`blockMedia`** — block images, video, audio, and fonts to save bandwidth (optional, default `true`). Set to `false` if an action needs to see images (e.g. `setup_avatar`).
 
 ### Step shape
 
