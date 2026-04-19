@@ -36,7 +36,8 @@ const NETWORK_ERROR_PATTERNS = [
 ];
 
 const STEP_RETRY_ATTEMPTS = 3;
-const STEP_RETRY_WAIT_MS = 60000; // 1 minute — covers brief proxy disconnections
+const NETWORK_RETRY_WAIT_MS = 60000; // 1 minute — covers brief proxy disconnections
+const SELECTOR_RETRY_WAIT_MS = 5000; // 5 seconds — gives FB DOM time to settle
 
 function isNetworkError(err) {
   const msg = err.message || '';
@@ -44,8 +45,9 @@ function isNetworkError(err) {
 }
 
 /**
- * Execute a handler with retry logic for network errors.
- * Non-network errors (bad selectors, logic errors) fail immediately — no retry.
+ * Execute a handler with retry logic for all errors.
+ * Network errors wait 60s between attempts (proxy recovery).
+ * Selector/logic errors wait 5s (DOM may not be ready yet).
  */
 async function runWithRetry(fn, profileId, stepType) {
   let lastError;
@@ -56,15 +58,13 @@ async function runWithRetry(fn, profileId, stepType) {
     } catch (err) {
       lastError = err;
 
-      if (!isNetworkError(err)) {
-        throw err; // Logic/selector errors — don't retry
-      }
+      if (attempt >= STEP_RETRY_ATTEMPTS) break;
 
-      if (attempt < STEP_RETRY_ATTEMPTS) {
-        console.warn(`[${profileId}] Network error on ${stepType} (attempt ${attempt}/${STEP_RETRY_ATTEMPTS}): ${err.message}`);
-        console.warn(`[${profileId}] Waiting ${STEP_RETRY_WAIT_MS / 1000}s before retry...`);
-        await new Promise(resolve => setTimeout(resolve, STEP_RETRY_WAIT_MS));
-      }
+      const waitMs = isNetworkError(err) ? NETWORK_RETRY_WAIT_MS : SELECTOR_RETRY_WAIT_MS;
+      const kind = isNetworkError(err) ? 'Network' : 'Step';
+      console.warn(`[${profileId}] ${kind} error on ${stepType} (attempt ${attempt}/${STEP_RETRY_ATTEMPTS}): ${err.message}`);
+      console.warn(`[${profileId}] Retrying in ${waitMs / 1000}s...`);
+      await new Promise(resolve => setTimeout(resolve, waitMs));
     }
   }
 
@@ -118,6 +118,15 @@ async function runBrowser(browserInfo, steps) {
       route.continue();
     }
   });
+
+  // Ensure the browser starts on Facebook before any steps run
+  const currentUrl = page.url();
+  const isOnFacebook = currentUrl.includes('facebook.com');
+  if (!isOnFacebook) {
+    console.log(`[${profileId}] Not on Facebook — navigating to homepage first...`);
+    await page.goto('https://www.facebook.com', { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(2000 + Math.random() * 1500);
+  }
 
   for (const step of steps) {
     await runStep(page, step, profileId);
