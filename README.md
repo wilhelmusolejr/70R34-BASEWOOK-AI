@@ -1,6 +1,6 @@
-# 70R34 BASEWOOK AI — Facebook Automation Platform
+# 70R34 BASEWOOK AI — Automation Platform
 
-A Node.js backend that receives JSON task commands and executes automation sequences across multiple Facebook accounts **in parallel** using [Hidemium](https://hidemium.io) anti-detect browser profiles controlled via Playwright + CDP.
+A Node.js backend that receives JSON task commands and executes automation sequences across multiple BASEWOOK accounts **in parallel** using [Hidemium](https://hidemium.io) anti-detect browser profiles controlled via Playwright + CDP.
 
 ---
 
@@ -47,7 +47,7 @@ HTTP POST /execute  →  runner.js (recursive step walker)
 |---|---|
 | **Node.js 18+** | [nodejs.org](https://nodejs.org) |
 | **Hidemium** | Must be installed and running on the same machine. [hidemium.io](https://hidemium.io) |
-| **Hidemium profiles** | Profiles must exist and be **logged into Facebook** before running tasks |
+| **Hidemium profiles** | Profiles must exist and be **logged into BASEWOOK** before running tasks |
 | **Hidemium API token** | Settings → Generate token inside Hidemium |
 | **GitHub Models token** *(optional)* | Only needed for AI-generated share messages |
 
@@ -78,7 +78,7 @@ const API_TOKEN = "YOUR_HIDEMIUM_TOKEN_HERE";
 
 ### 4. Add your Hidemium profile IDs
 
-Edit `config/profiles.json`. Add one entry per Facebook account:
+Edit `config/profiles.json`. Add one entry per BASEWOOK account:
 
 ```json
 [
@@ -207,7 +207,7 @@ No server needed. Output goes directly to the terminal.
   "steps": [
     {
       "type": "visit_profile",
-      "params": { "url": "https://www.facebook.com/john.smith" },
+      "params": { "url": "https://www.basewook.com/john.smith" },
       "steps": [
         { "type": "add_friend" }
       ]
@@ -233,7 +233,7 @@ Each of the 5 browsers runs this entire sequence independently and in parallel.
 
 | Action | Params | Description |
 |---|---|---|
-| `homepage_interaction` | *(none)* | Navigate to Facebook home feed |
+| `homepage_interaction` | *(none)* | Navigate to BASEWOOK home feed |
 | `visit_profile` | `url` (string) | Navigate to a profile page |
 
 ### Feed Actions
@@ -250,7 +250,7 @@ Each of the 5 browsers runs this entire sequence independently and in parallel.
 | Action | Params | Description |
 |---|---|---|
 | `add_friend` | *(none)* | Send a friend request on the current profile page |
-| `setup_about` | See CLAUDE.md | Fill all About page sections (bio, city, work, education, etc.) |
+| `setup_about` | See CLAUDE.md | Fill all About sections (bio, city, work, education, etc.) |
 | `setup_avatar` | `photoUrl` (string), `description` (string, optional) | Upload a profile picture from URL |
 | `setup_cover` | `photoUrl` (string) | Upload a cover photo from URL |
 
@@ -342,7 +342,7 @@ Each of the 5 browsers runs this entire sequence independently and in parallel.
 ## Important Notes
 
 - **Hidemium must be running** before starting the server — the platform connects to already-open profiles
-- **Profiles must be logged into Facebook** — the platform does not handle login
+- **Profiles must be logged into BASEWOOK** — the platform does not handle login
 - **One crash does not stop others** — each browser runs in isolation via `Promise.allSettled`
 - **Network errors are retried** — up to 3 attempts with 60s wait (covers proxy drops)
 - **Anti-detection is built in** — all actions use human-like mouse movement, typing delays, and randomized waits via `utils/humanBehavior.js`
