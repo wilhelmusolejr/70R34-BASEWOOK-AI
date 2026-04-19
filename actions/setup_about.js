@@ -370,8 +370,11 @@ async function setWork(page, workEntries) {
   const navigated = await clickSubsection(page, 'directory_work', 'Work experience');
   if (!navigated) { console.log('  [setup_about] Work section not found — skipping'); return; }
 
-  // If "Edit Workplace" is already present, work data exists — skip to avoid duplicates
-  const alreadyHasWork = await page.$('[aria-label="Edit Workplace"]').then(el => !!el).catch(() => false);
+  // Wait for the work section to render, then check for existing entries
+  await humanWait(page, 1500, 2500);
+  const alreadyHasWork = await page.waitForSelector('[aria-label="Edit Workplace"]', { timeout: 4000 })
+    .then(() => true)
+    .catch(() => false);
   if (alreadyHasWork) {
     console.log('  [setup_about] Work data already exists — skipping');
     return;
@@ -458,7 +461,10 @@ async function setEducation(page, education) {
   if (education.college && education.college.name) {
     const col = education.college;
 
-    const alreadyHasCollege = await page.$('[aria-label="Edit college"]').then(el => !!el).catch(() => false);
+    await humanWait(page, 1000, 2000);
+    const alreadyHasCollege = await page.waitForSelector('[aria-label="Edit college"]', { timeout: 4000 })
+      .then(() => true)
+      .catch(() => false);
     if (alreadyHasCollege) {
       console.log('  [setup_about] College data already exists — skipping');
     } else {
@@ -514,7 +520,10 @@ async function setEducation(page, education) {
   if (education.highSchool && education.highSchool.name) {
     const hs = education.highSchool;
 
-    const alreadyHasHs = await page.$('[aria-label="Edit school"]').then(el => !!el).catch(() => false);
+    await humanWait(page, 1000, 2000);
+    const alreadyHasHs = await page.waitForSelector('[aria-label="Edit school"]', { timeout: 4000 })
+      .then(() => true)
+      .catch(() => false);
     if (alreadyHasHs) {
       console.log('  [setup_about] High school data already exists — skipping');
     } else {
