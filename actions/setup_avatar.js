@@ -75,11 +75,16 @@ module.exports = async function setup_avatar(page, params) {
     await fileChooser.setFiles(tmpPath);
     console.log('File input set, waiting for upload...');
 
-    // 6. Wait for upload to complete — FB shows reposition text once image is ready
-    await page.waitForSelector(
+    // 6. Wait for upload to complete — try reposition text first, fall back to Save button appearing
+    const uploadReady = await page.waitForSelector(
       'xpath=//span[text()="Drag or use arrow keys to reposition image"]',
       { timeout: 30000 }
-    );
+    ).then(() => 'reposition').catch(() => null);
+
+    if (!uploadReady) {
+      console.log('Reposition text not found — waiting for Save button as fallback...');
+      await page.waitForSelector('div[aria-label="Save"][role="button"]', { timeout: 15000 });
+    }
     console.log('Image uploaded, ready to save...');
     await humanWait(page, 1000, 2000);
 
@@ -99,7 +104,7 @@ module.exports = async function setup_avatar(page, params) {
 
     // 8. Click Save
     const saveBtn = await page.waitForSelector(
-      'xpath=//div[@role="button"][.//span[text()="Save"]]',
+      'div[aria-label="Save"][role="button"]',
       { timeout: 8000 }
     );
     const saveBox = await saveBtn.boundingBox();
