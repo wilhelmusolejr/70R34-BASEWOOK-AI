@@ -61,7 +61,7 @@ async function generateMessage(userIdentity, postContext) {
       2. Write a Facebook comment or opinion in the "USER PERSONA" typing style, as if reacting to the post.
 
       CONSTRAINTS:
-      - LANGUAGE: Detect the country or region from the USER PERSONA (e.g. "from Manila" → Filipino/Tagalog, "from Jakarta" → Indonesian, "from Sacramento" → English, "from Paris" → French). Write the message in the native language of that location. If no location is mentioned, default to English.
+      - LANGUAGE: Always write in English regardless of the persona's location.
       - VARIETY: Never start with "Check this out", "Pretty cool", "Wow", or "Interesting."
       - TYPING STYLE: Match how a real person types in that language. Use casual, natural phrasing — not textbook-formal. Include local slang or expressions if it fits the persona.
       - DYNAMIC RESPONSE: If the post is news, react to the news. If it's a product, react to the utility. If it's a joke, react to the humor. If it's an opinion, agree or push back.
