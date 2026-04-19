@@ -1,0 +1,626 @@
+# Facebook Automation Platform
+
+## What this project does
+
+A Node.js backend that receives JSON task commands and executes automation
+sequences across multiple Facebook accounts in parallel using Hidemium
+anti-detect browser profiles controlled via Playwright + CDP.
+
+Currently accepts JSON directly via `POST /execute`. A natural-language →
+JSON chat layer will be added later as a separate client that generates
+JSON and hits the same endpoint.
+
+## Tech stack
+
+- **Node.js + Express** — HTTP server exposing the task endpoint
+- **Playwright** — Browser automation, connecting via CDP
+- **Hidemium** — Anti-detect browser (must be running with profiles already launched)
+- **No database yet** — Tasks are ephemeral; add SQLite when persistence is needed
+
+## Project structure
+
+```
+fb-automation-platform/
+├── CLAUDE.md                    # This file
+├── package.json
+├── .gitignore
+├── server.js                    # Express entry point, POST /execute
+├── runner.js                    # Recursive step runner (core logic)
+├── config/
+│   └── profiles.json            # Hidemium profile IDs + CDP ports
+├── schemas/
+│   └── actionSchemas.js         # Single source of truth for action params
+├── actions/                     # One file per action handler
+│   ├── homepage_interaction.js
+│   ├── visit_profile.js         # Navigate to a profile by URL (navigator)
+│   ├── visit_group.js
+│   ├── visit_post.js
+│   ├── search.js
+│   ├── scroll.js
+│   ├── like_posts.js            # Like posts on current page (feed-aware)
+│   ├── share_posts.js           # Share posts on current page (feed-aware)
+│   ├── share_post.js            # Share a specific post by URL
+│   ├── comment_post.js
+│   ├── add_friend.js            # Send friend request on current profile page
+│   ├── follow.js
+│   ├── join_group.js
+│   ├── send_message.js
+│   ├── setup_about.js           # Fill Facebook About page sections
+│   ├── setup_avatar.js          # Upload profile picture from URL
+│   ├── setup_cover.js           # Upload cover photo from URL
+│   └── wait.js
+├── utils/
+│   ├── browserManager.js        # The ONLY file that knows about Hidemium
+│   ├── humanBehavior.js         # Human-like interaction utilities
+│   ├── claudeApi.js             # Stubbed — extractPostContext still used by share_post.js
+│   └── generateMessage.js       # GitHub Models API — generates share messages
+├── utils/
+│   ├── browserManager.js        # The ONLY file that knows about Hidemium
+│   └── humanBehavior.js         # Human-like interaction utilities (keep in structure for reference)
+├── run-task.js                  # Run tasks.json directly (no server)
+├── tasks.json                   # Editable task file for manual runs
+└── chat/                        # (future) NL → JSON converter
+    └── nlToJson.js
+```
+
+## Core pattern: recursive steps
+
+Every JSON step has this shape:
+
+```json
+{
+  "type": "action_name",
+  "params": { ... },     // optional, shape varies per action
+  "steps": [ ... ]       // optional, only for container actions
+}
+```
+
+**Two kinds of actions:**
+
+1. **Navigators** change what page the browser is showing
+   (`visit_profile`, `search`, `visit_group`, `homepage_interaction`)
+2. **Leaves** act on whatever page is currently showing
+   (`add_friend`, `scroll`, `like_posts`, `comment_post`)
+
+**The runner walks steps recursively:**
+
+```javascript
+async function runStep(page, step) {
+  const handler = handlers[step.type];
+  if (!handler) throw new Error(`Unknown step type: ${step.type}`);
+
+  await handler(page, step.params || {});
+
+  if (step.steps) {
+    for (const child of step.steps) {
+      await runStep(page, child);
+    }
+  }
+}
+```
+
+**Handlers NEVER call other handlers.** They only do their one job. Chaining
+happens via the `steps` array in JSON, not via code.
+
+## Example JSON tasks
+
+**Simple — visit profile and add friend:**
+```json
+{
+  "taskId": "t1",
+  "browsers": 5,
+  "steps": [
+    {
+      "type": "visit_profile",
+      "params": { "url": "https://facebook.com/john.smith" },
+      "steps": [{ "type": "add_friend" }]
+    }
+  ]
+}
+```
+
+**Complex — multi-task with nested steps:**
+```json
+{
+  "taskId": "t2",
+  "browsers": 10,
+  "steps": [
+    {
+      "type": "comment_post",
+      "params": {
+        "url": "https://facebook.com/some/post",
+        "comment": "Great post!"
+      }
+    },
+    {
+      "type": "homepage_interaction",
+      "steps": [
+        { "type": "scroll", "params": { "duration": 30 } },
+        { "type": "share_posts", "params": { "count": 2 } }
+      ]
+    },
+    {
+      "type": "search",
+      "params": { "searchTerm": "John Smith", "pickFirst": true },
+      "steps": [{ "type": "add_friend" }]
+    }
+  ]
+}
+```
+
+## Hidemium integration
+
+`utils/browserManager.js` is the **only** file that knows about Hidemium.
+Handlers receive a Playwright `page` object and don't care where it came from.
+
+Profiles must be launched in Hidemium (manually or via its API) before the
+server tries to attach. Playwright connects via CDP:
+
+```javascript
+const browser = await chromium.connectOverCDP(`http://127.0.0.1:${profile.port}`);
+```
+
+`config/profiles.json` lists available profiles:
+```json
+[
+  { "id": "profile_001", "port": 9222, "label": "US Account 1" },
+  { "id": "profile_002", "port": 9223, "label": "US Account 2" }
+]
+```
+
+## Playwright conventions (learned from hidemium-autopilot)
+
+Facebook aggressively detects automation. Follow these rules in every handler:
+
+- **Feed/content scrolling:** use `page.mouse.wheel(0, 500)` — NEVER
+  `window.scrollTo` or `element.scrollIntoView` on the main feed. JS-driven
+  scroll on the feed is trivially detected (no acceleration curve, wrong event source).
+- **Form element scrolling:** `element.scrollIntoViewIfNeeded()` is acceptable
+  inside About page panels and modals — these are isolated containers, not the
+  feed, so scroll event monitoring is not active there. Use `scrollToCenter`
+  from `humanBehavior.js` if you need mouse-wheel scroll for a specific element.
+- **Clicking:** use bounding-box clicks via `page.mouse.click(x, y)` where
+  possible, especially for virtualized/React-rendered elements. Locator
+  clicks can fail silently on FB's React DOM.
+- **Typing:** use `page.keyboard.type(text, { delay: 50 + Math.random() * 100 })`
+  with per-character delay — no instant-paste typing.
+- **Waits:** between actions, always add human-like randomized delays:
+  `await page.waitForTimeout(1000 + Math.random() * 2000)`.
+- **Two-pass pattern:** for feeds with virtualized DOM, scroll first to
+  trigger render, then interact — don't assume elements exist on first look.
+- **Scroll before click (forms):** call `element.scrollIntoViewIfNeeded()` before
+  clicking form fields inside panels/modals. Elements off-screen return null
+  bounding boxes and cause missed clicks.
+
+## Human-like behavior (`utils/humanBehavior.js`)
+
+All action handlers MUST use the shared human behavior utilities to avoid
+detection. Import and use these in every handler:
+
+```javascript
+const {
+  humanDelay,      // Gaussian-ish random delay (not uniform)
+  humanWait,       // await humanWait(page, min, max)
+  humanClick,      // Move mouse smoothly → hover → click with offset
+  humanType,       // Type with varied per-character delay
+  scrollToCenter   // Scroll element into viewport center
+} = require('../utils/humanBehavior');
+```
+
+**Why these matter:**
+
+| Behavior | Detectable Pattern | Human-like Alternative |
+|----------|-------------------|----------------------|
+| Uniform delays | `waitForTimeout(1000)` always | `humanWait(page, 800, 1500)` varies |
+| Instant mouse teleport | `mouse.click(x, y)` directly | `humanMouseMove` then click |
+| Dead-center clicks | Always `box.x + width/2` | Random offset within center 60% |
+| Uniform typing | Same delay per char | Longer after punctuation/spaces |
+
+**Rules:**
+
+- NEVER use `page.waitForTimeout(fixedValue)` — always `humanWait(min, max)`
+- NEVER click without moving mouse first — use `humanClick(page, box)`
+- NEVER type without varied delays — use `humanType(page, text)`
+- Add "reading pauses" before interactions (800-1500ms)
+- Add "watching pauses" after actions complete (1000-2500ms)
+
+## Conventions
+
+- **Adding a new action:**
+  1. Add its schema entry to `schemas/actionSchemas.js` first
+  2. Create `actions/<action_name>.js` exporting `async (page, params) => {...}`
+  3. Register it in the handler map in `runner.js`
+- **Handlers:** validate required params at the top, throw clear errors
+- **Params:** use defaults for optional params (`params.count ?? 1`)
+- **Errors:** per-browser failures must NOT kill the task — use
+  `Promise.allSettled` in the runner
+- **Logging:** log per browser, per step, with profile ID — you'll need it
+- **File size:** one action = one file, keep them small and focused
+
+## What NOT to do
+
+- **Don't create combination action types** like `search_and_add` or
+  `homepage_interaction_and_like`. Combinations live in the `steps` array,
+  NOT in type names. If you're about to create a type with "and" in the
+  name, stop and nest steps instead.
+- **Don't hardcode URLs, comments, names, or counts** — everything the user
+  would want to change goes in `params`.
+- **Don't let handlers call other handlers.** The recursive runner handles
+  chaining. Handlers do one job only.
+- **Don't skip per-browser error isolation.** If one browser crashes on
+  step 2, the others should continue.
+- **Don't use JS-driven scrolls or instant-paste typing** — anti-detection.
+- **Don't put Hidemium-specific code outside `utils/browserManager.js`.**
+
+## `setup_about` — Facebook About page automation
+
+`actions/setup_about.js` fills every section of the Facebook About page for the
+logged-in account. It self-navigates (no `profileUrl` param needed) and covers:
+bio, city/hometown, relationship status, work, education, hobbies, interests,
+travel, and name pronunciation.
+
+### Navigation pattern
+
+```
+facebook.com/me  →  click About tab  →  click sidebar link  →  click panel button  →  fill form  →  save
+```
+
+- **About tab:** `a[href*="sk=about"][role="tab"]`
+- **Sidebar links:** `a[href*="sk=SECTION"]` — confirmed sk values:
+
+| Section | sk value |
+|---------|----------|
+| Intro (bio) | `directory_intro` |
+| Personal Details (city, hometown, relationship) | `directory_personal_details` |
+| Work | `directory_work` |
+| Education | `directory_education` |
+| Hobbies | `directory_activites` *(Facebook typo — not "activities")* |
+| Interests | `directory_interests` |
+| Travel | `directory_travel` |
+| Names | `directory_names` |
+
+- **Panel buttons** (open the inline form within each section) have no `aria-label`.
+  Use XPath on descendant text:
+  `xpath=//div[@role="button"][.//span[text()="Button Text"]]`
+
+### Key internal helpers
+
+| Helper | Purpose |
+|--------|---------|
+| `typeAndSelect(page, selector, value)` | Click input → clear → type → ArrowDown → Enter (picks first suggestion) |
+| `selectYearFromDropdown(page, selector, year)` | Open FB year dropdown → XPath-click matching year option |
+| `clickPanelButton(page, spanText)` | Click a `div[role="button"]` by its inner span text |
+| `setPanelPrivacyPublic(page)` | Open privacy picker → select Public → close modal |
+| `fillPanelWithItems(page, panelText, items)` | Full flow: open panel → set privacy → add items → save |
+| `waitForSaveComplete(page, saveBtnSelector, panelText)` | After save click: wait 10-15s, check save btn is gone, verify panel closed |
+
+### Save patterns
+
+Facebook About uses **three different save button types**:
+
+| Context | Save selector |
+|---------|--------------|
+| Inline panel forms (bio, personal details, hobbies, interests, travel, names) | `xpath=//span[text()="Save"]` |
+| Current city | `[aria-label="Current city save"]` |
+| Hometown | `[aria-label="Hometown save"]` |
+| Bio (`div[role="button"]` form) | `div[role="button"][aria-label="Save"]` |
+
+Always use `waitForSaveComplete` after clicking save — it retries up to 3×
+(10-15s initial + 5-10s retries) checking that the save button disappears and
+the panel form closes before moving to the next section.
+
+### Duplicate prevention
+
+Before adding data, check for the edit button that only appears when data exists:
+
+| Section | Duplicate check selector |
+|---------|--------------------------|
+| Work | `[aria-label="Edit Workplace"]` |
+| College | `[aria-label="Edit college"]` |
+| High school | `[aria-label="Edit school"]` |
+
+### Known Facebook selectors (confirmed working)
+
+```
+Bio textarea:           textarea[aria-describedby]  or  //textarea[@maxlength="101"]
+Current city input:     [aria-label="Current city"]
+Hometown input:         [aria-label="Hometown"]
+Relationship dropdown:  [aria-label="Select your relationship status"]
+Relationship year:      [aria-label="Edit ending date  year. Current selection is none"]  (double space)
+Company input:          [aria-label="Company"]
+Position input:         [aria-label="Position"]
+Work start year:        [aria-label="Edit starting date workplace year. Current selection is none"]
+Work end year:          [aria-label="Edit ending date workplace year. Current selection is none"]
+Currently work here:    input[name="is_current"]
+College name:           [aria-label="College name"]
+College start year:     [aria-label="Edit starting date college year. Current selection is none"]
+College end year:       [aria-label="Edit ending date college year. Current selection is none"]
+HS school name:         [aria-label="School"]
+HS start year:          [aria-label="Edit starting date secondary school year. Current selection is none"]
+HS end year:            [aria-label="Edit ending date secondary school year. Current selection is none"]
+Graduated checkbox:     input[aria-label="Graduated"]  (default unchecked — only click if graduated: true)
+Hobbies/Interest input: input[aria-label="Search"][role="combobox"]
+Place visited input:    [aria-label="Place visited"]  (use page.$$() and take last element for multi-place)
+Privacy button:         [aria-label="Edit privacy. Sharing with Your friends of friends. "]
+Privacy public radio:   //label[.//span[text()="Public"]]//input[@type="radio"]
+Privacy done button:    [aria-label="Done with privacy audience selection and close dialog"]
+First name pronunc.:    (//input[@name="firstname-pronunciation"])[N]  where N = 1|2|3
+Last name pronunc.:     input[name="lastname-pronunciation"][type="radio"]
+```
+
+## `setup_avatar` — Profile picture upload
+
+`actions/setup_avatar.js` uploads a profile picture from a URL for the logged-in
+account. Self-navigates to `/me` — no `profileUrl` param needed.
+
+### Navigation pattern
+
+```
+facebook.com/me  →  Profile picture actions  →  Choose profile picture  →  Upload photo (file chooser)  →  wait for reposition text  →  Save
+```
+
+### Key implementation notes
+
+- **File download:** image is downloaded to `os.tmpdir()` via Node `https`/`http`,
+  then deleted in a `finally` block after upload.
+- **File chooser:** use `Promise.all([page.waitForEvent('filechooser'), btn.click()])` +
+  `fileChooser.setFiles(path)` — do NOT use `setInputFiles` on the hidden input directly.
+  Clicking "Upload photo" opens the OS file picker; intercepting the `filechooser` event
+  is the correct Playwright pattern.
+- **Upload complete signal:** wait for `xpath=//span[text()="Drag or use arrow keys to reposition image"]`
+  before proceeding — this appears once FB finishes processing the image.
+- **Description:** optional param, defaults to `""`. Only typed if non-empty.
+
+### Confirmed selectors
+
+```
+Profile picture actions btn:  [aria-label="Profile picture actions"]
+Choose profile picture:       xpath=//div[@role="menuitem"][.//span[text()="Choose profile picture"]]
+Upload photo btn:             [aria-label="Upload photo"]
+File input (hidden):          input[type="file"][accept*="image"]  (state: 'attached')
+Upload complete signal:       xpath=//span[text()="Drag or use arrow keys to reposition image"]
+Description textarea:         xpath=//label[.//span[text()="Description"]]//textarea
+Save button:                  xpath=//div[@role="button"][.//span[text()="Save"]]
+```
+
+### Params
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `photoUrl` | string | yes | Public URL of image to upload |
+| `description` | string | no (default `""`) | Caption for the profile picture post |
+
+## `setup_cover` — Cover photo upload
+
+`actions/setup_cover.js` uploads a cover photo from a URL. Self-navigates to `/me`.
+
+### Navigation pattern
+
+```
+facebook.com/me  →  Add cover photo  →  Upload photo (menuitem, file chooser)  →  wait for Save changes enabled  →  Save
+```
+
+### Key implementation notes
+
+- **"Add cover photo" button** uses direct `.click()` — `humanClick` bounding-box misses it.
+- **"Save changes"** starts as `aria-disabled="true"` while image processes. Wait for
+  `:not([aria-disabled="true"])` before clicking, then use direct `.click()`.
+- Same `filechooser` intercept pattern as `setup_avatar`.
+
+### Confirmed selectors
+
+```
+Add cover photo btn:    [aria-label="Add cover photo"]
+Upload photo menuitem:  xpath=//div[@role="menuitem"][.//span[text()="Upload photo"]]
+Save changes (enabled): div[role="button"][aria-label="Save changes"]:not([aria-disabled="true"])
+```
+
+## `visit_profile` + `add_friend` — Profile visit and friend request
+
+- `visit_profile` is a **navigator** — navigates to a profile URL, then child steps act on it.
+- `add_friend` is a **leaf** — clicks the Add Friend button on the currently loaded profile.
+- `aria-label^="Add Friend"` prefix match handles the dynamic name (e.g. "Add Friend Joan").
+
+### Usage
+
+```json
+{
+  "type": "visit_profile",
+  "params": { "url": "https://www.facebook.com/some.profile" },
+  "steps": [{ "type": "add_friend" }]
+}
+```
+
+### Confirmed selectors
+
+```
+Add Friend button:  div[role="button"][aria-label^="Add Friend"]
+```
+
+## Virtualized feed — `like_posts` and `share_posts`
+
+Facebook's feed uses virtualized DOM — only posts near the viewport stay in the DOM.
+After a bulk scroll, old posts are removed and only ~4 near the bottom remain.
+
+**Never query all posts after a bulk scroll and expect to find many.**
+
+### Correct pattern (both `like_posts` and `share_posts`)
+
+Use `div[aria-posinset]` to enumerate currently-rendered posts, filter for those
+with the target button, pick randomly, scroll to each with `mouse.wheel`, act on it,
+then scroll a bit more to load new posts. Loop until target count reached.
+
+```javascript
+const allPosts = await page.$$('div[aria-posinset]');
+// filter by aria-posinset value (dedup) + presence of Like/Share button
+// shuffle candidates, pick one
+// scroll to it with mouse.wheel loop
+// act, then scroll down to load more
+```
+
+Track processed posts by `aria-posinset` value (unique per post) to avoid repeating.
+
+### Post context extraction — always use `post.evaluate()`
+
+To extract text/image/sub-description from a specific post, run it **inside the browser**
+on the exact element. Never use Playwright's `element.$('xpath=//...')` for this —
+`//` searches from document root regardless of scope.
+
+```javascript
+const postContext = await post.evaluate(el => {
+  const textEl = el.querySelector('[data-ad-rendering-role="story_message"] [dir="auto"]');
+  const imgEl  = el.querySelector('img[data-imgperflogname="feedImage"]');
+  const subEl  = el.querySelector('[data-ad-rendering-role="description"]');
+  return [
+    textEl ? textEl.innerText.trim() : '',
+    subEl  ? subEl.innerText.trim()  : '',
+    imgEl  ? `[Image: ${imgEl.getAttribute('alt')}]` : ''
+  ].filter(Boolean).join('\n');
+});
+```
+
+### Confirmed feed selectors
+
+```
+Virtualized post container:  div[aria-posinset]
+Like button (unliked):       [aria-label="Like"]       (within post container)
+Like confirmed:              [aria-label="Remove Like"]  (appears after successful like)
+Share button:                [aria-label="Send this to friends or post it on your profile."]
+Share modal confirm:         [aria-label="Share now"]
+Share message input:         [aria-placeholder="Say something about this..."]
+Post text:                   [data-ad-rendering-role="story_message"] [dir="auto"]
+Post image alt:              img[data-imgperflogname="feedImage"]  → getAttribute('alt')
+Post sub-description:        [data-ad-rendering-role="description"]
+```
+
+### Like verification
+
+After clicking Like, verify it registered by checking for `[aria-label="Unlike"]`
+in the same post container. If not found, retry once with fresh bounding box.
+
+### Timing
+
+Between likes: random 5–10s pause (human reading/browsing gap).
+
+## `share_post` — Share a specific post by URL
+
+Single-post version of `share_posts`. Navigates to the post URL directly, extracts
+context from the page, then shares with static `message` param OR Claude API-generated
+message via `userIdentity` + `instruction` params.
+
+## `utils/generateMessage.js` — GitHub Models API for share message generation
+
+Generates a human-sounding Facebook share message based on post context and user identity.
+Used by `share_posts` and `share_post` when `userIdentity` param is provided.
+
+### Env vars (set in `.env`)
+
+```
+GITHUB_MODELS_TOKEN       - GitHub personal access token with Models access
+GITHUB_MODELS_MODEL       - model name (default: openai/gpt-4.1)
+GITHUB_MODELS_BASE_URL    - API endpoint (default: https://models.github.ai/inference/chat/completions)
+GITHUB_MODELS_API_VERSION - API version header (default: 2026-03-10)
+```
+
+### Behavior
+
+- Returns a plain string ready to type into the share dialog
+- Returns `''` on any API error — share proceeds silently without a message
+- Returns `''` if model responds with `SKIP` (empty/unreadable post context)
+- Sanitizes output: em dashes (`—`), en dashes (`–`), and spaced hyphens (` - `) are replaced with a space. Hyphens inside words (e.g. "nature-loving") are preserved.
+
+### Prompt constraints baked in
+
+- 5–20 words, plain text only, no hashtags, no quotes
+- Matches persona typing style (casual, lowercase, slang if appropriate)
+- Never starts with "Check this out", "Pretty cool", "Wow", or "Interesting"
+- Reacts dynamically to post mood (news, humor, opinion, product)
+- Skips only if context is truly empty or contains random characters/codes
+
+### Usage in params
+
+```json
+{ "type": "share_posts", "params": { "count": 1, "userIdentity": "Dog lover from Sacramento..." } }
+```
+
+`userIdentity` alone triggers API generation. `message` (static) takes priority over API if both provided.
+
+## `utils/claudeApi.js` — Stubbed (kept for `extractPostContext` only)
+
+`generateShareMessage` is commented out — replaced by `utils/generateMessage.js`.
+`extractPostContext` is still used by `share_post.js` for full-page context extraction.
+
+## Network resilience — `runner.js`
+
+### Extended timeouts (set per browser at start of `runBrowser`)
+
+```javascript
+page.setDefaultNavigationTimeout(90000); // page loads
+page.setDefaultTimeout(60000);           // selectors / actions
+```
+
+### Step-level retry for network errors
+
+Every handler call is wrapped in `runWithRetry` — retries up to 3× with a 60s wait
+between attempts, but **only for network errors** (ERR_CONNECTION, ETIMEDOUT,
+ECONNRESET, proxy errors, timeout strings). Logic/selector errors throw immediately.
+
+```
+STEP_RETRY_ATTEMPTS = 3
+STEP_RETRY_WAIT_MS  = 60000  (covers brief proxy disconnections)
+```
+
+Non-network failures (wrong selector, bad params) fail fast — no retry.
+
+## Direct `.click()` vs `humanClick`
+
+| Context | Use |
+|---------|-----|
+| Feed/profile page buttons | `humanClick(page, box)` — mouse movement looks human |
+| FB modal/overlay buttons (cover photo, save, file upload) | `element.click()` directly — humanClick offset can miss small targets |
+| After scroll (fresh coordinates needed) | Always re-fetch `boundingBox()` right before clicking |
+
+## Current status / roadmap
+
+**Phase 1 (proof of concept) — DONE**
+- [x] server.js with POST /execute
+- [x] runner.js with recursive step executor
+- [x] utils/browserManager.js with Hidemium API integration (open/close profiles)
+- [x] utils/humanBehavior.js with anti-detection utilities
+- [x] Handlers: `homepage_interaction`, `scroll`, `like_posts`, `share_posts`
+- [x] Manual testing via `npm run task` with tasks.json
+
+**Phase 2 (feature expansion) — CURRENT**
+- [x] `setup_about` — fills all About page sections (bio, city, hometown, relationship,
+       work, education, hobbies, interests, travel, name pronunciation)
+- [x] `setup_avatar` — uploads profile picture from URL
+- [x] `setup_cover` — uploads cover photo from URL
+- [x] `visit_profile` — navigator action, navigate to profile by URL
+- [x] `add_friend` — send friend request on current profile page
+- [x] `share_post` — share a specific post by URL (static or API-generated message)
+- [x] `like_posts` + `share_posts` rewritten for virtualized feed (aria-posinset)
+- [x] Network resilience in runner (retry + extended timeouts for proxy drops)
+- [x] `utils/generateMessage.js` — GitHub Models API for share message generation (active)
+- [x] `.env` — env vars for GitHub Models token and model config
+- [ ] `comment_post`, `follow`, `join_group`, `send_message`
+- [ ] Enable Claude API for comment/share generation
+- [ ] Task state tracking (SQLite)
+- [ ] Per-task, per-browser logging
+
+**Phase 3 (chat layer)**
+- [ ] `chat/nlToJson.js` using Claude API with `schemas/actionSchemas.js`
+       as the contract
+- [ ] Web UI for chat input
+- [ ] Schema validation on generated JSON before execution
+
+## Notes for Claude Code
+
+When working on this project:
+
+- Before adding features, re-read the "Core pattern" section — it's
+  easy to accidentally violate recursive-steps thinking
+- When asked to add a new action, always update `schemas/actionSchemas.js`
+  in the same change
+- If a Facebook selector isn't working, assume FB changed the DOM (they
+  do this often) — try `page.pause()` and inspect live
+- Prefer small, composable handlers over clever large ones
