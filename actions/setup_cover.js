@@ -64,11 +64,14 @@ module.exports = async function setup_cover(page, params) {
     await fileChooser.setFiles(tmpPath);
     console.log('File input set, waiting for save button...');
 
-    // 4. Wait for "Save changes" to become enabled (starts disabled while image processes)
-    const saveBtn = await page.waitForSelector(
-      'div[role="button"][aria-label="Save changes"]:not([aria-disabled="true"])',
-      { timeout: 30000 }
-    );
+    // 4. Wait for "Save changes" to appear, then poll until it's not aria-disabled
+    await page.waitForSelector('[aria-label="Save changes"]', { timeout: 15000 });
+    await page.waitForFunction(() => {
+      const btn = document.querySelector('[aria-label="Save changes"]');
+      return btn && btn.getAttribute('aria-disabled') !== 'true';
+    }, { timeout: 30000 });
+
+    const saveBtn = await page.$('[aria-label="Save changes"]');
     await humanWait(page, 1500, 2500);
     await saveBtn.click();
     console.log('Save changes clicked');
