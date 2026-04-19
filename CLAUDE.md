@@ -203,6 +203,7 @@ Expected user shape (relevant fields):
 - `images[0]` → avatar (has face annotation)
 - `images[1]` → cover photo
 - `browsers[0]` → always used (one provider per user)
+- `provider` field defaults to `"hidemium"` if empty or missing
 
 Image URLs are built as `IMAGE_SERVER_BASE_URL + imageId.filename`.
 

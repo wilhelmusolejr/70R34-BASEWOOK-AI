@@ -82,13 +82,14 @@ async function openBrowserForUser(userId) {
     throw new Error(`User ${userId} (${user.firstName} ${user.lastName}) has no browsers configured`);
   }
 
-  const { browserId, provider = 'hidemium' } = user.browsers[0];
+  const { browserId, provider } = user.browsers[0];
+  const resolvedProvider = provider || 'hidemium';
 
-  if (provider !== 'hidemium') {
-    throw new Error(`Unsupported browser provider: "${provider}"`);
+  if (resolvedProvider !== 'hidemium') {
+    throw new Error(`Unsupported browser provider: "${resolvedProvider}"`);
   }
 
-  console.log(`[browserManager] Opening browser for ${user.firstName} ${user.lastName} (${provider}: ${browserId.slice(-8)})`);
+  console.log(`[browserManager] Opening browser for ${user.firstName} ${user.lastName} (${resolvedProvider}: ${browserId.slice(-8)})`);
 
   const session = await openProfile(browserId);
   return { ...session, user };
