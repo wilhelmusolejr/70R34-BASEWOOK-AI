@@ -625,8 +625,8 @@ The href is always `"/"` regardless of notification state.
 - [ ] Per-task, per-browser logging
 
 **Phase 3 (chat layer)**
-- [ ] `chat/nlToJson.js` using Claude API with `schemas/actionSchemas.js`
-       as the contract
+- [x] `chat/nlToJson.js` — Claude API (Haiku) converts NL → task JSON using actionSchemas as the contract
+- [x] `chat.js` — interactive CLI: type instruction → preview JSON → confirm → writes tasks.json
 - [ ] Web UI for chat input
 - [ ] Schema validation on generated JSON before execution
 
