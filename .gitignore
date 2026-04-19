@@ -1,3 +1,7 @@
 node_modules/
 .env
 *.log
+config/profiles.json
+config/friend_targets.json
+tasks.json
+user.json
