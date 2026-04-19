@@ -1,9 +1,9 @@
-# Facebook Automation Platform
+# BASEWOOK Automation Platform
 
 ## What this project does
 
 A Node.js backend that receives JSON task commands and executes automation
-sequences across multiple Facebook accounts in parallel using Hidemium
+sequences across multiple BASEWOOK accounts in parallel using Hidemium
 anti-detect browser profiles controlled via Playwright + CDP.
 
 Currently accepts JSON directly via `POST /execute`. A natural-language →
@@ -20,43 +20,32 @@ JSON and hits the same endpoint.
 ## Project structure
 
 ```
-fb-automation-platform/
+70R34-BASEWOOK-AI/
 ├── CLAUDE.md                    # This file
 ├── package.json
 ├── .gitignore
 ├── server.js                    # Express entry point, POST /execute
 ├── runner.js                    # Recursive step runner (core logic)
 ├── config/
-│   └── profiles.json            # Hidemium profile IDs + CDP ports
+│   └── profiles.json            # Hidemium profile UUIDs (no port — assigned dynamically)
 ├── schemas/
 │   └── actionSchemas.js         # Single source of truth for action params
 ├── actions/                     # One file per action handler
-│   ├── homepage_interaction.js
+│   ├── homepage_interaction.js  # Navigate to home feed (href="/" button → goto fallback)
 │   ├── visit_profile.js         # Navigate to a profile by URL (navigator)
-│   ├── visit_group.js
-│   ├── visit_post.js
-│   ├── search.js
 │   ├── scroll.js
 │   ├── like_posts.js            # Like posts on current page (feed-aware)
 │   ├── share_posts.js           # Share posts on current page (feed-aware)
 │   ├── share_post.js            # Share a specific post by URL
-│   ├── comment_post.js
 │   ├── add_friend.js            # Send friend request on current profile page
-│   ├── follow.js
-│   ├── join_group.js
-│   ├── send_message.js
-│   ├── setup_about.js           # Fill Facebook About page sections
+│   ├── setup_about.js           # Fill About page sections
 │   ├── setup_avatar.js          # Upload profile picture from URL
-│   ├── setup_cover.js           # Upload cover photo from URL
-│   └── wait.js
+│   └── setup_cover.js           # Upload cover photo from URL
 ├── utils/
 │   ├── browserManager.js        # The ONLY file that knows about Hidemium
 │   ├── humanBehavior.js         # Human-like interaction utilities
 │   ├── claudeApi.js             # Stubbed — extractPostContext still used by share_post.js
 │   └── generateMessage.js       # GitHub Models API — generates share messages
-├── utils/
-│   ├── browserManager.js        # The ONLY file that knows about Hidemium
-│   └── humanBehavior.js         # Human-like interaction utilities (keep in structure for reference)
 ├── run-task.js                  # Run tasks.json directly (no server)
 ├── tasks.json                   # Editable task file for manual runs
 └── chat/                        # (future) NL → JSON converter
@@ -104,34 +93,41 @@ happens via the `steps` array in JSON, not via code.
 
 ## Example JSON tasks
 
+**Task-level fields:**
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `taskId` | yes | — | Unique identifier for the task |
+| `browsers` | yes | — | Total number of profiles to run across |
+| `concurrency` | no | `browsers` | Max browsers running at the same time |
+| `blockMedia` | no | `true` | Block images/video/audio/fonts to save bandwidth. Set `false` for `setup_avatar`/`setup_cover` |
+| `steps` | yes | — | Array of step objects |
+
 **Simple — visit profile and add friend:**
 ```json
 {
   "taskId": "t1",
   "browsers": 5,
+  "concurrency": 3,
+  "blockMedia": true,
   "steps": [
     {
       "type": "visit_profile",
-      "params": { "url": "https://facebook.com/john.smith" },
+      "params": { "url": "https://www.basewook.com/john.smith" },
       "steps": [{ "type": "add_friend" }]
     }
   ]
 }
 ```
 
-**Complex — multi-task with nested steps:**
+**Complex — multi-step with concurrency cap:**
 ```json
 {
   "taskId": "t2",
   "browsers": 10,
+  "concurrency": 3,
+  "blockMedia": true,
   "steps": [
-    {
-      "type": "comment_post",
-      "params": {
-        "url": "https://facebook.com/some/post",
-        "comment": "Great post!"
-      }
-    },
     {
       "type": "homepage_interaction",
       "steps": [
@@ -140,8 +136,8 @@ happens via the `steps` array in JSON, not via code.
       ]
     },
     {
-      "type": "search",
-      "params": { "searchTerm": "John Smith", "pickFirst": true },
+      "type": "visit_profile",
+      "params": { "url": "https://www.basewook.com/john.smith" },
       "steps": [{ "type": "add_friend" }]
     }
   ]
@@ -160,11 +156,12 @@ server tries to attach. Playwright connects via CDP:
 const browser = await chromium.connectOverCDP(`http://127.0.0.1:${profile.port}`);
 ```
 
-`config/profiles.json` lists available profiles:
+`config/profiles.json` lists available profiles. Only `id` and `label` are needed —
+the CDP port is assigned dynamically by Hidemium at open time (`data.data.remote_port`):
 ```json
 [
-  { "id": "profile_001", "port": 9222, "label": "US Account 1" },
-  { "id": "profile_002", "port": 9223, "label": "US Account 2" }
+  { "id": "profile_001", "label": "US Account 1" },
+  { "id": "profile_002", "label": "US Account 2" }
 ]
 ```
 
@@ -531,6 +528,7 @@ GITHUB_MODELS_API_VERSION - API version header (default: 2026-03-10)
 
 ### Prompt constraints baked in
 
+- Always in **English** regardless of persona location
 - 5–20 words, plain text only, no hashtags, no quotes
 - Matches persona typing style (casual, lowercase, slang if appropriate)
 - Never starts with "Check this out", "Pretty cool", "Wow", or "Interesting"
@@ -559,18 +557,33 @@ page.setDefaultNavigationTimeout(90000); // page loads
 page.setDefaultTimeout(60000);           // selectors / actions
 ```
 
-### Step-level retry for network errors
+### Step-level retry for all errors
 
-Every handler call is wrapped in `runWithRetry` — retries up to 3× with a 60s wait
-between attempts, but **only for network errors** (ERR_CONNECTION, ETIMEDOUT,
-ECONNRESET, proxy errors, timeout strings). Logic/selector errors throw immediately.
+Every handler call is wrapped in `runWithRetry` — retries up to 3× for **all** errors.
+Wait time differs by error type:
 
 ```
-STEP_RETRY_ATTEMPTS = 3
-STEP_RETRY_WAIT_MS  = 60000  (covers brief proxy disconnections)
+STEP_RETRY_ATTEMPTS    = 3
+NETWORK_RETRY_WAIT_MS  = 60000  (covers brief proxy disconnections)
+SELECTOR_RETRY_WAIT_MS = 5000   (gives FB DOM time to settle)
 ```
 
-Non-network failures (wrong selector, bad params) fail fast — no retry.
+Network errors (ERR_CONNECTION, ETIMEDOUT, ECONNRESET, proxy, timeout) wait 60s.
+All other errors (selector not found, bad params, DOM errors) wait 5s then retry.
+
+### Auto-navigate before first step
+
+Before any steps run, `runBrowser` checks the current URL. If the tab is not already
+on basewook.com, it navigates there first so no step ever starts on a blank or wrong page.
+
+## `homepage_interaction` — Home button selector
+
+Uses `a[href="/"][role="link"]` — **not** `aria-label="Home"`. The aria-label changes
+when notifications are present (e.g. "Home, 3 notifications") making it unreliable.
+The href is always `"/"` regardless of notification state.
+
+**Flow:** click the Home button if found + has bounding box → fall back to
+`goto https://www.facebook.com` if not.
 
 ## Direct `.click()` vs `humanClick`
 
@@ -602,6 +615,10 @@ Non-network failures (wrong selector, bad params) fail fast — no retry.
 - [x] Network resilience in runner (retry + extended timeouts for proxy drops)
 - [x] `utils/generateMessage.js` — GitHub Models API for share message generation (active)
 - [x] `.env` — env vars for GitHub Models token and model config
+- [x] `concurrency` task field — cap parallel browsers (sliding window worker pool)
+- [x] `blockMedia` task field — toggle image/video/font blocking per task
+- [x] All step errors retry (not just network) — selector errors wait 5s, network 60s
+- [x] Auto-navigate to basewook.com before first step if tab is on wrong page
 - [ ] `comment_post`, `follow`, `join_group`, `send_message`
 - [ ] Enable Claude API for comment/share generation
 - [ ] Task state tracking (SQLite)
