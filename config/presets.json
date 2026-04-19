@@ -1,0 +1,29 @@
+{
+  "home_feed": {
+    "description": "Browse home feed, scroll, like and share posts",
+    "steps": [
+      { "type": "homepage_interaction" },
+      { "type": "scroll", "params": { "duration": 15, "direction": "down" } },
+      { "type": "like_posts", "params": { "count": 3 } },
+      { "type": "share_posts", "params": { "count": 1 } }
+    ]
+  },
+  "home_feed_like_only": {
+    "description": "Browse home feed and like posts only",
+    "steps": [
+      { "type": "homepage_interaction" },
+      { "type": "scroll", "params": { "duration": 10, "direction": "down" } },
+      { "type": "like_posts", "params": { "count": 5 } }
+    ]
+  },
+  "add_random_friend": {
+    "description": "Visit a random profile from friend_targets.json and send a friend request",
+    "steps": [
+      {
+        "type": "visit_profile",
+        "params": { "random": true },
+        "steps": [{ "type": "add_friend" }]
+      }
+    ]
+  }
+}

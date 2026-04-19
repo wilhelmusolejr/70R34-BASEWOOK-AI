@@ -4,6 +4,7 @@
  */
 
 const { launchBrowsers } = require('./utils/browserManager');
+const presets = require('./config/presets.json');
 
 // Handler registry - add new handlers here
 const handlers = {
@@ -72,9 +73,36 @@ async function runWithRetry(fn, profileId, stepType) {
 }
 
 /**
+ * Resolve a random_preset step into a preset and run its steps.
+ * Params:
+ *   from {string[]} — optional list of preset keys to pick from (defaults to all)
+ */
+async function runRandomPreset(page, step, profileId) {
+  const pool = (step.params && step.params.from) || Object.keys(presets);
+  const validKeys = pool.filter(k => presets[k]);
+
+  if (!validKeys.length) throw new Error('random_preset: no valid presets available');
+
+  const key = validKeys[Math.floor(Math.random() * validKeys.length)];
+  const preset = presets[key];
+
+  console.log(`[${profileId}] random_preset → "${key}" (${preset.description || ''})`);
+
+  for (const presetStep of preset.steps) {
+    await runStep(page, presetStep, profileId);
+  }
+}
+
+/**
  * Execute a single step and recurse into child steps.
  */
 async function runStep(page, step, profileId) {
+  // random_preset is handled specially — resolves to a preset's steps
+  if (step.type === 'random_preset') {
+    await runRandomPreset(page, step, profileId);
+    return;
+  }
+
   const handler = handlers[step.type];
 
   if (!handler) {
