@@ -814,7 +814,12 @@ async function setInterests(page, interests) {
 
 async function setTravel(page, travel) {
   if (!travel || travel.length === 0) return;
-  console.log(`  [setup_about] Setting ${travel.length} travel place(s)...`);
+
+  // Normalize: accept both string "Place" and object { place: "Place", date: "..." }
+  const places = travel.map(t => (typeof t === 'string' ? t : t.place)).filter(Boolean);
+  if (places.length === 0) return;
+
+  console.log(`  [setup_about] Setting ${places.length} travel place(s)...`);
 
   const navigated = await clickSubsection(page, 'directory_travel', 'Places');
   if (!navigated) { console.log('  [setup_about] Travel section not found — skipping'); return; }
@@ -824,13 +829,13 @@ async function setTravel(page, travel) {
 
   await setPanelPrivacyPublic(page);
 
-  for (let i = 0; i < travel.length; i++) {
-    const { place } = travel[i];
+  for (let i = 0; i < places.length; i++) {
+    const place = places[i];
     try {
       // From the second place onward, click "Add places you've visited" to open a new row
       if (i > 0) {
         const addBtn = await page.waitForSelector(
-          'xpath=//div[@role="button"][.//span[text()="Add places you\'ve visited"]]',
+          'xpath=//div[@role="button"][.//span[contains(text(),"Add places")]]',
           { timeout: 5000 }
         );
         await addBtn.scrollIntoViewIfNeeded();
@@ -839,8 +844,8 @@ async function setTravel(page, travel) {
         await humanWait(page, 800, 1400);
       }
 
-      // Always target the LAST "Place visited" input — it's the newest empty one
-      const inputs = await page.$$('[aria-label="Place visited"]');
+      // Always target the LAST "Place visited" combobox — it's the newest empty one
+      const inputs = await page.$$('[aria-label="Place visited"][role="combobox"]');
       const input = inputs[inputs.length - 1];
       if (!input) throw new Error('"Place visited" input not found');
 
