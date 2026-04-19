@@ -936,7 +936,6 @@ module.exports = async function setupAbout(page, params) {
     () => setHobbies(page, hobbies),
     () => setInterests(page, interests),
     () => setTravel(page, travel),
-    () => setNamePronunciation(page),
   ];
 
   // Shuffle order so each account fills sections in a different sequence
