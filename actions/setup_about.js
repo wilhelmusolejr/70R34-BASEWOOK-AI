@@ -370,11 +370,16 @@ async function setWork(page, workEntries) {
   const navigated = await clickSubsection(page, 'directory_work', 'Work experience');
   if (!navigated) { console.log('  [setup_about] Work section not found — skipping'); return; }
 
-  // Wait for the work section to render, then check for existing entries
-  await humanWait(page, 1500, 2500);
-  const alreadyHasWork = await page.waitForSelector('[aria-label="Edit Workplace"]', { timeout: 4000 })
-    .then(() => true)
-    .catch(() => false);
+  // Wait for the "Work experience" panel button to appear — confirms section is fully rendered
+  try {
+    await page.waitForSelector('xpath=//div[@role="button"][.//span[text()="Work experience"]]', { timeout: 8000 });
+  } catch {
+    console.log('  [setup_about] "Work experience" button not found — skipping work section');
+    return;
+  }
+
+  // Now check if Edit Workplace exists — if so, entries already added, skip
+  const alreadyHasWork = await page.$('[aria-label="Edit Workplace"]').then(el => !!el).catch(() => false);
   if (alreadyHasWork) {
     console.log('  [setup_about] Work data already exists — skipping');
     return;
