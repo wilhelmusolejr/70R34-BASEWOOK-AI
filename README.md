@@ -82,13 +82,13 @@ Edit `config/profiles.json`. Add one entry per BASEWOOK account:
 
 ```json
 [
-  { "id": "your-profile-uuid-1", "port": 9222, "label": "Account 1" },
-  { "id": "your-profile-uuid-2", "port": 9223, "label": "Account 2" }
+  { "id": "your-profile-uuid-1", "label": "Account 1" },
+  { "id": "your-profile-uuid-2", "label": "Account 2" }
 ]
 ```
 
 > **How to find the UUID:** Open Hidemium → right-click a profile → Copy UUID.
-> The `port` field is currently unused (ports are assigned dynamically by Hidemium), but keep it for reference.
+> The CDP port is assigned dynamically by Hidemium when a profile opens — you do not need to specify it here.
 
 ### 5. Create the `.env` file *(optional — only for AI share messages)*
 
@@ -113,8 +113,8 @@ Maps your Hidemium profiles to the runner. The runner picks profiles in order fr
 
 ```json
 [
-  { "id": "local-fd2ca2e6-...", "port": 9222, "label": "US Account 1" },
-  { "id": "local-ab3cd4e5-...", "port": 9223, "label": "US Account 2" }
+  { "id": "local-fd2ca2e6-...", "label": "US Account 1" },
+  { "id": "local-ab3cd4e5-...", "label": "US Account 2" }
 ]
 ```
 
