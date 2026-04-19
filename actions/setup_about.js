@@ -928,14 +928,26 @@ module.exports = async function setupAbout(page, params) {
   await goToOwnProfile(page);
   await clickAboutTab(page);
 
-  await setBio(page, bio);
-  await setPersonalDetails(page, city, hometown, personal);
-  await setWork(page, work);
-  await setEducation(page, education);
-  await setHobbies(page, hobbies);
-  await setInterests(page, interests);
-  await setTravel(page, travel);
-  await setNamePronunciation(page);
+  const sections = [
+    () => setBio(page, bio),
+    () => setPersonalDetails(page, city, hometown, personal),
+    () => setWork(page, work),
+    () => setEducation(page, education),
+    () => setHobbies(page, hobbies),
+    () => setInterests(page, interests),
+    () => setTravel(page, travel),
+    () => setNamePronunciation(page),
+  ];
+
+  // Shuffle order so each account fills sections in a different sequence
+  for (let i = sections.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [sections[i], sections[j]] = [sections[j], sections[i]];
+  }
+
+  for (const section of sections) {
+    await section();
+  }
 
   console.log('  [setup_about] Profile about setup complete');
 };
