@@ -1,0 +1,19 @@
+{
+  "taskId": "homepage_test",
+  "browsers": 1,
+  "steps": [
+    {
+      "type": "homepage_interaction",
+      "steps": [
+        { "type": "scroll", "params": { "duration": 15, "direction": "down" } },
+        {
+          "type": "share_posts",
+          "params": {
+            "count": 1,
+            "userIdentity": "Dog lover, nature-loving, here for a good laugh. Registered nurse from Sacramento, California."
+          }
+        }
+      ]
+    }
+  ]
+}
