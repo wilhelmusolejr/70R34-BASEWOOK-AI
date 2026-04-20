@@ -155,6 +155,13 @@ module.exports = async function setup_page(page, params) {
   const emailValue = String(email || '').trim();
   const streetValue = String(streetAddress || address.streetAddress || '').trim();
   const cityValue = parsedCity.cityName || address.cityName || '';
+
+  console.log('  [setup_page] Resolved address fields:');
+  console.log(`    email       : ${emailValue || '(empty)'}`);
+  console.log(`    street      : ${streetValue || '(empty)'}`);
+  console.log(`    city        : ${cityValue || '(empty)'}`);
+  console.log(`    state       : ${address.stateName || '(empty)'}`);
+  console.log(`    zip         : ${address.zipCode || '(empty)'}`);
   let profileTempPath = '';
   let coverTempPath = '';
 
@@ -497,6 +504,17 @@ module.exports = async function setup_page(page, params) {
         await schedBtn.waitFor({ state: 'visible', timeout: 10000 });
         await humanClick(page, await schedBtn.boundingBox());
         await stepWait(page);
+
+        // Dismiss any post-schedule confirmation modal (Publish / Post / Original)
+        try {
+          const confirmBtn = page.locator('div[role="button"]:has-text("Publish Original Post")').first();
+          await confirmBtn.waitFor({ state: 'visible', timeout: 5000 });
+          console.log('  [setup_page] Post-schedule confirmation modal detected — clicking...');
+          await humanClick(page, await confirmBtn.boundingBox());
+          await stepWait(page);
+        } catch {
+          // no confirmation modal — continue
+        }
 
         await handleAfterSchedule();
       }

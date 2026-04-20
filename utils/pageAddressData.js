@@ -73,15 +73,23 @@ function resolveAddressSeed(cityValue = '', fallbackState = '') {
   };
 }
 
+function pickRandomSeed() {
+  const states = Object.keys(ADDRESS_SEEDS);
+  const stateName = pickRandom(states);
+  const cities = Object.keys(ADDRESS_SEEDS[stateName]);
+  const cityName = pickRandom(cities);
+  return { cityName, stateName, ...ADDRESS_SEEDS[stateName][cityName] };
+}
+
 function buildPageAddress({ city, state, zipCode } = {}) {
-  const seed = resolveAddressSeed(city, state);
+  const seed = resolveAddressSeed(city, state) || pickRandomSeed();
   const parsed = parseCityState(city);
 
   return {
-    streetAddress: seed ? pickRandom(seed.streets) : '',
-    cityName: parsed.cityName || seed?.cityName || '',
-    stateName: parsed.stateName || state || seed?.stateName || '',
-    zipCode: String(zipCode || (seed ? pickRandom(seed.zipCodes) : '') || ''),
+    streetAddress: pickRandom(seed.streets),
+    cityName: parsed.cityName || seed.cityName,
+    stateName: parsed.stateName || state || seed.stateName,
+    zipCode: String(zipCode || pickRandom(seed.zipCodes)),
   };
 }
 
