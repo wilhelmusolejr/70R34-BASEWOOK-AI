@@ -129,6 +129,23 @@ const actionSchemas = {
       description: { type: 'string', default: '', description: 'Optional caption/description for the profile picture post' }
     },
     hasChildren: false
+  },
+  setup_page: {
+    description: 'Create a Facebook page by filling the page name, category, and bio, then clicking Create Page.',
+    params: {
+      pageName: { type: 'string', description: 'Page name to create' },
+      bio: { type: 'string', default: '', description: 'Bio/description for the page' },
+      email: { type: 'string', default: '', description: 'Contact email for the page' },
+      streetAddress: { type: 'string', default: '', description: 'Street-only address for the page' },
+      city: { type: 'string', default: '', description: 'Full city/state string, e.g. "Dallas, Texas"' },
+      state: { type: 'string', default: '', description: 'State name. Auto-derived from city when omitted.' },
+      zipCode: { type: 'string', default: '', description: 'ZIP code. Uses user.zip_code if present, otherwise a local seed dataset.' },
+      profilePhotoUrl: { type: 'string', default: '', description: 'Profile image URL for the page' },
+      coverPhotoUrl: { type: 'string', default: '', description: 'Cover image URL for the page' },
+      categoryKeyword: { type: 'string', default: '', description: 'Optional category keyword. Defaults to the first word of pageName.' },
+      createUrl: { type: 'string', default: 'https://www.facebook.com/pages/create', description: 'Page creation URL to open before filling the form' }
+    },
+    hasChildren: false
   }
 };
 
