@@ -501,8 +501,10 @@ facebook.com  →  Facebook menu  →  Pages  →  Create Page  →  Public Page
   →  Step 3: Connect WhatsApp       →  Skip
   →  Step 4: Build Page audience    →  Next
   →  Step 5: Stay informed          →  Done  (page now created)
-  →  schedule posts loop
-  →  Your profile  →  Switch to [userName]  →  50s cooldown
+  →  wait for URL: facebook.com/profile.php?id=*  (confirms creation)
+  →  dismiss cookies popup if present
+  →  schedule posts loop  (best-effort — errors logged, not rethrown)
+  →  Your profile  →  Switch to [userName]  →  50s cooldown  (best-effort)
 ```
 
 ### Image resolution — `linkedPage.assets`
@@ -547,9 +549,39 @@ handles month/year rollover automatically via JS `Date.setDate`.
 Fix: click "Create post" heading first, then Tab ×3 with 1s delays to focus
 the editor, then `page.keyboard.type(content, { delay: 80 })`.
 
+### Post-creation error safety
+
+Steps after page creation (post scheduling + switch back) are wrapped in a
+**best-effort try/catch** — errors are logged with `console.warn` but NOT rethrown.
+This prevents `runner.js` from retrying `setup_page` from scratch, which would
+create a duplicate Facebook Page.
+
+- Form fill errors (before Done) → thrown → runner retries safely (no page yet)
+- Post scheduling / switch errors (after Done) → caught, logged, no retry
+
 ### Confirmed selectors
 
 ```
+Facebook menu btn:        div[aria-label="Facebook menu"]
+Pages link:               xpath=//a[@role="link"]//span[text()="Pages"]
+Create Page btn:          [aria-label="Create Page"]
+Public Page option:       label:has-text("Public Page")
+Next btn:                 div[aria-label="Next"]  or  [aria-label="Next"]
+Get started link:         a[aria-label="Get started"]
+Page name input:          label:has-text("Page name (required)") input
+Category input:           input[aria-label="Category (required)"]
+Bio textarea:             xpath=//span[contains(text(), "Bio")]/following::textarea[1]
+Create Page (advance):    div[aria-label="Create Page"][role="button"]
+Email input:              label:has-text("Email") input
+Address input:            label:has-text("Address") input
+City/town input:          input[aria-label="City/town"]
+ZIP code input:           label:has-text("ZIP code") input
+Hours options:            input[type="radio"][value="NO_HOURS_AVAILABLE|ALWAYS_OPEN"]
+Add profile picture btn:  div[role="button"]:has-text("Add profile picture")
+Add cover photo btn:      div[role="button"]:has-text("Add cover photo")
+Skip btn (WhatsApp):      [aria-label="Skip"]
+Done btn (Step 5):        [aria-label="Done"]
+Allow all cookies popup:  div[aria-label="Allow all cookies"]
 What's on your mind btn:  div[role="button"]:has-text("What's on your mind?")
 Create post modal:        div[role="dialog"][aria-label="Create post"]  (.first())
 Lexical editor:           div[role="textbox"][data-lexical-editor="true"]

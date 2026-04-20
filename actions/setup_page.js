@@ -377,6 +377,31 @@ module.exports = async function setup_page(page, params) {
     );
     await stepWait(page);
 
+    // Confirm page was created — URL should change to /profile.php?id=*
+    console.log('  [setup_page] Waiting for page creation URL confirmation...');
+    try {
+      await page.waitForURL('**/profile.php?id=**', { timeout: 30000 });
+      console.log('  [setup_page] Page creation confirmed — URL changed to page profile.');
+    } catch {
+      console.warn('  [setup_page] URL did not change to profile.php within 30s — page may still be loading.');
+    }
+
+    // Dismiss cookies popup if it appears after page creation
+    try {
+      const cookiesBtn = page.locator('div[aria-label="Allow all cookies"]').first();
+      await cookiesBtn.waitFor({ state: 'visible', timeout: 5000 });
+      console.log('  [setup_page] Cookies popup detected — dismissing...');
+      await humanClick(page, await cookiesBtn.boundingBox());
+      await stepWait(page);
+    } catch {
+      // no cookies popup — continue
+    }
+
+    // Post scheduling and profile switch are best-effort.
+    // Page was already created — if these fail, do NOT rethrow so the runner
+    // does not retry setup_page from scratch and create a duplicate page.
+    try {
+
     if (posts.length) {
       async function dismissNotNow() {
         let dismissed = false;
@@ -520,6 +545,11 @@ module.exports = async function setup_page(page, params) {
 
     console.log('  [setup_page] Cooling down 50s...');
     await page.waitForTimeout(50000);
+
+    } catch (postCreationErr) {
+      console.warn('  [setup_page] Post-creation step failed (page was already created):', postCreationErr.message);
+    }
+
   } finally {
     if (profileTempPath) fs.unlink(profileTempPath, () => {});
     if (coverTempPath) fs.unlink(coverTempPath, () => {});
