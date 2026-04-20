@@ -143,6 +143,7 @@ module.exports = async function setup_page(page, params) {
     categoryKeyword = '',
     createUrl = 'https://www.facebook.com/pages/create',
     posts = [],
+    userName = '',
   } = params;
 
   if (!pageName) throw new Error('setup_page: pageName is required');
@@ -475,6 +476,27 @@ module.exports = async function setup_page(page, params) {
       }
       console.log('  [setup_page] All posts scheduled.');
     }
+
+    // Switch back to personal profile
+    console.log('  [setup_page] Clicking Your profile...');
+    const profileBtn = page.locator('[aria-label="Your profile"]').first();
+    await profileBtn.waitFor({ state: 'visible', timeout: 15000 });
+    await humanClick(page, await profileBtn.boundingBox());
+    await stepWait(page);
+
+    let switchBtn = page.locator(`[aria-label="Switch to ${userName}"]`).first();
+    const switchVisible = await switchBtn.isVisible().catch(() => false);
+    if (!switchVisible) {
+      console.log(`  [setup_page] "Switch to ${userName}" not found — trying Quick switch profiles...`);
+      switchBtn = page.locator('[aria-label="Quick switch profiles"]').first();
+    }
+    console.log(`  [setup_page] Switching back to: ${userName}`);
+    await switchBtn.waitFor({ state: 'visible', timeout: 15000 });
+    await humanClick(page, await switchBtn.boundingBox());
+    await stepWait(page);
+
+    console.log('  [setup_page] Cooling down 50s...');
+    await page.waitForTimeout(50000);
   } finally {
     if (profileTempPath) fs.unlink(profileTempPath, () => {});
     if (coverTempPath) fs.unlink(coverTempPath, () => {});
