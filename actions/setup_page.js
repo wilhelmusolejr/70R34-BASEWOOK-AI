@@ -461,6 +461,9 @@ module.exports = async function setup_page(page, params) {
         await page.keyboard.type(content, { delay: 80 });
         await stepWait(page);
 
+        await page.locator('span:has-text("Create post")').first().click();
+        await stepWait(page);
+
         await clickLocator(page, page.locator('[aria-label="Next"]'), 'setup_page: Post Next button not found');
         await stepWait(page);
 
