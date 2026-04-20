@@ -485,6 +485,86 @@ Upload photo menuitem:  xpath=//div[@role="menuitem"][.//span[text()="Upload pho
 Save changes (polling): querySelectorAll('[aria-label="Save changes"]') via waitForFunction
 ```
 
+## `setup_page` — Facebook Page creation + post scheduling
+
+`actions/setup_page.js` creates a Facebook Page for the logged-in account, fills
+all required fields, uploads profile/cover images, then schedules posts from
+`user.linkedPage.posts` — one post per day starting tomorrow.
+
+### Navigation pattern
+
+```
+facebook.com  →  Facebook menu  →  Pages  →  Create Page  →  Public Page  →  Next
+  →  Get started  →  fill form  →  Create Page  →  schedule posts loop
+```
+
+### Image resolution — `linkedPage.assets`
+
+Page images come from `user.linkedPage.assets[]`, not `user.images[]`.
+Asset filenames are generic (e.g. `page_post_abc123.png`) — no `profile`/`cover`
+keywords. Resolution uses **positional fallback**:
+
+```
+assets[0] → profile photo
+assets[1] → cover photo   (falls back to assets[0] if only one asset)
+```
+
+`getAssetFilename(asset)` checks `asset.imageId.filename → asset.filename → asset.fileName → asset.url`.
+
+### City/town typeahead input
+
+FB's City/town field is a typeahead. Type `cityName + ", " + first half of stateName`
+to get the right suggestion — typing just the city name often returns too many results:
+
+```
+"Birmingham, Alabama"  →  type  "Birmingham, Alaba"
+"Los Angeles, California"  →  type  "Los Angeles, Calif"
+```
+
+`address.stateName` comes from `buildPageAddress()` in `utils/pageAddressData.js`.
+
+### Post scheduling loop
+
+After page creation, loops through `params.posts[]` (injected from `user.linkedPage.posts`).
+Each post = 1 day: post[0] → today+1, post[1] → today+2, etc. `getScheduleDate(dayOffset)`
+handles month/year rollover automatically via JS `Date.setDate`.
+
+**"Not now" modal handling** — FB shows this popup randomly after scheduling:
+- `dismissNotNow()`: loops until no more "Not now" modals (4s timeout each, 5-8s wait after click)
+- Called before each post AND between "What's on your mind?" click and modal load
+- `handleAfterSchedule()`: after every Schedule click, checks "Not now" up to 3×
+  (5s each), then always waits 30–60s before next post regardless
+
+**Lexical editor typing** — FB's post composer uses a Lexical contenteditable.
+`page.keyboard.type()` sends keystrokes to the page and causes scroll jumping.
+Fix: click "Create post" heading first, then Tab ×3 with 1s delays to focus
+the editor, then `page.keyboard.type(content, { delay: 80 })`.
+
+### Confirmed selectors
+
+```
+What's on your mind btn:  div[role="button"]:has-text("What's on your mind?")
+Create post modal:        div[role="dialog"][aria-label="Create post"]  (.first())
+Lexical editor:           div[role="textbox"][data-lexical-editor="true"]
+Scheduling options:       xpath=//span[contains(text(), "Scheduling options")]
+Schedule for later wait:  div[role="button"]:has-text("Schedule for later")
+Date input:               div:has(span[aria-label="Open Date Picker"]) input[type="text"]
+Schedule for later btn:   div[role="button"][aria-label="Schedule for later"]
+Schedule confirm btn:     [aria-label="Schedule"]
+Not now modal btn:        [aria-label="Not now"]
+```
+
+### Params (auto-injected by `injectUserParams`)
+
+| Param | Source |
+|-------|--------|
+| `pageName` | `user.linkedPage.pageName` |
+| `bio` | `user.linkedPage.bio` → `user.bio` |
+| `email` | `user.emails` (selected or first) |
+| `city` / `state` / `zipCode` | `buildPageAddress({ city, state, zip_code })` |
+| `profilePhotoUrl` / `coverPhotoUrl` | `resolveSetupPageImages(user)` from `linkedPage.assets` |
+| `posts` | `user.linkedPage.posts` |
+
 ## `visit_profile` + `add_friend` — Profile visit and friend request
 
 - `visit_profile` is a **navigator** — navigates to a profile URL, then child steps act on it.
@@ -669,6 +749,7 @@ params from the fetched user object:
 | `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `travel` |
 | `setup_avatar` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[0].imageId.filename` |
 | `setup_cover` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[1].imageId.filename` |
+| `setup_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `posts` — all from `user.linkedPage` + `buildPageAddress` |
 
 Explicit params in `tasks.json` always take priority over injected values.
 
@@ -722,6 +803,8 @@ The href is always `"/"` regardless of notification state.
 - [x] Between-step delays (5–15s) and post-task cooldown (10–15s)
 - [x] `setup_cover` fixed for duplicate `[aria-label="Save changes"]` elements
 - [x] `IMAGE_SERVER_BASE_URL` + `USER_API_BASE_URL` + `NODE_ENV` in `.env`
+- [x] `setup_page` — creates FB page, fills form, uploads images, schedules posts from `linkedPage.posts`
+- [x] `utils/pageAddressData.js` — parses city/state strings, seeds ZIP codes by state
 - [ ] `comment_post`, `follow`, `join_group`, `send_message`
 - [ ] Enable Claude API for comment/share generation
 - [ ] Task state tracking (SQLite)
