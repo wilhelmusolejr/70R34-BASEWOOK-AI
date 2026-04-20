@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "task": "node run-task.js",
-    "chat": "node chat.js"
+    "chat": "node chat.js",
+    "probe:setup-page": "node run-setup-page-probe.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",
