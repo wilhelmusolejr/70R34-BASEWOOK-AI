@@ -249,6 +249,14 @@ module.exports = async function setup_page(page, params) {
       await stepWait(page);
     }
 
+    console.log('  [setup_page] Advancing to contact/location section...');
+    await clickLocator(
+      page,
+      page.locator('div[aria-label="Create Page"][role="button"]'),
+      'setup_page: Create Page (advance) button has no bounding box'
+    );
+    await stepWait(page);
+
     if (emailValue) {
       const emailInput = page.locator('label:has-text("Email") input').first();
       await emailInput.waitFor({ state: 'visible', timeout: 15000 });
@@ -333,25 +341,40 @@ module.exports = async function setup_page(page, params) {
       await page.waitForTimeout(30000);
     }
 
-    console.log('  [setup_page] Advancing after image uploads...');
+    // Step 2 → Next
+    console.log('  [setup_page] Step 2 → Next...');
     await clickLocator(
       page,
       page.locator('[aria-label="Next"]'),
-      'setup_page: Post-upload Next button has no visible match'
+      'setup_page: Step 2 Next button has no visible match'
     );
     await stepWait(page);
-    await page.keyboard.press('Enter');
+
+    // Step 3: Connect WhatsApp → Skip
+    console.log('  [setup_page] Step 3 → Skip (WhatsApp)...');
+    await clickLocator(
+      page,
+      page.locator('[aria-label="Skip"]'),
+      'setup_page: Skip button has no visible match'
+    );
     await stepWait(page);
 
-    const createButton = await getFirstVisibleLocator(
-      page.locator('div[aria-label="Create Page"]'),
-      'setup_page: Create Page button has no visible match'
+    // Step 4: Build Page audience → Next
+    console.log('  [setup_page] Step 4 → Next (Build audience)...');
+    await clickLocator(
+      page,
+      page.locator('[aria-label="Next"]'),
+      'setup_page: Step 4 Next button has no visible match'
     );
-    const createBox = await createButton.boundingBox();
-    if (!createBox) throw new Error('setup_page: Create Page button has no bounding box');
+    await stepWait(page);
 
-    console.log('  [setup_page] Clicking Create Page...');
-    await humanClick(page, createBox);
+    // Step 5: Stay informed → Done
+    console.log('  [setup_page] Step 5 → Done...');
+    await clickLocator(
+      page,
+      page.locator('[aria-label="Done"]'),
+      'setup_page: Done button has no visible match'
+    );
     await stepWait(page);
 
     if (posts.length) {
