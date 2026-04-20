@@ -495,7 +495,13 @@ all required fields, uploads profile/cover images, then schedules posts from
 
 ```
 facebook.com  →  Facebook menu  →  Pages  →  Create Page  →  Public Page  →  Next
-  →  Get started  →  fill form  →  Create Page  →  schedule posts loop
+  →  Get started  →  fill name/category/bio  →  Create Page (advance)
+  →  fill contact/location/hours  →  Next
+  →  Step 2: upload profile + cover  →  Next
+  →  Step 3: Connect WhatsApp       →  Skip
+  →  Step 4: Build Page audience    →  Next
+  →  Step 5: Stay informed          →  Done  (page now created)
+  →  schedule posts loop
   →  Your profile  →  Switch to [userName]  →  50s cooldown
 ```
 
