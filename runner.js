@@ -6,8 +6,36 @@
 require('dotenv').config();
 const { launchBrowsers, closeBrowsers } = require('./utils/browserManager');
 const presets = require('./config/presets.json');
+const { buildPageAddress } = require('./utils/pageAddressData');
 
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
+
+function getAssetFilename(asset) {
+  return asset?.imageId?.filename || asset?.filename || asset?.fileName || asset?.url || '';
+}
+
+function buildImageUrl(filename) {
+  if (!filename) return '';
+  if (/^https?:\/\//i.test(filename)) return filename;
+  return `${IMAGE_SERVER_BASE_URL}${filename}`;
+}
+
+function resolveSetupPageImages(user) {
+  const linkedAssets = Array.isArray(user.linkedPage?.assets) ? user.linkedPage.assets : [];
+  const filenames = linkedAssets
+    .map((asset) => getAssetFilename(asset))
+    .filter(Boolean);
+
+  const byKeyword = (keyword) => filenames.find((f) => f.toLowerCase().includes(keyword));
+
+  const profileFilename = byKeyword('profile') || filenames[0] || '';
+  const coverFilename = byKeyword('cover') || filenames[1] || filenames[0] || '';
+
+  return {
+    profilePhotoUrl: buildImageUrl(profileFilename),
+    coverPhotoUrl: buildImageUrl(coverFilename),
+  };
+}
 
 // Handler registry - add new handlers here
 const handlers = {
@@ -18,6 +46,7 @@ const handlers = {
   setup_about: require('./actions/setup_about'),
   setup_avatar: require('./actions/setup_avatar'),
   setup_cover: require('./actions/setup_cover'),
+  setup_page: require('./actions/setup_page'),
   add_friend: require('./actions/add_friend'),
   visit_profile: require('./actions/visit_profile'),
   share_post: require('./actions/share_post'),
@@ -118,6 +147,29 @@ function injectUserParams(steps, user) {
           photoUrl: `${IMAGE_SERVER_BASE_URL}${img.imageId.filename}`,
         };
       }
+    }
+
+    if (step.type === 'setup_page') {
+      const pageAddress = buildPageAddress({
+        city: user.city,
+        state: user.state,
+        zipCode: user.zip_code,
+      });
+      const pageImages = resolveSetupPageImages(user);
+
+      s.params = {
+        ...(step.params || {}),
+        pageName: step.params?.pageName || user.linkedPage?.pageName || '',
+        bio: step.params?.bio ?? user.linkedPage?.bio ?? user.bio ?? '',
+        email: step.params?.email || user.emails?.find((item) => item.selected)?.address || user.emails?.[0]?.address || '',
+        streetAddress: step.params?.streetAddress || pageAddress.streetAddress,
+        city: step.params?.city || user.city || '',
+        state: step.params?.state || pageAddress.stateName,
+        zipCode: step.params?.zipCode || pageAddress.zipCode,
+        profilePhotoUrl: step.params?.profilePhotoUrl || pageImages.profilePhotoUrl,
+        coverPhotoUrl: step.params?.coverPhotoUrl || pageImages.coverPhotoUrl,
+        posts: step.params?.posts || user.linkedPage?.posts || [],
+      };
     }
 
     if (s.steps) {
