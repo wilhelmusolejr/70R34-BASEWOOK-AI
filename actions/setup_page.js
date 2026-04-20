@@ -397,10 +397,7 @@ module.exports = async function setup_page(page, params) {
       // no cookies popup — continue
     }
 
-    // Post scheduling and profile switch are best-effort.
-    // Page was already created — if these fail, do NOT rethrow so the runner
-    // does not retry setup_page from scratch and create a duplicate page.
-    try {
+    // ── Post scheduling (best-effort, never rethrows to avoid duplicate page creation) ──
 
     if (posts.length) {
       async function dismissNotNow() {
@@ -501,53 +498,62 @@ module.exports = async function setup_page(page, params) {
         await handleAfterSchedule();
       }
 
+      // Retry up to 3 times with page reload on each failure. Never throws.
       async function schedulePostWithRetry(content, dayOffset) {
-        await dismissNotNow();
-        try {
-          await schedulePost(content, dayOffset);
-        } catch (err) {
-          const dismissed = await dismissNotNow();
-          if (dismissed) {
-            console.log('  [setup_page] Waiting 30s before retrying...');
-            await page.waitForTimeout(30000);
+        const MAX_ATTEMPTS = 3;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          try {
+            await dismissNotNow();
             await schedulePost(content, dayOffset);
-          } else {
-            throw err;
+            return;
+          } catch (err) {
+            console.warn(`  [setup_page] Post ${dayOffset} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${err.message}`);
+            if (attempt < MAX_ATTEMPTS) {
+              console.log('  [setup_page] Reloading page before retry...');
+              await page.reload({ waitUntil: 'domcontentloaded' });
+              await humanWait(page, 3000, 5000);
+            } else {
+              console.warn(`  [setup_page] Post ${dayOffset} failed after ${MAX_ATTEMPTS} attempts — skipping.`);
+            }
           }
         }
       }
 
-      console.log(`  [setup_page] Scheduling ${posts.length} post(s)...`);
-      for (let i = 0; i < posts.length; i++) {
-        await schedulePostWithRetry(posts[i].post, i + 1);
-        console.log(`  [setup_page] Post ${i + 1}/${posts.length} scheduled.`);
+      try {
+        console.log(`  [setup_page] Scheduling ${posts.length} post(s)...`);
+        for (let i = 0; i < posts.length; i++) {
+          await schedulePostWithRetry(posts[i].post, i + 1);
+          console.log(`  [setup_page] Post ${i + 1}/${posts.length} processed.`);
+        }
+        console.log('  [setup_page] All posts processed.');
+      } catch (postsErr) {
+        console.warn('  [setup_page] Posts loop error:', postsErr.message);
       }
-      console.log('  [setup_page] All posts scheduled.');
     }
 
-    // Switch back to personal profile
-    console.log('  [setup_page] Clicking Your profile...');
-    const profileBtn = page.locator('[aria-label="Your profile"]').first();
-    await profileBtn.waitFor({ state: 'visible', timeout: 15000 });
-    await humanClick(page, await profileBtn.boundingBox());
-    await stepWait(page);
+    // ── Wrap-up: always switch back to personal profile ──
+    try {
+      console.log('  [setup_page] Clicking Your profile...');
+      const profileBtn = page.locator('[aria-label="Your profile"]').first();
+      await profileBtn.waitFor({ state: 'visible', timeout: 15000 });
+      await humanClick(page, await profileBtn.boundingBox());
+      await stepWait(page);
 
-    let switchBtn = page.locator(`[aria-label="Switch to ${userName}"]`).first();
-    const switchVisible = await switchBtn.isVisible().catch(() => false);
-    if (!switchVisible) {
-      console.log(`  [setup_page] "Switch to ${userName}" not found — trying Quick switch profiles...`);
-      switchBtn = page.locator('[aria-label="Quick switch profiles"]').first();
-    }
-    console.log(`  [setup_page] Switching back to: ${userName}`);
-    await switchBtn.waitFor({ state: 'visible', timeout: 15000 });
-    await humanClick(page, await switchBtn.boundingBox());
-    await stepWait(page);
+      let switchBtn = page.locator(`[aria-label="Switch to ${userName}"]`).first();
+      const switchVisible = await switchBtn.isVisible().catch(() => false);
+      if (!switchVisible) {
+        console.log(`  [setup_page] "Switch to ${userName}" not found — trying Quick switch profiles...`);
+        switchBtn = page.locator('[aria-label="Quick switch profiles"]').first();
+      }
+      console.log(`  [setup_page] Switching back to: ${userName}`);
+      await switchBtn.waitFor({ state: 'visible', timeout: 15000 });
+      await humanClick(page, await switchBtn.boundingBox());
+      await stepWait(page);
 
-    console.log('  [setup_page] Cooling down 50s...');
-    await page.waitForTimeout(50000);
-
-    } catch (postCreationErr) {
-      console.warn('  [setup_page] Post-creation step failed (page was already created):', postCreationErr.message);
+      console.log('  [setup_page] Cooling down 50s...');
+      await page.waitForTimeout(50000);
+    } catch (wrapupErr) {
+      console.warn('  [setup_page] Wrap-up failed:', wrapupErr.message);
     }
 
   } finally {
