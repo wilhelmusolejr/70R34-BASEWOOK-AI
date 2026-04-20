@@ -281,35 +281,8 @@ async function runBrowser(session, steps, options = {}) {
 }
 
 /**
- * Run sessions with a sliding concurrency window.
- * Each session has its own steps (with user params already injected).
- */
-async function runWithConcurrency(sessions, limit, options = {}) {
-  const results = new Array(sessions.length);
-  const queue = [...sessions.entries()];
-
-  async function worker() {
-    while (queue.length > 0) {
-      const [index, session] = queue.shift();
-      results[index] = await Promise.allSettled([
-        runBrowser(session, session.steps, options),
-      ]).then((r) => r[0]);
-    }
-  }
-
-  const workers = Array.from({ length: limit }, () => worker());
-  await Promise.all(workers);
-  return results;
-}
-
-/**
- * Run a complete task across multiple browsers in parallel.
- *
- * @param {Object} task - Task object
- *   browsers    {string[]} — explicit list of user IDs to run
- *   concurrency {number}  — max parallel browsers (default: all)
- *   blockMedia  {boolean} — block images/video/fonts (default: true)
- *   steps       {Array}   — step tree
+ * Run a complete task across multiple browsers with a concurrency limit.
+ * Browsers are opened lazily — only concurrency-many are open at once.
  */
 async function runTask(task) {
   const { taskId, profiles: userIds, concurrency, blockMedia, steps } = task;
@@ -318,25 +291,46 @@ async function runTask(task) {
 
   console.log(`\n=== Task ${taskId}: ${userIds.length} profile(s), concurrency: ${limit}, blockMedia: ${options.blockMedia} ===\n`);
 
-  const browserInfos = await launchBrowsers(userIds);
-  console.log(`Connected to ${browserInfos.length} browser(s)\n`);
+  const results = new Array(userIds.length);
+  const queue = [...userIds.entries()];
 
-  // Attach the base steps to each session; injectUserParams runs inside runBrowser
-  const sessions = browserInfos.map((info) => ({ ...info, steps }));
+  async function worker() {
+    while (queue.length > 0) {
+      const [index, userId] = queue.shift();
 
-  const results = await runWithConcurrency(sessions, limit, options);
+      let session;
+      try {
+        const browserInfos = await launchBrowsers([userId]);
+        session = { ...browserInfos[0], steps };
+      } catch (err) {
+        console.error(`[${userId}] Failed to open browser:`, err.message);
+        results[index] = { status: 'rejected', reason: err };
+        continue;
+      }
+
+      const { profileId } = session;
+      results[index] = await Promise.allSettled([
+        runBrowser(session, session.steps, options),
+      ]).then((r) => r[0]);
+
+      await closeBrowsers([session]);
+    }
+  }
+
+  const workers = Array.from({ length: limit }, () => worker());
+  await Promise.all(workers);
 
   const formattedResults = results.map((result, index) => {
-    const profileId = browserInfos[index].profileId;
-    if (result.status === 'fulfilled') {
+    const userId = userIds[index];
+    const profileId = result?.value?.profileId || userId;
+    if (result?.status === 'fulfilled') {
       return { profileId, status: 'success' };
     } else {
-      console.error(`[${profileId}] Error:`, result.reason.message);
-      return { profileId, status: 'error', error: result.reason.message };
+      const msg = result?.reason?.message || 'unknown error';
+      console.error(`[${profileId}] Error:`, msg);
+      return { profileId, status: 'error', error: msg };
     }
   });
-
-  await closeBrowsers(browserInfos);
 
   console.log(`\n=== Task ${taskId}: Completed ===\n`);
   return { taskId, results: formattedResults };
