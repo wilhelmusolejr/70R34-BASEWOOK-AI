@@ -52,36 +52,10 @@ const handlers = {
   share_post: require('./actions/share_post'),
 };
 
-// Network-related error patterns that are worth retrying
-const NETWORK_ERROR_PATTERNS = [
-  'net::ERR_',
-  'ERR_CONNECTION',
-  'ERR_INTERNET_DISCONNECTED',
-  'ERR_NETWORK',
-  'ERR_TIMED_OUT',
-  'ERR_PROXY',
-  'socket hang up',
-  'ECONNRESET',
-  'ECONNREFUSED',
-  'ETIMEDOUT',
-  'Timeout',
-  'timeout',
-];
 
 const STEP_RETRY_ATTEMPTS = 3;
-const NETWORK_RETRY_WAIT_MS = 60000;
-const SELECTOR_RETRY_WAIT_MS = 5000;
+const RETRY_WAIT_MS = 60000;
 
-function isNetworkError(err) {
-  const msg = err.message || '';
-  return NETWORK_ERROR_PATTERNS.some((pattern) => msg.includes(pattern));
-}
-
-/**
- * Execute a handler with retry logic for all errors.
- * Network errors wait 60s between attempts (proxy recovery).
- * Selector/logic errors wait 5s (DOM may not be ready yet).
- */
 async function runWithRetry(fn, profileId, stepType) {
   let lastError;
 
@@ -93,11 +67,9 @@ async function runWithRetry(fn, profileId, stepType) {
 
       if (attempt >= STEP_RETRY_ATTEMPTS) break;
 
-      const waitMs = isNetworkError(err) ? NETWORK_RETRY_WAIT_MS : SELECTOR_RETRY_WAIT_MS;
-      const kind = isNetworkError(err) ? 'Network' : 'Step';
-      console.warn(`[${profileId}] ${kind} error on ${stepType} (attempt ${attempt}/${STEP_RETRY_ATTEMPTS}): ${err.message}`);
-      console.warn(`[${profileId}] Retrying in ${waitMs / 1000}s...`);
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      console.warn(`[${profileId}] Error on ${stepType} (attempt ${attempt}/${STEP_RETRY_ATTEMPTS}): ${err.message}`);
+      console.warn(`[${profileId}] Retrying in ${RETRY_WAIT_MS / 1000}s...`);
+      await new Promise((resolve) => setTimeout(resolve, RETRY_WAIT_MS));
     }
   }
 
