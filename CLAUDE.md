@@ -496,6 +496,7 @@ all required fields, uploads profile/cover images, then schedules posts from
 ```
 facebook.com  →  Facebook menu  →  Pages  →  Create Page  →  Public Page  →  Next
   →  Get started  →  fill form  →  Create Page  →  schedule posts loop
+  →  Your profile  →  Switch to [userName]  →  50s cooldown
 ```
 
 ### Image resolution — `linkedPage.assets`
@@ -552,6 +553,8 @@ Date input:               div:has(span[aria-label="Open Date Picker"]) input[typ
 Schedule for later btn:   div[role="button"][aria-label="Schedule for later"]
 Schedule confirm btn:     [aria-label="Schedule"]
 Not now modal btn:        [aria-label="Not now"]
+Your profile btn:         [aria-label="Your profile"]
+Switch to user btn:       [aria-label="Switch to {userName}"]  (fallback: [aria-label="Quick switch profiles"])
 ```
 
 ### Params (auto-injected by `injectUserParams`)
@@ -564,6 +567,7 @@ Not now modal btn:        [aria-label="Not now"]
 | `city` / `state` / `zipCode` | `buildPageAddress({ city, state, zip_code })` |
 | `profilePhotoUrl` / `coverPhotoUrl` | `resolveSetupPageImages(user)` from `linkedPage.assets` |
 | `posts` | `user.linkedPage.posts` |
+| `userName` | `user.firstName + user.lastName` |
 
 ## `visit_profile` + `add_friend` — Profile visit and friend request
 
