@@ -169,6 +169,7 @@ function injectUserParams(steps, user) {
         profilePhotoUrl: step.params?.profilePhotoUrl || pageImages.profilePhotoUrl,
         coverPhotoUrl: step.params?.coverPhotoUrl || pageImages.coverPhotoUrl,
         posts: step.params?.posts || user.linkedPage?.posts || [],
+        userName: step.params?.userName || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
       };
     }
 
