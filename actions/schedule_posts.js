@@ -73,18 +73,21 @@ module.exports = async function schedule_posts(page, params) {
 
     const textbox = page.locator('div[role="textbox"][data-lexical-editor="true"]').first();
     await textbox.waitFor({ state: 'visible', timeout: 10000 });
-    await page.locator('span:has-text("Create post")').first().click();
-    await page.waitForTimeout(1000);
+
+    const createPostHeading = page.locator('span:has-text("Create post")').first();
+    await humanClick(page, await createPostHeading.boundingBox());
+    await humanWait(page, 700, 1400);
     await page.keyboard.press('Tab');
-    await page.waitForTimeout(1000);
+    await humanWait(page, 700, 1400);
     await page.keyboard.press('Tab');
-    await page.waitForTimeout(1000);
+    await humanWait(page, 700, 1400);
     await page.keyboard.press('Tab');
-    await page.waitForTimeout(1000);
-    await page.keyboard.type(content, { delay: 80 });
+    await humanWait(page, 700, 1400);
+    await humanType(page, content);
     await stepWait(page);
 
-    await page.locator('span:has-text("Create post")').first().click();
+    const createPostHeading2 = page.locator('span:has-text("Create post")').first();
+    await humanClick(page, await createPostHeading2.boundingBox());
     await stepWait(page);
 
     await clickLocator(page, page.locator('[aria-label="Next"]'), 'schedule_posts: Post Next button not found');
@@ -108,7 +111,7 @@ module.exports = async function schedule_posts(page, params) {
 
     for (let i = 0; i < 4; i++) {
       await page.keyboard.press('Tab');
-      await page.waitForTimeout(1000);
+      await humanWait(page, 700, 1400);
     }
 
     const schedLater = page.locator('div[role="button"][aria-label="Schedule for later"]').first();

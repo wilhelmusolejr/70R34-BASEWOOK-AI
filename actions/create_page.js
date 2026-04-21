@@ -8,7 +8,7 @@
 
 const fs = require('fs');
 const axios = require('axios');
-const { humanClick } = require('../utils/humanBehavior');
+const { humanClick, humanWait } = require('../utils/humanBehavior');
 const { parseCityState, buildPageAddress } = require('../utils/pageAddressData');
 const {
   stepWait,
@@ -273,8 +273,8 @@ module.exports = async function create_page(page, params) {
     }
 
     if (profileTempPath || coverTempPath) {
-      console.log('  [create_page] Waiting 30s for page images to finish processing...');
-      await page.waitForTimeout(30000);
+      console.log('  [create_page] Waiting ~30s for page images to finish processing...');
+      await humanWait(page, 25000, 35000);
     }
 
     console.log('  [create_page] Step 2 → Next...');

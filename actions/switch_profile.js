@@ -5,7 +5,7 @@
  * switch button is not visible.
  */
 
-const { humanClick } = require('../utils/humanBehavior');
+const { humanClick, humanWait } = require('../utils/humanBehavior');
 const { stepWait } = require('../utils/pageSetupHelpers');
 
 module.exports = async function switch_profile(page, params) {
@@ -32,6 +32,6 @@ module.exports = async function switch_profile(page, params) {
   await humanClick(page, await switchBtn.boundingBox());
   await stepWait(page);
 
-  console.log('  [switch_profile] Cooling down 50s...');
-  await page.waitForTimeout(50000);
+  console.log('  [switch_profile] Cooling down ~50s...');
+  await humanWait(page, 45000, 55000);
 };
