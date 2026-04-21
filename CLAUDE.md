@@ -181,32 +181,105 @@ USER_API_BASE_URL=https://yourdomain.com  # dev/prod
 
 Endpoint: `GET ${USER_API_BASE_URL}/api/profiles/:id`
 
-Expected user shape (relevant fields):
+Expected user shape (real example, trimmed for readability):
 
 ```json
 {
-  "_id": "69e4a3378c3f0a567140fbcd",
-  "firstName": "Megan", "lastName": "Walker",
-  "bio": "...", "city": "...", "hometown": "...",
-  "personal": { "relationshipStatus": "...", "relationshipStatusSince": "...", "languages": [] },
-  "work": [...], "education": { "college": {...}, "highSchool": {...} },
-  "hobbies": [...], "travel": [...],
-  "images": [
-    { "imageId": { "filename": "/images/avatar.jpg" }, ... },
-    { "imageId": { "filename": "/images/cover.jpg"  }, ... }
+  "_id": "69e21bfbbb8fecced7bfda00",
+  "id": 1,
+  "firstName": "Leontius",
+  "lastName": "Ashby",
+  "dob": "08-14-1991",
+  "gender": "",
+  "emails": [
+    { "address": "leontius91ashby@outlook.com", "selected": true }
   ],
+  "emailPassword": "Wz6$Xn!4Bq",
+  "facebookPassword": "Lk5@Yt#9Mv",
+  "proxy": "ultra.marsproxies.com:44443:user:pass_country-us_city-anchorage_session-...",
+  "city": "Cincinnati, Ohio",
+  "hometown": "Hamilton, Ohio",
+  "bio": "Living life with purpose. tech-savvy and always growing.",
+  "status": "Active",
+  "profileUrl": "https://www.facebook.com/profile.php?id=61576436802736",
+  "pageUrl": "https://www.facebook.com/profile.php?id=61572337517505",
+
+  "profileCreated": "2026-04-17",
+  "accountCreated": "2026-04-01",
+  "hasPage": false,
+  "profileSetup": true,
+
+  "notes": "ip: 74.244.72.99\nloc: ...\ncity: Anchorage\ncountry: US\ntimezone: America/Anchorage\nzip_code: 99509\n...",
+  "identityPrompt": "Leontius Ashby is 34 years old living in Cincinnati, Ohio ... (used for share-message generation)",
+
+  "personal": {
+    "relationshipStatus": "Divorced",
+    "relationshipStatusSince": "2020",
+    "languages": ["English"]
+  },
+  "work": [
+    { "company": "Humana", "position": "Patient Care Technician",
+      "from": "2004", "to": "2006", "current": false, "city": "" }
+  ],
+  "education": {
+    "college":    { "name": "Missouri State University", "from": "2002", "to": "2006", "graduated": true, "degree": "Education" },
+    "highSchool": { "name": "St. Ignatius High School Cleveland", "from": "1998", "to": "2002", "graduated": true, "degree": "" }
+  },
+  "hobbies":   ["Electronics", "Astronomy", "Chess"],
+  "interests": { "music": [], "tvShows": [], "movies": [], "games": [], "sportsTeams": [] },
+  "travel":    [{ "place": "Dubrovnik, Croatia", "date": "2005-10" }],
+
+  "images": [
+    { "imageId": { "filename": "/images/image_post_<uuid>.jpg", "type": "post",
+                   "annotations": [{ "label": "Leontius Ashby", "x": 0.37, "y": 0.24, "width": 0.13, "height": 0.15 }] },
+      "assignedAt": "..." },
+    { "imageId": { "filename": "/images/image_post_<uuid>.jpg", "type": "post" }, "assignedAt": "..." }
+  ],
+
+  "linkedPage": {
+    "id": "69e4757eefac5420321d734e",
+    "pageName": "Northstar Tutors Hub",
+    "assets": [
+      { "imageId": { "filename": "/images/page_cover_<uuid>.png",   "type": "cover"   }, "type": "cover",   "postDescription": "..." },
+      { "imageId": { "filename": "/images/page_profile_<uuid>.png", "type": "profile" }, "type": "profile", "postDescription": "..." }
+    ],
+    "posts": [
+      { "id": "...", "post": "Back-To-School Boost 📚 ...", "images": [] },
+      { "id": "...", "post": "Ace Your Next Test 💡 ...",    "images": [] }
+    ]
+  },
+
+  "tags": [], "friends": 0, "has2FA": false, "websites": [], "socialLinks": [], "otherNames": [],
+
   "browsers": [
-    { "browserId": "local-uuid-here", "provider": "hidemium" }
-  ]
+    { "browserId": "local-51027952-6340-42f9-8fa9-c96d387ca6ca", "provider": "hidemium" }
+  ],
+  "trackerLog": [{ "date": "2026-04-20", "note": "share post" }],
+  "createdAt": "...", "updatedAt": "..."
 }
 ```
 
-- `images[0]` → avatar (has face annotation)
-- `images[1]` → cover photo
-- `browsers[0]` → always used (one provider per user)
-- `provider` field defaults to `"hidemium"` if empty or missing
+Key fields and how the runner uses them:
 
-Image URLs are built as `IMAGE_SERVER_BASE_URL + imageId.filename`.
+| Field | Used by |
+|-------|---------|
+| `_id` | `browserManager`, `check_ip` userId, `create_page` PATCH target |
+| `firstName`/`lastName` | `switch_profile` userName, `setup_about` name pronunciation (removed), identity prompts |
+| `emails[].address` (selected or `[0]`) | `create_page` email field |
+| `city` / `hometown` | `setup_about` current city + hometown, `create_page` city/town (via `parseCityState` in `utils/pageAddressData.js`) |
+| `bio` | `setup_about` bio, `create_page` bio (falls back to `user.bio` if `linkedPage.bio` empty) |
+| `personal`, `work`, `education`, `hobbies`, `travel`, `interests` | `setup_about` (all sections) |
+| `identityPrompt` | Passed as `userIdentity` to `share_posts`/`share_post` for GitHub Models message generation |
+| `images[0]` (has face annotation) | `setup_avatar` profile picture |
+| `images[1]` | `setup_cover` cover photo |
+| `linkedPage.pageName` / `bio` / `assets[0]` / `assets[1]` / `posts` | `create_page` + `schedule_posts` |
+| `browsers[0]` | `browserManager` — `browserId` + `provider` (defaults to `"hidemium"`) |
+| `pageUrl` | Written back via PATCH after `create_page` succeeds |
+
+Image URLs are built as `IMAGE_SERVER_BASE_URL + imageId.filename`. Page assets use
+positional fallback via `resolveSetupPageImages()` — `linkedPage.assets[0]` → profile,
+`linkedPage.assets[1]` → cover, since FB-scraped filenames don't contain reliable
+"profile"/"cover" keywords.
 
 ### `config/profiles.json` — human reference only
 
@@ -926,6 +999,59 @@ IP_LOG_ENDPOINT=https://yourdomain.com/api/profiles/:userId/ip-records
 ```
 
 Optional — if unset, the default constructed from `USER_API_BASE_URL` is used.
+
+## Anti-detection — behavior-level risks (read before editing actions)
+
+Code-level anti-detection (varied delays, mouse movement, offset clicks, per-char
+typing variance) is handled by `utils/humanBehavior.js`. Any handler that bypasses
+those helpers reintroduces risk. The audit below tracks known historical issues
+and their fixes — when editing action files, scan for the same patterns.
+
+### Historical fixes (don't reintroduce these patterns)
+
+| Pattern | File | Why it's a red flag | Fix |
+|---------|------|--------------------|-----|
+| `element.click()` on critical interactions | `schedule_posts.js` Create post heading | Instant click, no mouse trajectory, no bounding box randomization. FB's React DOM detection flags it immediately. | `humanClick(page, await locator.boundingBox())` |
+| `page.keyboard.type(text, { delay: N })` | `schedule_posts.js` post content | Uniform per-char delay is trivially fingerprintable. | `humanType(page, text)` — varies per-char and pauses after punctuation/spaces |
+| Fixed `waitForTimeout(fixedValue)` between actions | Any Tab loop, cooldowns | Perfectly periodic pauses are the single clearest bot signature. | `humanWait(page, min, max)` with a real range |
+| Fixed `waitForTimeout` for long cooldowns | `create_page` image processing wait, `switch_profile` cooldown | Lower risk than action-level pauses, but still contributes to a periodic session timeline. | `humanWait(page, min, max)` even for longer waits |
+
+### Behavior-level risks (can't be fixed in code)
+
+**These are workflow/data issues — code can't save you from them.**
+
+1. **Compound session workload.** A brand-new account doing `setup_avatar →
+   setup_about → setup_cover → create_page → schedule_posts → switch_profile →
+   add_friend × N` all in one session is a near-certain ban pattern, even with
+   perfectly humanlike clicks. Real humans discover features over days/weeks.
+2. **Early `create_page`.** Page creation is a high-trust action. FB's
+   first-72-hour trust model weights it heavily. Don't call `create_page` on an
+   account with no prior activity.
+3. **Uniform account timing.** If N accounts all run the same task at the same
+   time, the session shape repeats across accounts — detectable at the network
+   fleet level. Stagger start times per account, even by random minutes.
+4. **Duplicate media/content across accounts.** If the same avatar/cover/post
+   text is reused across accounts, FB detects it via media hashing. Each
+   account must have unique assets — this is handled upstream in the database
+   and is NOT something the runner can fix.
+
+### Recommended task staging for new accounts
+
+Split the setup across multiple sessions spread over days — do not bundle
+`setup_page_full` with the rest of the setup. A safer sequence:
+
+```
+Day 1   : setup_avatar + setup_about      (light identity setup)
+Day 1-2 : home_feed preset × 2-3 sessions (warmup activity — scroll, like a few)
+Day 3   : setup_cover                     (one more light change)
+Day 3-4 : home_feed × 2-3 more sessions   (continue warmup)
+Day 5+  : add_friend × few                (start social activity)
+Day 7+  : setup_page_full                 (only after account has real history)
+```
+
+The `trackerLog` field on each user record can record what was done and when,
+so the scheduler can pick the next-safe-action per account without re-reading
+Facebook state. Each action handler should append an entry on success.
 
 ## Direct `.click()` vs `humanClick`
 
