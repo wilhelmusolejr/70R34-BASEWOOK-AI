@@ -4,11 +4,29 @@
  */
 
 require('dotenv').config();
+const axios = require('axios');
 const { launchBrowsers, closeBrowsers } = require('./utils/browserManager');
 const presets = require('./config/presets.json');
 const { buildPageAddress } = require('./utils/pageAddressData');
 
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
+const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
+
+async function persistTrackerLog(userId, note) {
+  if (!userId || !note) return;
+  if (!USER_API_BASE_URL) {
+    console.warn('  [trackerLog] USER_API_BASE_URL not set — skipping tracker log POST.');
+    return;
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const target = `${USER_API_BASE_URL}/api/profiles/${userId}/tracker-logs`;
+  try {
+    await axios.post(target, { date: today, note }, { timeout: 15000 });
+    console.log(`  [trackerLog] Logged "${note}" → ${target}`);
+  } catch (err) {
+    console.warn(`  [trackerLog] Failed to POST tracker log: ${err.message}`);
+  }
+}
 
 function getAssetFilename(asset) {
   return asset?.imageId?.filename || asset?.filename || asset?.fileName || asset?.url || '';
@@ -144,7 +162,7 @@ function injectUserParams(steps, user) {
       s.params = {
         ...(step.params || {}),
         pageName: step.params?.pageName || user.linkedPage?.pageName || '',
-        bio: step.params?.bio ?? user.linkedPage?.bio ?? user.bio ?? '',
+        bio: step.params?.bio ?? user.linkedPage?.bio ?? '',
         email: step.params?.email || user.emails?.find((item) => item.selected)?.address || user.emails?.[0]?.address || '',
         streetAddress: step.params?.streetAddress || pageAddress.streetAddress,
         city: step.params?.city || user.city || '',
@@ -181,6 +199,14 @@ function injectUserParams(steps, user) {
       s.params = {
         ...(step.params || {}),
         city: user.city || '',
+      };
+    }
+
+    if ((step.type === 'share_posts' || step.type === 'share_post')
+        && !(step.params && step.params.userIdentity)) {
+      s.params = {
+        ...(step.params || {}),
+        userIdentity: user.identityPrompt || '',
       };
     }
 
@@ -287,14 +313,22 @@ async function runBrowser(session, steps, options = {}) {
   // }
 
   const injectedSteps = user ? injectUserParams(steps, user) : steps;
+  const completedTypes = [];
 
-  for (let i = 0; i < injectedSteps.length; i++) {
-    if (i > 0) {
-      const betweenMs = 5000 + Math.random() * 10000;
-      console.log(`[${profileId}] Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
-      await new Promise(r => setTimeout(r, betweenMs));
+  try {
+    for (let i = 0; i < injectedSteps.length; i++) {
+      if (i > 0) {
+        const betweenMs = 5000 + Math.random() * 10000;
+        console.log(`[${profileId}] Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
+        await new Promise(r => setTimeout(r, betweenMs));
+      }
+      await runStep(page, injectedSteps[i], profileId, user);
+      completedTypes.push(injectedSteps[i].type);
     }
-    await runStep(page, injectedSteps[i], profileId, user);
+  } finally {
+    const userId = user?._id || user?.id || '';
+    const note = completedTypes.join(', ');
+    await persistTrackerLog(userId, note);
   }
 
   const doneMs = 10000 + Math.random() * 5000;

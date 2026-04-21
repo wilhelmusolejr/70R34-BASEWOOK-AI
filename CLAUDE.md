@@ -273,7 +273,7 @@ Key fields and how the runner uses them:
 | `firstName`/`lastName` | `switch_profile` userName, `setup_about` name pronunciation (removed), identity prompts |
 | `emails[].address` (selected or `[0]`) | `create_page` email field |
 | `city` / `hometown` | `setup_about` current city + hometown, `create_page` city/town (via `parseCityState` in `utils/pageAddressData.js`) |
-| `bio` | `setup_about` bio, `create_page` bio (falls back to `user.bio` if `linkedPage.bio` empty) |
+| `bio` | `setup_about` bio (profile). NOT used for `create_page` — that uses `linkedPage.bio` only. |
 | `personal`, `work`, `education`, `hobbies`, `travel`, `interests` | `setup_about` (all sections) |
 | `identityPrompt` | Passed as `userIdentity` to `share_posts`/`share_post` for GitHub Models message generation |
 | `images[0]` (has face annotation) | `setup_avatar` profile picture |
@@ -747,7 +747,7 @@ Switch to user btn:       [aria-label="Switch to {userName}"]  (fallback: [aria-
 | Step type | Param | Source |
 |-----------|-------|--------|
 | `create_page` | `pageName` | `user.linkedPage.pageName` |
-| `create_page` | `bio` | `user.linkedPage.bio` → `user.bio` |
+| `create_page` | `bio` | `user.linkedPage.bio` (page bio only — NOT the profile `user.bio`) |
 | `create_page` | `email` | `user.emails` (selected or first) |
 | `create_page` | `city` / `state` / `zipCode` / `streetAddress` | `buildPageAddress({ city, state, zip_code })` |
 | `create_page` | `profilePhotoUrl` / `coverPhotoUrl` | `resolveSetupPageImages(user)` from `linkedPage.assets` |
@@ -1028,6 +1028,7 @@ params from the fetched user object:
 | `switch_profile` | `userName` from `user.firstName` + `user.lastName` |
 | `search` | `city` from `user.city` (used for `mode=page` → `"{category} in {city}"`) |
 | `check_ip` | `userId` from `user._id` |
+| `share_posts` / `share_post` | `userIdentity` from `user.identityPrompt` (triggers GitHub Models message generation when `message` is not also set) |
 
 Explicit params in `tasks.json` always take priority over injected values.
 
@@ -1155,9 +1156,29 @@ Day 5+  : add_friend × few                (start social activity)
 Day 7+  : setup_page_full                 (only after account has real history)
 ```
 
-The `trackerLog` field on each user record can record what was done and when,
-so the scheduler can pick the next-safe-action per account without re-reading
-Facebook state. Each action handler should append an entry on success.
+The `trackerLog` field on each user record records what was done and when, so
+the scheduler can pick the next-safe-action per account without re-reading
+Facebook state.
+
+### Auto-tracking — one entry per session
+
+`runner.js` → `runBrowser` posts a tracker-log entry at the end of every browser
+session (wrapped in `try/finally`, so partial failures still log what completed):
+
+```
+POST {USER_API_BASE_URL}/api/profiles/{userId}/tracker-logs
+Body: { "date": "YYYY-MM-DD", "note": "type1, type2, type3" }
+```
+
+- `date` — today, ISO short form (`new Date().toISOString().slice(0, 10)`).
+- `note` — comma-separated list of **top-level** step types that completed
+  successfully (children are not enumerated; `random_preset` is logged as
+  `random_preset`, not as the resolved preset's steps).
+- `userId` — resolved from `user._id` / `user.id`.
+
+POST errors are caught and `console.warn`'d — they never kill the session or
+the calling task. Posts are skipped if `userId`, `note`, or `USER_API_BASE_URL`
+is empty.
 
 ## Direct `.click()` vs `humanClick`
 
