@@ -40,7 +40,8 @@ JSON and hits the same endpoint.
 │   ├── add_friend.js            # Send friend request on current profile page
 │   ├── setup_about.js           # Fill About page sections
 │   ├── setup_avatar.js          # Upload profile picture from URL
-│   └── setup_cover.js           # Upload cover photo from URL
+│   ├── setup_cover.js           # Upload cover photo from URL
+│   └── check_ip.js              # Fetch browser's outbound IP and POST to database (auto-runs on browser open)
 ├── utils/
 │   ├── browserManager.js        # The ONLY file that knows about Hidemium
 │   ├── userApi.js               # Fetches user profile data from 3rd party API
@@ -485,26 +486,60 @@ Upload photo menuitem:  xpath=//div[@role="menuitem"][.//span[text()="Upload pho
 Save changes (polling): querySelectorAll('[aria-label="Save changes"]') via waitForFunction
 ```
 
-## `setup_page` — Facebook Page creation + post scheduling
+## Facebook Page setup — `create_page` + `schedule_posts` + `switch_profile`
 
-`actions/setup_page.js` creates a Facebook Page for the logged-in account, fills
-all required fields, uploads profile/cover images, then schedules posts from
-`user.linkedPage.posts` — one post per day starting tomorrow.
+Facebook Page setup is split into three composable actions so each step is
+retryable on its own and doesn't re-run Page creation on downstream failures:
+
+| Action | Kind | Responsibility |
+|--------|------|----------------|
+| `create_page` | Navigator | Open Facebook menu → Pages → Create Page, fill all form fields, upload profile + cover, advance through Steps 2-5. Ends on the new Page URL (`/profile.php?id=*`). |
+| `schedule_posts` | Leaf | Schedule posts from `params.posts[]` on the currently loaded Page — one per day starting tomorrow. Individual post failures are logged, not rethrown. |
+| `switch_profile` | Leaf | Your profile → Switch to [userName] → 50s cooldown. Falls back to "Quick switch profiles". |
+
+Composed via the `setup_page_full` preset (`config/presets.json`):
+
+```json
+{ "type": "random_preset", "params": { "from": ["setup_page_full"] } }
+```
+
+Or directly as nested steps:
+
+```json
+{
+  "type": "create_page",
+  "steps": [
+    { "type": "schedule_posts" },
+    { "type": "switch_profile" }
+  ]
+}
+```
+
+Shared helpers live in `utils/pageSetupHelpers.js` (`stepWait`, `downloadToTemp`,
+`clickAndReplace`, `typeAndSelect`, `clickLocator`, `uploadImageFromButton`,
+`getFirstVisibleLocator`).
 
 ### Navigation pattern
 
 ```
-facebook.com  →  Facebook menu  →  Pages  →  Create Page  →  Public Page  →  Next
-  →  Get started  →  fill name/category/bio  →  Create Page (advance)
-  →  fill contact/location/hours  →  Next
-  →  Step 2: upload profile + cover  →  Next
-  →  Step 3: Connect WhatsApp       →  Skip
-  →  Step 4: Build Page audience    →  Next
-  →  Step 5: Stay informed          →  Done  (page now created)
-  →  wait for URL: facebook.com/profile.php?id=*  (confirms creation)
-  →  dismiss cookies popup if present
-  →  schedule posts loop  (best-effort — errors logged, not rethrown)
-  →  Your profile  →  Switch to [userName]  →  50s cooldown  (best-effort)
+create_page:
+  facebook.com  →  Facebook menu  →  Pages  →  Create Page  →  Public Page  →  Next
+    →  Get started  →  fill name/category/bio  →  Create Page (advance)
+    →  fill contact/location/hours  →  Next
+    →  Step 2: upload profile + cover  →  Next
+    →  Step 3: Connect WhatsApp       →  Skip
+    →  Step 4: Build Page audience    →  Next
+    →  Step 5: Stay informed          →  Done  (page now created)
+    →  wait for URL: facebook.com/profile.php?id=*  (confirms creation)
+    →  dismiss cookies popup if present
+
+schedule_posts (child step — runs on the newly created Page):
+  loop posts → What's on your mind? → dismiss Not now → type content → Next
+    → Scheduling options → pick date → Schedule for later → Schedule
+    → confirm Publish Original Post if shown → handleAfterSchedule (30-60s wait)
+
+switch_profile (child step):
+  Your profile  →  Switch to [userName]  →  50s cooldown
 ```
 
 ### Image resolution — `linkedPage.assets`
@@ -551,13 +586,14 @@ the editor, then `page.keyboard.type(content, { delay: 80 })`.
 
 ### Post-creation error safety
 
-Steps after page creation (post scheduling + switch back) are wrapped in a
-**best-effort try/catch** — errors are logged with `console.warn` but NOT rethrown.
-This prevents `runner.js` from retrying `setup_page` from scratch, which would
-create a duplicate Facebook Page.
+The split itself enforces retry safety — `runner.js` retries only the failing
+step, so a `schedule_posts` or `switch_profile` failure never re-runs
+`create_page` and never creates a duplicate Facebook Page.
 
-- Form fill errors (before Done) → thrown → runner retries safely (no page yet)
-- Post scheduling / switch errors (after Done) → caught, logged, no retry
+- `create_page` errors → runner retries safely (Page not yet created on attempt 1)
+- `schedule_posts` errors → per-post retry inside the handler (reload + retry
+  up to 3×); final failures logged and skipped so the loop continues
+- `switch_profile` errors → handler retries per normal step retry policy
 
 ### Confirmed selectors
 
@@ -597,15 +633,15 @@ Switch to user btn:       [aria-label="Switch to {userName}"]  (fallback: [aria-
 
 ### Params (auto-injected by `injectUserParams`)
 
-| Param | Source |
-|-------|--------|
-| `pageName` | `user.linkedPage.pageName` |
-| `bio` | `user.linkedPage.bio` → `user.bio` |
-| `email` | `user.emails` (selected or first) |
-| `city` / `state` / `zipCode` | `buildPageAddress({ city, state, zip_code })` |
-| `profilePhotoUrl` / `coverPhotoUrl` | `resolveSetupPageImages(user)` from `linkedPage.assets` |
-| `posts` | `user.linkedPage.posts` |
-| `userName` | `user.firstName + user.lastName` |
+| Step type | Param | Source |
+|-----------|-------|--------|
+| `create_page` | `pageName` | `user.linkedPage.pageName` |
+| `create_page` | `bio` | `user.linkedPage.bio` → `user.bio` |
+| `create_page` | `email` | `user.emails` (selected or first) |
+| `create_page` | `city` / `state` / `zipCode` / `streetAddress` | `buildPageAddress({ city, state, zip_code })` |
+| `create_page` | `profilePhotoUrl` / `coverPhotoUrl` | `resolveSetupPageImages(user)` from `linkedPage.assets` |
+| `schedule_posts` | `posts` | `user.linkedPage.posts` |
+| `switch_profile` | `userName` | `user.firstName + user.lastName` |
 
 ## `visit_profile` + `add_friend` — Profile visit and friend request
 
@@ -791,7 +827,9 @@ params from the fetched user object:
 | `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `travel` |
 | `setup_avatar` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[0].imageId.filename` |
 | `setup_cover` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[1].imageId.filename` |
-| `setup_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `posts` — all from `user.linkedPage` + `buildPageAddress` |
+| `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl` — from `user.linkedPage` + `buildPageAddress` |
+| `schedule_posts` | `posts` from `user.linkedPage.posts` |
+| `switch_profile` | `userName` from `user.firstName` + `user.lastName` |
 
 Explicit params in `tasks.json` always take priority over injected values.
 
@@ -803,6 +841,72 @@ The href is always `"/"` regardless of notification state.
 
 **Flow:** click the Home button if found + has bounding box → fall back to
 `goto https://www.facebook.com` if not.
+
+## `check_ip` — Auto IP recording on every browser open
+
+`actions/check_ip.js` fetches the browser's outbound IP from `https://ipinfo.io/json`
+and POSTs the result to the database. It runs automatically at the start of every
+browser session in `runner.js` (right after the Facebook navigation, before any
+user steps) so every browser open is recorded — and it's also registered as a
+regular leaf action, so it can be composed in `tasks.json` when needed.
+
+### How the IP is fetched — `page.evaluate(fetch)`, not Node fetch
+
+```javascript
+await page.evaluate(async (url) => {
+  const res = await fetch(url, { cache: 'no-store' });
+  return res.json();
+}, 'https://ipinfo.io/json');
+```
+
+This runs inside the browser's page context so the request goes through the
+Hidemium profile's configured proxy. A Node `fetch`/`axios` call from the server
+process would exit through the **host machine's IP** — wrong — and
+`page.request.get()` uses Playwright's separate APIRequestContext which does
+**not** reliably inherit the CDP-connected browser's proxy.
+
+The page must be on a real origin before calling — `about:blank` has no fetch
+context. That's why the auto-run in `runBrowser` fires only after the Facebook
+navigation has completed. `ipinfo.io` returns `Access-Control-Allow-Origin: *`,
+so the cross-origin fetch from `facebook.com` succeeds.
+
+### Endpoint resolution (database POST target)
+
+Resolved in this priority order:
+
+1. `params.endpoint` — explicit override in a `tasks.json` step
+2. `IP_LOG_ENDPOINT` env var (`:userId` placeholder is replaced at call time)
+3. `${USER_API_BASE_URL}/api/profiles/:userId/ip-records` (default construction)
+4. Falls back to logging only — no POST, no error thrown
+
+POST payload shape:
+
+```json
+{
+  "userId": "69e4a3378c3f0a567140fbcd",
+  "recordedAt": "2026-04-21T14:05:12.000Z",
+  "ipInfo": { "ip": "...", "city": "...", "region": "...", "country": "...", "org": "...", "...": "..." }
+}
+```
+
+POST errors are caught and logged with `console.warn` — they never kill the
+session. The whole auto-run is also wrapped in a try/catch in `runBrowser` so a
+proxy hiccup on the IP lookup doesn't abort the task.
+
+### Params
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `userId` | string | no | Auto-injected from `user._id` / `user.id` via `injectUserParams` |
+| `endpoint` | string | no | Full override URL. Defaults to `IP_LOG_ENDPOINT` env → `USER_API_BASE_URL + /api/profiles/:userId/ip-records` |
+
+### `.env` var
+
+```
+IP_LOG_ENDPOINT=https://yourdomain.com/api/profiles/:userId/ip-records
+```
+
+Optional — if unset, the default constructed from `USER_API_BASE_URL` is used.
 
 ## Direct `.click()` vs `humanClick`
 
@@ -845,7 +949,7 @@ The href is always `"/"` regardless of notification state.
 - [x] Between-step delays (5–15s) and post-task cooldown (10–15s)
 - [x] `setup_cover` fixed for duplicate `[aria-label="Save changes"]` elements
 - [x] `IMAGE_SERVER_BASE_URL` + `USER_API_BASE_URL` + `NODE_ENV` in `.env`
-- [x] `setup_page` — creates FB page, fills form, uploads images, schedules posts from `linkedPage.posts`
+- [x] `create_page` + `schedule_posts` + `switch_profile` — split from the old `setup_page` action into one navigator + two leaves, composed via the `setup_page_full` preset
 - [x] `utils/pageAddressData.js` — parses city/state strings, seeds ZIP codes by state
 - [ ] `comment_post`, `follow`, `join_group`, `send_message`
 - [ ] Enable Claude API for comment/share generation

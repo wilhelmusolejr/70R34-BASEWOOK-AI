@@ -46,10 +46,13 @@ const handlers = {
   setup_about: require('./actions/setup_about'),
   setup_avatar: require('./actions/setup_avatar'),
   setup_cover: require('./actions/setup_cover'),
-  setup_page: require('./actions/setup_page'),
+  create_page: require('./actions/create_page'),
+  schedule_posts: require('./actions/schedule_posts'),
+  switch_profile: require('./actions/switch_profile'),
   add_friend: require('./actions/add_friend'),
   visit_profile: require('./actions/visit_profile'),
   share_post: require('./actions/share_post'),
+  check_ip: require('./actions/check_ip'),
 };
 
 
@@ -121,7 +124,7 @@ function injectUserParams(steps, user) {
       }
     }
 
-    if (step.type === 'setup_page') {
+    if (step.type === 'create_page') {
       const pageAddress = buildPageAddress({
         city: user.city,
         state: user.state,
@@ -140,8 +143,27 @@ function injectUserParams(steps, user) {
         zipCode: step.params?.zipCode || pageAddress.zipCode,
         profilePhotoUrl: step.params?.profilePhotoUrl || pageImages.profilePhotoUrl,
         coverPhotoUrl: step.params?.coverPhotoUrl || pageImages.coverPhotoUrl,
-        posts: step.params?.posts || user.linkedPage?.posts || [],
-        userName: step.params?.userName || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+      };
+    }
+
+    if (step.type === 'schedule_posts' && !(step.params && step.params.posts)) {
+      s.params = {
+        ...(step.params || {}),
+        posts: user.linkedPage?.posts || [],
+      };
+    }
+
+    if (step.type === 'switch_profile' && !(step.params && step.params.userName)) {
+      s.params = {
+        ...(step.params || {}),
+        userName: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+      };
+    }
+
+    if (step.type === 'check_ip' && !(step.params && step.params.userId)) {
+      s.params = {
+        ...(step.params || {}),
+        userId: user._id || user.id || '',
       };
     }
 
@@ -155,8 +177,10 @@ function injectUserParams(steps, user) {
 
 /**
  * Resolve a random_preset step into a preset and run its steps.
+ * Preset steps are passed through injectUserParams so they get the same
+ * auto-injection treatment as top-level tasks.json steps.
  */
-async function runRandomPreset(page, step, profileId) {
+async function runRandomPreset(page, step, profileId, user) {
   const pool = (step.params && step.params.from) || Object.keys(presets);
   const validKeys = pool.filter((k) => presets[k]);
 
@@ -167,17 +191,19 @@ async function runRandomPreset(page, step, profileId) {
 
   console.log(`[${profileId}] random_preset → "${key}" (${preset.description || ''})`);
 
-  for (const presetStep of preset.steps) {
-    await runStep(page, presetStep, profileId);
+  const presetSteps = user ? injectUserParams(preset.steps, user) : preset.steps;
+
+  for (const presetStep of presetSteps) {
+    await runStep(page, presetStep, profileId, user);
   }
 }
 
 /**
  * Execute a single step and recurse into child steps.
  */
-async function runStep(page, step, profileId) {
+async function runStep(page, step, profileId, user) {
   if (step.type === 'random_preset') {
-    await runRandomPreset(page, step, profileId);
+    await runRandomPreset(page, step, profileId, user);
     return;
   }
 
@@ -199,7 +225,7 @@ async function runStep(page, step, profileId) {
       const betweenMs = 5000 + Math.random() * 10000;
       console.log(`[${profileId}] Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
       await new Promise(r => setTimeout(r, betweenMs));
-      await runStep(page, childStep, profileId);
+      await runStep(page, childStep, profileId, user);
     }
   }
 }
@@ -234,6 +260,15 @@ async function runBrowser(session, steps, options = {}) {
     await page.waitForTimeout(2000 + Math.random() * 1500);
   }
 
+  // Temporarily disabled: keep check_ip available as an explicit step,
+  // but do not auto-trigger it on every browser session.
+  // try {
+  //   console.log(`[${profileId}] Recording browser IP...`);
+  //   await handlers.check_ip(page, { userId: user?._id || user?.id || profileId });
+  // } catch (err) {
+  //   console.warn(`[${profileId}] check_ip failed (non-fatal): ${err.message}`);
+  // }
+
   const injectedSteps = user ? injectUserParams(steps, user) : steps;
 
   for (let i = 0; i < injectedSteps.length; i++) {
@@ -242,7 +277,7 @@ async function runBrowser(session, steps, options = {}) {
       console.log(`[${profileId}] Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
       await new Promise(r => setTimeout(r, betweenMs));
     }
-    await runStep(page, injectedSteps[i], profileId);
+    await runStep(page, injectedSteps[i], profileId, user);
   }
 
   const doneMs = 10000 + Math.random() * 5000;

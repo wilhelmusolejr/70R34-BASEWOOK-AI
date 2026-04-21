@@ -130,8 +130,8 @@ const actionSchemas = {
     },
     hasChildren: false
   },
-  setup_page: {
-    description: 'Create a Facebook page by filling the page name, category, and bio, then clicking Create Page.',
+  create_page: {
+    description: 'Navigator: create a Facebook Page, fill all form fields, upload profile + cover, and advance through Steps 2-5. Ends on the new Page URL so child steps (schedule_posts, switch_profile) can run on it.',
     params: {
       pageName: { type: 'string', description: 'Page name to create' },
       bio: { type: 'string', default: '', description: 'Bio/description for the page' },
@@ -142,8 +142,38 @@ const actionSchemas = {
       zipCode: { type: 'string', default: '', description: 'ZIP code. Uses user.zip_code if present, otherwise a local seed dataset.' },
       profilePhotoUrl: { type: 'string', default: '', description: 'Profile image URL for the page' },
       coverPhotoUrl: { type: 'string', default: '', description: 'Cover image URL for the page' },
-      categoryKeyword: { type: 'string', default: '', description: 'Optional category keyword. Defaults to the first word of pageName.' },
-      createUrl: { type: 'string', default: 'https://www.facebook.com/pages/create', description: 'Page creation URL to open before filling the form' }
+      categoryKeyword: { type: 'string', default: '', description: 'Optional category keyword. Defaults to the first word of pageName.' }
+    },
+    hasChildren: true
+  },
+  schedule_posts: {
+    description: 'Schedule posts on the currently loaded Facebook Page — one post per day starting tomorrow. Individual post failures are logged, not rethrown.',
+    params: {
+      posts: {
+        type: 'array',
+        description: 'Posts to schedule. Auto-injected from user.linkedPage.posts when omitted.',
+        items: {
+          type: 'object',
+          properties: {
+            post: { type: 'string', description: 'Post text content' }
+          }
+        }
+      }
+    },
+    hasChildren: false
+  },
+  switch_profile: {
+    description: 'Switch back to the personal user profile from a Page. Falls back to "Quick switch profiles" when the named button is missing.',
+    params: {
+      userName: { type: 'string', default: '', description: 'Full name on the personal profile. Auto-injected from user firstName + lastName when omitted.' }
+    },
+    hasChildren: false
+  },
+  check_ip: {
+    description: 'Fetch the browser\'s outbound IP from ipinfo.io (via the profile\'s proxy, not the host network) and POST it to the database. Runs automatically at the start of every browser session; can also be composed as a step.',
+    params: {
+      userId: { type: 'string', default: '', description: 'User ID to attach the IP record to. Auto-injected from user._id when omitted.' },
+      endpoint: { type: 'string', default: '', description: 'Override POST endpoint. Defaults to IP_LOG_ENDPOINT env, then USER_API_BASE_URL + /api/profiles/:userId/ip-records.' }
     },
     hasChildren: false
   }
