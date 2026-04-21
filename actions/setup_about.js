@@ -1,4 +1,26 @@
+const axios = require('axios');
 const { humanWait, humanClick, humanType } = require('../utils/humanBehavior');
+
+const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
+
+async function markProfileSetup(userId) {
+  if (!userId) {
+    console.warn('  [setup_about] No userId provided — skipping status/profileSetup PATCH.');
+    return;
+  }
+  if (!USER_API_BASE_URL) {
+    console.warn('  [setup_about] USER_API_BASE_URL not set — skipping status/profileSetup PATCH.');
+    return;
+  }
+
+  const target = `${USER_API_BASE_URL}/api/profiles/${userId}`;
+  try {
+    await axios.patch(target, { status: 'Active', profileSetup: true }, { timeout: 15000 });
+    console.log(`  [setup_about] PATCHed status=Active, profileSetup=true → ${target}`);
+  } catch (err) {
+    console.warn(`  [setup_about] Failed to PATCH profile setup flags: ${err.message}`);
+  }
+}
 
 // ========================= NAVIGATION HELPERS =========================
 
@@ -922,7 +944,7 @@ async function setNamePronunciation(page) {
 // ========================= MAIN HANDLER =========================
 
 module.exports = async function setupAbout(page, params) {
-  const { bio, city, hometown, personal, work, education, hobbies, interests, travel } = params;
+  const { bio, city, hometown, personal, work, education, hobbies, interests, travel, userId = '' } = params;
 
   console.log('  [setup_about] Navigating to own profile...');
   await goToOwnProfile(page);
@@ -949,4 +971,5 @@ module.exports = async function setupAbout(page, params) {
   }
 
   console.log('  [setup_about] Profile about setup complete');
+  await markProfileSetup(userId);
 };

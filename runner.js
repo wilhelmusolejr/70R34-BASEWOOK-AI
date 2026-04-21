@@ -53,6 +53,9 @@ const handlers = {
   visit_profile: require('./actions/visit_profile'),
   share_post: require('./actions/share_post'),
   check_ip: require('./actions/check_ip'),
+  search: require('./actions/search'),
+  open_search_result: require('./actions/open_search_result'),
+  follow: require('./actions/follow'),
 };
 
 
@@ -101,6 +104,12 @@ function injectUserParams(steps, user) {
         education: user.education,
         hobbies: user.hobbies,
         travel: user.travel,
+        userId: user._id || user.id || '',
+      };
+    } else if (step.type === 'setup_about' && !(step.params && step.params.userId)) {
+      s.params = {
+        ...(step.params || {}),
+        userId: user._id || user.id || '',
       };
     }
 
@@ -165,6 +174,13 @@ function injectUserParams(steps, user) {
       s.params = {
         ...(step.params || {}),
         userId: user._id || user.id || '',
+      };
+    }
+
+    if (step.type === 'search' && !(step.params && step.params.city)) {
+      s.params = {
+        ...(step.params || {}),
+        city: user.city || '',
       };
     }
 

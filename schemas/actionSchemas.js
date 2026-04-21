@@ -46,11 +46,12 @@ const actionSchemas = {
     hasChildren: false
   },
   setup_about: {
-    description: 'Fill in Facebook profile About section (bio, work, education, places, relationship). Self-navigates via /me — no profileUrl needed.',
+    description: 'Fill in Facebook profile About section (bio, work, education, places, relationship). Self-navigates via /me — no profileUrl needed. On completion, PATCHes the user record with status="Active" and profileSetup=true.',
     params: {
       bio: { type: 'string', description: 'Profile bio / intro text' },
       city: { type: 'string', description: 'Current city' },
       hometown: { type: 'string', description: 'Hometown' },
+      userId: { type: 'string', default: '', description: 'User ID for the PATCH call that sets status=Active + profileSetup=true. Auto-injected from user._id when omitted.' },
       personal: {
         type: 'object',
         description: 'Personal details',
@@ -168,6 +169,29 @@ const actionSchemas = {
     params: {
       userName: { type: 'string', default: '', description: 'Full name on the personal profile. Auto-injected from user firstName + lastName when omitted.' }
     },
+    hasChildren: false
+  },
+  search: {
+    description: 'Navigator: search Facebook. Provide explicit `query`, or auto-generate — mode="name" (random first + last from 100×100 pools), mode="news" (random US state + news keyword), or mode="page" ("{category} in {city}" — city auto-injected from user.city). Optional `filter` clicks a results tab. Use child steps to act on the results.',
+    params: {
+      query: { type: 'string', default: '', description: 'Explicit search query. Overrides mode-based generation when provided.' },
+      mode: { type: 'string', default: 'name', enum: ['name', 'news', 'page'], description: 'How to generate a query when `query` is empty' },
+      filter: { type: 'string', default: '', description: 'Optional results-tab filter to click after search (e.g. "People", "Posts", "Videos", "Pages", "Groups")' },
+      category: { type: 'string', default: '', description: 'Page-mode category override (e.g. "Photography"). Random from built-in pool when omitted.' },
+      city: { type: 'string', default: '', description: 'Page-mode city override (e.g. "Los Angeles, California"). Auto-injected from user.city when omitted.' }
+    },
+    hasChildren: true
+  },
+  open_search_result: {
+    description: 'Navigator: pick a profile/page link from the current search-results page (a[href*="/profile.php?id="]) and click into it. Use as a child of `search`; child steps then act on that profile/page.',
+    params: {
+      pick: { type: 'string', default: 'random', description: 'Which result to open: "random" (default), "first", or an integer index (0-based)' }
+    },
+    hasChildren: true
+  },
+  follow: {
+    description: 'Leaf: click the Follow button on the currently loaded page. Selector is the same on profiles, pages, and inline search-result cards.',
+    params: {},
     hasChildren: false
   },
   check_ip: {

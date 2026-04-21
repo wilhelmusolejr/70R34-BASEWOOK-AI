@@ -33,14 +33,20 @@ JSON and hits the same endpoint.
 ├── actions/                     # One file per action handler
 │   ├── homepage_interaction.js  # Navigate to home feed (href="/" button → goto fallback)
 │   ├── visit_profile.js         # Navigate to a profile by URL (navigator)
+│   ├── search.js                # Search Facebook — name/news/page modes (navigator)
+│   ├── open_search_result.js    # Open a profile/page link from search results (navigator)
 │   ├── scroll.js
 │   ├── like_posts.js            # Like posts on current page (feed-aware)
 │   ├── share_posts.js           # Share posts on current page (feed-aware)
 │   ├── share_post.js            # Share a specific post by URL
-│   ├── add_friend.js            # Send friend request on current profile page
-│   ├── setup_about.js           # Fill About page sections
+│   ├── add_friend.js            # Send friend request — works on profile pages AND inline search cards
+│   ├── follow.js                # Click Follow on current page/card (leaf)
+│   ├── setup_about.js           # Fill About page sections + PATCH status=Active, profileSetup=true
 │   ├── setup_avatar.js          # Upload profile picture from URL
 │   ├── setup_cover.js           # Upload cover photo from URL
+│   ├── create_page.js           # Create a Facebook Page (navigator)
+│   ├── schedule_posts.js        # Schedule posts on currently loaded Page (leaf)
+│   ├── switch_profile.js        # Switch back to personal profile from a Page (leaf)
 │   └── check_ip.js              # Fetch browser's outbound IP and POST to database (auto-runs on browser open)
 ├── utils/
 │   ├── browserManager.js        # The ONLY file that knows about Hidemium
@@ -69,9 +75,9 @@ Every JSON step has this shape:
 **Two kinds of actions:**
 
 1. **Navigators** change what page the browser is showing
-   (`visit_profile`, `search`, `visit_group`, `homepage_interaction`)
+   (`visit_profile`, `search`, `open_search_result`, `create_page`, `homepage_interaction`)
 2. **Leaves** act on whatever page is currently showing
-   (`add_friend`, `scroll`, `like_posts`, `comment_post`)
+   (`add_friend`, `follow`, `scroll`, `like_posts`, `share_posts`, `schedule_posts`, `switch_profile`)
 
 **The runner walks steps recursively:**
 
@@ -390,6 +396,19 @@ const {
 logged-in account. It self-navigates (no `profileUrl` param needed) and covers:
 bio, city/hometown, relationship status, work, education, hobbies, interests,
 travel, and name pronunciation.
+
+**Database side-effect:** after every section finishes, the handler PATCHes the
+user record so downstream work can tell the account is ready:
+
+```
+PATCH {USER_API_BASE_URL}/api/profiles/{userId}
+Body: { "status": "Active", "profileSetup": true }
+```
+
+`userId` is auto-injected from `user._id` via `injectUserParams`. PATCH errors
+are caught + logged — they never kill the session. The PATCH runs only after
+all sections complete, so a mid-setup failure leaves the flags unchanged and a
+retry re-runs cleanly.
 
 ### Navigation pattern
 
@@ -738,8 +757,11 @@ Switch to user btn:       [aria-label="Switch to {userName}"]  (fallback: [aria-
 ## `visit_profile` + `add_friend` — Profile visit and friend request
 
 - `visit_profile` is a **navigator** — navigates to a profile URL, then child steps act on it.
-- `add_friend` is a **leaf** — clicks the Add Friend button on the currently loaded profile.
-- `aria-label^="Add Friend"` prefix match handles the dynamic name (e.g. "Add Friend Joan").
+- `add_friend` is a **leaf** — clicks the Add Friend button on whatever is currently showing.
+- Works in **two contexts**, picked via union locator:
+  - Dedicated profile page — `[aria-label^="Add Friend"]` (capital F, dynamic "Add Friend Joan")
+  - Inline search-result card — `[aria-label="Add friend"]` (lowercase f, exact)
+- Scrolls the button to viewport center (`scrollToCenter`) before clicking so virtualized/off-screen buttons don't return null bounding boxes.
 
 ### Usage
 
@@ -754,8 +776,90 @@ Switch to user btn:       [aria-label="Switch to {userName}"]  (fallback: [aria-
 ### Confirmed selectors
 
 ```
-Add Friend button:  div[role="button"][aria-label^="Add Friend"]
+Add Friend (profile page)   :  div[role="button"][aria-label^="Add Friend"]
+Add friend (inline on card) :  div[role="button"][aria-label="Add friend"]
 ```
+
+## `search` + `open_search_result` + `follow` — Search flow
+
+Three composable actions for searching Facebook and interacting with results.
+
+| Action | Kind | Responsibility |
+|--------|------|----------------|
+| `search` | Navigator | Types a query into the FB search box, submits, optionally clicks a results-tab filter. Ends on the search-results page. |
+| `open_search_result` | Navigator | Picks one `a[href*="/profile.php?id="]` anchor from the current results page, scrolls it into center, clicks it. Ends on that profile/page. |
+| `follow` | Leaf | Clicks `[aria-label="Follow"]` on the current page — same selector works on profiles, pages, and inline inside search-result cards. |
+
+### `search` — query generation
+
+Three modes, all overridable by explicit `query`:
+
+| Mode | Generation |
+|------|------------|
+| `name` (default) | `{first} {last}` — random from two 100-entry pools (~10,000 combos) |
+| `news` | `{US state} {keyword}` — 50 states × 12 keywords |
+| `page` | `{category} in {city}` — 25-entry category pool; `city` auto-injected from `user.city` (e.g. `"Photography in Cincinnati, Ohio"`) |
+
+Optional `filter` param clicks a results tab after submission (`"People"`, `"Pages"`, `"Posts"`, `"Videos"`, `"Groups"`). Filter text is matched against visible `<span>` text inside `a[role="link"]`.
+
+### `open_search_result` — pick strategy
+
+1. `await page.$$('a[href*="/profile.php?id="]')` — collects all profile/page anchors currently in DOM.
+2. Dedupes by href (the avatar link and the name link often point at the same target; without dedupe the random pick is weighted toward whoever appears twice).
+3. `pick` param: `"random"` (default), `"first"`, or integer index.
+4. Uses `scrollToCenter` from `humanBehavior.js` (mouse-wheel, not JS scroll) before clicking.
+
+Because `/profile.php?id=*` is FB's canonical URL for **both** users and pages, this action handles either target uniformly. Filter the result type by setting `search.filter` upstream — `"People"` yields user links, `"Pages"` yields page links.
+
+### Usage patterns
+
+```json
+// Inline follow on any person matching a random name
+{ "type": "search", "params": { "mode": "name", "filter": "People" },
+  "steps": [{ "type": "follow" }] }
+
+// Inline add friend on a name search
+{ "type": "search", "params": { "mode": "name", "filter": "People" },
+  "steps": [{ "type": "add_friend" }] }
+
+// Category-in-city page search → open a page → scroll, like, follow
+{ "type": "search", "params": { "mode": "page", "filter": "Pages" },
+  "steps": [{
+    "type": "open_search_result",
+    "steps": [
+      { "type": "scroll",     "params": { "duration": 10 } },
+      { "type": "like_posts", "params": { "count": 2 } },
+      { "type": "follow" }
+    ]
+  }] }
+
+// News search → scroll + like + share
+{ "type": "search", "params": { "mode": "news", "filter": "Posts" },
+  "steps": [
+    { "type": "scroll",      "params": { "duration": 8 } },
+    { "type": "like_posts",  "params": { "count": 2 } },
+    { "type": "share_posts", "params": { "count": 1 } }
+  ] }
+```
+
+### Confirmed selectors
+
+```
+Search input (union):   input[aria-label="Search Facebook"][type="search"],
+                        input[placeholder="Search Facebook"][role="combobox"],
+                        input[type="search"][role="combobox"]
+Results-tab filter:     xpath=//a[@role="link"][.//span[normalize-space(text())="<FilterText>"]]
+Profile/page anchor:    a[href*="/profile.php?id="]
+Follow button:          [aria-label="Follow"]
+```
+
+### Auto-injection
+
+| Step | Param | Source |
+|------|-------|--------|
+| `search` | `city` (for mode=page) | `user.city` via `injectUserParams` |
+| `open_search_result` | — | — |
+| `follow` | — | — |
 
 ## Virtualized feed — `like_posts` and `share_posts`
 
@@ -916,12 +1020,14 @@ params from the fetched user object:
 
 | Step type | Injected from user |
 |-----------|-------------------|
-| `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `travel` |
+| `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `travel`, `userId` (for the PATCH to status=Active, profileSetup=true) |
 | `setup_avatar` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[0].imageId.filename` |
 | `setup_cover` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[1].imageId.filename` |
-| `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl` — from `user.linkedPage` + `buildPageAddress` |
+| `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId` — from `user.linkedPage` + `buildPageAddress` |
 | `schedule_posts` | `posts` from `user.linkedPage.posts` |
 | `switch_profile` | `userName` from `user.firstName` + `user.lastName` |
+| `search` | `city` from `user.city` (used for `mode=page` → `"{category} in {city}"`) |
+| `check_ip` | `userId` from `user._id` |
 
 Explicit params in `tasks.json` always take priority over injected values.
 
@@ -1096,7 +1202,12 @@ Facebook state. Each action handler should append an entry on success.
 - [x] `IMAGE_SERVER_BASE_URL` + `USER_API_BASE_URL` + `NODE_ENV` in `.env`
 - [x] `create_page` + `schedule_posts` + `switch_profile` — split from the old `setup_page` action into one navigator + two leaves, composed via the `setup_page_full` preset
 - [x] `utils/pageAddressData.js` — parses city/state strings, seeds ZIP codes by state
-- [ ] `comment_post`, `follow`, `join_group`, `send_message`
+- [x] `search` — navigator with three modes (name, news, page); `mode=page` → `"{category} in {city}"` using user.city
+- [x] `open_search_result` — navigator, picks a random `/profile.php?id=*` anchor from results and clicks in
+- [x] `follow` — leaf, `[aria-label="Follow"]` works on profiles, pages, AND inline result cards
+- [x] `add_friend` — extended to match both `[aria-label^="Add Friend"]` (profile) and `[aria-label="Add friend"]` (inline)
+- [x] `setup_about` PATCHes `status="Active"` + `profileSetup=true` on completion
+- [ ] `comment_post`, `join_group`, `send_message`
 - [ ] Enable Claude API for comment/share generation
 - [ ] Task state tracking (SQLite)
 - [ ] Per-task, per-browser logging
