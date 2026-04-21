@@ -25,17 +25,5 @@
         "steps": [{ "type": "add_friend" }]
       }
     ]
-  },
-  "setup_page_full": {
-    "description": "Create a Facebook page, schedule posts on it, then switch back to personal profile",
-    "steps": [
-      {
-        "type": "create_page",
-        "steps": [
-          { "type": "schedule_posts" },
-          { "type": "switch_profile" }
-        ]
-      }
-    ]
   }
 }
