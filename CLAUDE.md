@@ -595,6 +595,25 @@ step, so a `schedule_posts` or `switch_profile` failure never re-runs
   up to 3×); final failures logged and skipped so the loop continues
 - `switch_profile` errors → handler retries per normal step retry policy
 
+### Page URL persistence — PATCH back to the user profile
+
+After clicking Done, `create_page` captures `page.url()` before and after. If the
+URL changed AND `waitForURL('**/profile.php?id=**')` confirmed the navigation,
+the new URL is PATCHed to the user profile so the database records which Page
+belongs to this account:
+
+```
+PATCH {USER_API_BASE_URL}/api/profiles/{userId}
+Content-Type: application/json
+
+{ "pageUrl": "https://www.facebook.com/profile.php?id=..." }
+```
+
+- `userId` is auto-injected from `user._id` via `injectUserParams`
+- PATCH errors are caught + logged — never kill the session
+- If URL didn't change (e.g. page creation silently failed), the PATCH is
+  skipped so a stale URL never overwrites a good one
+
 ### Confirmed selectors
 
 ```

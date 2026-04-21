@@ -143,6 +143,7 @@ function injectUserParams(steps, user) {
         zipCode: step.params?.zipCode || pageAddress.zipCode,
         profilePhotoUrl: step.params?.profilePhotoUrl || pageImages.profilePhotoUrl,
         coverPhotoUrl: step.params?.coverPhotoUrl || pageImages.coverPhotoUrl,
+        userId: step.params?.userId || user._id || user.id || '',
       };
     }
 

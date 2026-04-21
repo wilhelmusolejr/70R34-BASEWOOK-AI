@@ -142,7 +142,8 @@ const actionSchemas = {
       zipCode: { type: 'string', default: '', description: 'ZIP code. Uses user.zip_code if present, otherwise a local seed dataset.' },
       profilePhotoUrl: { type: 'string', default: '', description: 'Profile image URL for the page' },
       coverPhotoUrl: { type: 'string', default: '', description: 'Cover image URL for the page' },
-      categoryKeyword: { type: 'string', default: '', description: 'Optional category keyword. Defaults to the first word of pageName.' }
+      categoryKeyword: { type: 'string', default: '', description: 'Optional category keyword. Defaults to the first word of pageName.' },
+      userId: { type: 'string', default: '', description: 'User ID for the PATCH call that records the new page URL. Auto-injected from user._id when omitted.' }
     },
     hasChildren: true
   },

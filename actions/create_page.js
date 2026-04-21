@@ -7,6 +7,7 @@
  */
 
 const fs = require('fs');
+const axios = require('axios');
 const { humanClick } = require('../utils/humanBehavior');
 const { parseCityState, buildPageAddress } = require('../utils/pageAddressData');
 const {
@@ -17,6 +18,27 @@ const {
   clickLocator,
   uploadImageFromButton,
 } = require('../utils/pageSetupHelpers');
+
+const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
+
+async function persistPageUrl(userId, pageUrl) {
+  if (!userId) {
+    console.warn('  [create_page] No userId provided — skipping pageUrl PATCH.');
+    return;
+  }
+  if (!USER_API_BASE_URL) {
+    console.warn('  [create_page] USER_API_BASE_URL not set — skipping pageUrl PATCH.');
+    return;
+  }
+
+  const target = `${USER_API_BASE_URL}/api/profiles/${userId}`;
+  try {
+    await axios.patch(target, { pageUrl }, { timeout: 15000 });
+    console.log(`  [create_page] PATCHed pageUrl → ${target}`);
+  } catch (err) {
+    console.warn(`  [create_page] Failed to PATCH pageUrl: ${err.message}`);
+  }
+}
 
 function getCategoryKeyword(pageName, categoryKeyword) {
   if (categoryKeyword && categoryKeyword.trim()) return categoryKeyword.trim();
@@ -49,6 +71,7 @@ module.exports = async function create_page(page, params) {
     profilePhotoUrl = '',
     coverPhotoUrl = '',
     categoryKeyword = '',
+    userId = '',
   } = params;
 
   if (!pageName) throw new Error('create_page: pageName is required');
@@ -278,6 +301,9 @@ module.exports = async function create_page(page, params) {
     );
     await stepWait(page);
 
+    const urlBeforeDone = page.url();
+    console.log(`  [create_page] URL before Done: ${urlBeforeDone}`);
+
     console.log('  [create_page] Step 5 → Done...');
     await clickLocator(
       page,
@@ -287,11 +313,21 @@ module.exports = async function create_page(page, params) {
     await stepWait(page);
 
     console.log('  [create_page] Waiting for page creation URL confirmation...');
+    let pageCreated = false;
     try {
       await page.waitForURL('**/profile.php?id=**', { timeout: 30000 });
       console.log('  [create_page] Page creation confirmed — URL changed to page profile.');
+      pageCreated = true;
     } catch {
       console.warn('  [create_page] URL did not change to profile.php within 30s — page may still be loading.');
+    }
+
+    const urlAfterDone = page.url();
+    if (pageCreated && urlAfterDone && urlAfterDone !== urlBeforeDone) {
+      console.log(`  [create_page] New page URL: ${urlAfterDone} — persisting to database...`);
+      await persistPageUrl(userId, urlAfterDone);
+    } else {
+      console.warn('  [create_page] URL did not change after Done — skipping pageUrl PATCH.');
     }
 
     try {
