@@ -2,62 +2,60 @@
 
 ## What this project does
 
-A Node.js backend that receives JSON task commands and executes automation
-sequences across multiple BASEWOOK accounts in parallel using Hidemium
-anti-detect browser profiles controlled via Playwright + CDP.
+Node.js backend that receives JSON task commands and executes automation
+sequences across multiple BASEWOOK (Facebook) accounts in parallel using
+Hidemium anti-detect browser profiles controlled via Playwright + CDP.
 
-Currently accepts JSON directly via `POST /execute`. A natural-language →
-JSON chat layer will be added later as a separate client that generates
-JSON and hits the same endpoint.
+Accepts JSON via `POST /execute`. A natural-language → JSON chat layer
+exists as a separate client (`chat/nlToJson.js`) that generates JSON and
+hits the same endpoint.
 
 ## Tech stack
 
 - **Node.js + Express** — HTTP server exposing the task endpoint
 - **Playwright** — Browser automation, connecting via CDP
-- **Hidemium** — Anti-detect browser (must be running with profiles already launched)
+- **Hidemium** — Anti-detect browser (must be running)
 - **No database yet** — Tasks are ephemeral; add SQLite when persistence is needed
 
 ## Project structure
 
 ```
 70R34-BASEWOOK-AI/
-├── CLAUDE.md                    # This file
-├── package.json
-├── .gitignore
+├── CLAUDE.md
 ├── server.js                    # Express entry point, POST /execute
 ├── runner.js                    # Recursive step runner (core logic)
-├── config/
-│   └── profiles.json            # Hidemium profile UUIDs (no port — assigned dynamically)
-├── schemas/
-│   └── actionSchemas.js         # Single source of truth for action params
-├── actions/                     # One file per action handler
-│   ├── homepage_interaction.js  # Navigate to home feed (href="/" button → goto fallback)
-│   ├── visit_profile.js         # Navigate to a profile by URL (navigator)
-│   ├── search.js                # Search Facebook — name/news/page modes (navigator)
-│   ├── open_search_result.js    # Open a profile/page link from search results (navigator)
-│   ├── scroll.js
-│   ├── like_posts.js            # Like posts on current page (feed-aware)
-│   ├── share_posts.js           # Share posts on current page (feed-aware)
-│   ├── share_post.js            # Share a specific post by URL
-│   ├── add_friend.js            # Send friend request — works on profile pages AND inline search cards
-│   ├── follow.js                # Click Follow on current page/card (leaf)
-│   ├── setup_about.js           # Fill About page sections + PATCH status=Active, profileSetup=true
-│   ├── setup_avatar.js          # Upload profile picture from URL
-│   ├── setup_cover.js           # Upload cover photo from URL
-│   ├── create_page.js           # Create a Facebook Page (navigator)
-│   ├── schedule_posts.js        # Schedule posts on currently loaded Page (leaf)
-│   ├── switch_profile.js        # Switch back to personal profile from a Page (leaf)
-│   └── check_ip.js              # Fetch browser's outbound IP and POST to database (auto-runs on browser open)
-├── utils/
-│   ├── browserManager.js        # The ONLY file that knows about Hidemium
-│   ├── userApi.js               # Fetches user profile data from 3rd party API
-│   ├── humanBehavior.js         # Human-like interaction utilities
-│   ├── claudeApi.js             # Stubbed — extractPostContext still used by share_post.js
-│   └── generateMessage.js       # GitHub Models API — generates share messages
 ├── run-task.js                  # Run tasks.json directly (no server)
 ├── tasks.json                   # Editable task file for manual runs
-└── chat/                        # (future) NL → JSON converter
-    └── nlToJson.js
+├── config/
+│   └── profiles.json            # Human reference only (not imported)
+├── schemas/actionSchemas.js     # Single source of truth for action params
+├── actions/                     # One file per action handler
+│   ├── homepage_interaction.js  # Home feed (navigator)
+│   ├── visit_profile.js         # Navigate to profile URL (navigator)
+│   ├── search.js                # Search FB — name/news/page modes (navigator)
+│   ├── open_search_result.js    # Open a search result link (navigator)
+│   ├── create_page.js           # Create a Facebook Page (navigator)
+│   ├── scroll.js                # (leaf)
+│   ├── like_posts.js            # Like posts on current page (leaf, feed-aware)
+│   ├── share_posts.js           # Share posts on current page (leaf, feed-aware)
+│   ├── share_post.js            # Share a specific post by URL
+│   ├── add_friend.js            # Friend request — profile pages + inline cards (leaf)
+│   ├── follow.js                # Click Follow (leaf)
+│   ├── setup_about.js           # Fill About sections + PATCH status/profileSetup
+│   ├── setup_avatar.js          # Upload profile picture
+│   ├── setup_cover.js           # Upload cover photo
+│   ├── schedule_posts.js        # Schedule posts on loaded Page (leaf)
+│   ├── switch_profile.js        # Switch back to personal profile (leaf)
+│   └── check_ip.js              # Fetch outbound IP + POST to DB (auto-runs)
+├── utils/
+│   ├── browserManager.js        # ONLY file that knows about Hidemium
+│   ├── userApi.js               # Fetches user from 3rd party API
+│   ├── humanBehavior.js         # Human-like interaction utilities
+│   ├── claudeApi.js             # Stubbed — extractPostContext still used
+│   ├── generateMessage.js       # GitHub Models API — share messages
+│   ├── pageSetupHelpers.js      # Shared helpers for page setup actions
+│   └── pageAddressData.js       # Parses city/state + seeds ZIP codes
+└── chat/nlToJson.js             # NL → task JSON via Claude API
 ```
 
 ## Core pattern: recursive steps
@@ -65,11 +63,7 @@ JSON and hits the same endpoint.
 Every JSON step has this shape:
 
 ```json
-{
-  "type": "action_name",
-  "params": { ... },     // optional, shape varies per action
-  "steps": [ ... ]       // optional, only for container actions
-}
+{ "type": "action_name", "params": { ... }, "steps": [ ... ] }
 ```
 
 **Two kinds of actions:**
@@ -85,13 +79,9 @@ Every JSON step has this shape:
 async function runStep(page, step) {
   const handler = handlers[step.type];
   if (!handler) throw new Error(`Unknown step type: ${step.type}`);
-
   await handler(page, step.params || {});
-
   if (step.steps) {
-    for (const child of step.steps) {
-      await runStep(page, child);
-    }
+    for (const child of step.steps) await runStep(page, child);
   }
 }
 ```
@@ -99,40 +89,18 @@ async function runStep(page, step) {
 **Handlers NEVER call other handlers.** They only do their one job. Chaining
 happens via the `steps` array in JSON, not via code.
 
-## Example JSON tasks
+## Example JSON task
 
 **Task-level fields:**
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `taskId` | yes | — | Unique identifier for the task |
-| `profiles` | yes | — | Explicit list of user IDs (from 3rd party API) to run |
+| `taskId` | yes | — | Unique identifier |
+| `profiles` | yes | — | List of user IDs (from 3rd party API) to run |
 | `concurrency` | no | all | Max browsers running at the same time |
-| `blockMedia` | no | `true` | Block images/video/audio/fonts to save bandwidth |
+| `blockMedia` | no | `true` | Block images/video/audio/fonts |
 | `steps` | yes | — | Array of step objects |
 
-**Simple — 1 profile, account setup:**
-```json
-{
-  "taskId": "setup-megan",
-  "profiles": ["69e4a3378c3f0a567140fbcd"],
-  "concurrency": 1,
-  "blockMedia": true,
-  "steps": [
-    { "type": "random_preset" },
-    { "type": "setup_avatar" },
-    { "type": "setup_about" },
-    { "type": "setup_cover" },
-    {
-      "type": "visit_profile",
-      "params": { "random": true },
-      "steps": [{ "type": "add_friend" }]
-    }
-  ]
-}
-```
-
-**Multi-profile batch — 2 users, 1 at a time:**
 ```json
 {
   "taskId": "setup-batch",
@@ -140,7 +108,6 @@ happens via the `steps` array in JSON, not via code.
   "concurrency": 1,
   "blockMedia": true,
   "steps": [
-    { "type": "random_preset" },
     { "type": "setup_avatar" },
     { "type": "setup_about" },
     { "type": "setup_cover" },
@@ -153,14 +120,13 @@ happens via the `steps` array in JSON, not via code.
 }
 ```
 
-Note: `setup_avatar`, `setup_about`, and `setup_cover` params are **auto-injected** from
-the user API response — no need to specify them in `tasks.json`. Explicit params always
-take priority if provided.
+Note: setup_* params are **auto-injected** from the user API response. Explicit
+params always take priority if provided.
 
 ## Hidemium integration
 
 `utils/browserManager.js` is the **only** file that knows about Hidemium.
-Handlers receive a Playwright `page` object and don't care where it came from.
+Handlers receive a Playwright `page` and don't care where it came from.
 
 ### Flow: userId → browser session
 
@@ -169,726 +135,368 @@ tasks.json profiles[]
   → fetchUser(userId)       via utils/userApi.js  →  GET /api/profiles/:id
   → user.browsers[0]        { browserId, provider }
   → openProfile(browserId)  via Hidemium API      →  CDP port
-  → chromium.connectOverCDP
+  → chromium.connectOverCDP(`http://127.0.0.1:${port}`)
   → session { page, user, profileId }
 ```
 
-Each session carries the full user object. `runner.js` uses it to auto-inject
-params into `setup_avatar`, `setup_about`, and `setup_cover` steps.
+Each session carries the full user object. `runner.js` uses it for auto-injection.
 
 ### User API — `utils/userApi.js`
 
-Fetches user data from the 3rd party API. Configure in `.env`:
-
-```
-USER_API_BASE_URL=http://localhost:4000   # local
-USER_API_BASE_URL=https://yourdomain.com  # dev/prod
-```
-
+Configure in `.env`: `USER_API_BASE_URL=http://localhost:4000` (or prod URL).
 Endpoint: `GET ${USER_API_BASE_URL}/api/profiles/:id`
 
-Expected user shape (real example, trimmed for readability):
-
-```json
-{
-  "_id": "69e21bfbbb8fecced7bfda00",
-  "id": 1,
-  "firstName": "Leontius",
-  "lastName": "Ashby",
-  "dob": "08-14-1991",
-  "gender": "",
-  "emails": [
-    { "address": "leontius91ashby@outlook.com", "selected": true }
-  ],
-  "emailPassword": "Wz6$Xn!4Bq",
-  "facebookPassword": "Lk5@Yt#9Mv",
-  "proxy": "ultra.marsproxies.com:44443:user:pass_country-us_city-anchorage_session-...",
-  "city": "Cincinnati, Ohio",
-  "hometown": "Hamilton, Ohio",
-  "bio": "Living life with purpose. tech-savvy and always growing.",
-  "status": "Active",
-  "profileUrl": "https://www.facebook.com/profile.php?id=61576436802736",
-  "pageUrl": "https://www.facebook.com/profile.php?id=61572337517505",
-
-  "profileCreated": "2026-04-17",
-  "accountCreated": "2026-04-01",
-  "hasPage": false,
-  "profileSetup": true,
-
-  "notes": "ip: 74.244.72.99\nloc: ...\ncity: Anchorage\ncountry: US\ntimezone: America/Anchorage\nzip_code: 99509\n...",
-  "identityPrompt": "Leontius Ashby is 34 years old living in Cincinnati, Ohio ... (used for share-message generation)",
-
-  "personal": {
-    "relationshipStatus": "Divorced",
-    "relationshipStatusSince": "2020",
-    "languages": ["English"]
-  },
-  "work": [
-    { "company": "Humana", "position": "Patient Care Technician",
-      "from": "2004", "to": "2006", "current": false, "city": "" }
-  ],
-  "education": {
-    "college":    { "name": "Missouri State University", "from": "2002", "to": "2006", "graduated": true, "degree": "Education" },
-    "highSchool": { "name": "St. Ignatius High School Cleveland", "from": "1998", "to": "2002", "graduated": true, "degree": "" }
-  },
-  "hobbies":   ["Electronics", "Astronomy", "Chess"],
-  "interests": { "music": [], "tvShows": [], "movies": [], "games": [], "sportsTeams": [] },
-  "travel":    [{ "place": "Dubrovnik, Croatia", "date": "2005-10" }],
-
-  "images": [
-    { "imageId": { "filename": "/images/image_post_<uuid>.jpg", "type": "post",
-                   "annotations": [{ "label": "Leontius Ashby", "x": 0.37, "y": 0.24, "width": 0.13, "height": 0.15 }] },
-      "assignedAt": "..." },
-    { "imageId": { "filename": "/images/image_post_<uuid>.jpg", "type": "post" }, "assignedAt": "..." }
-  ],
-
-  "linkedPage": {
-    "id": "69e4757eefac5420321d734e",
-    "pageName": "Northstar Tutors Hub",
-    "assets": [
-      { "imageId": { "filename": "/images/page_cover_<uuid>.png",   "type": "cover"   }, "type": "cover",   "postDescription": "..." },
-      { "imageId": { "filename": "/images/page_profile_<uuid>.png", "type": "profile" }, "type": "profile", "postDescription": "..." }
-    ],
-    "posts": [
-      { "id": "...", "post": "Back-To-School Boost 📚 ...", "images": [] },
-      { "id": "...", "post": "Ace Your Next Test 💡 ...",    "images": [] }
-    ]
-  },
-
-  "tags": [], "friends": 0, "has2FA": false, "websites": [], "socialLinks": [], "otherNames": [],
-
-  "browsers": [
-    { "browserId": "local-51027952-6340-42f9-8fa9-c96d387ca6ca", "provider": "hidemium" }
-  ],
-  "trackerLog": [{ "date": "2026-04-20", "note": "share post" }],
-  "createdAt": "...", "updatedAt": "..."
-}
-```
-
-Key fields and how the runner uses them:
+Key user fields and how the runner uses them:
 
 | Field | Used by |
 |-------|---------|
-| `_id` | `browserManager`, `check_ip` userId, `create_page` PATCH target |
-| `firstName`/`lastName` | `switch_profile` userName, `setup_about` name pronunciation (removed), identity prompts |
-| `emails[].address` (selected or `[0]`) | `create_page` email field |
-| `city` / `hometown` | `setup_about` current city + hometown, `create_page` city/town (via `parseCityState` in `utils/pageAddressData.js`) |
-| `bio` | `setup_about` bio (profile). NOT used for `create_page` — that uses `linkedPage.bio` only. |
-| `personal`, `work`, `education`, `hobbies`, `travel`, `interests` | `setup_about` (all sections) |
-| `identityPrompt` | Passed as `userIdentity` to `share_posts`/`share_post` for GitHub Models message generation |
-| `images[0]` (has face annotation) | `setup_avatar` profile picture |
-| `images[1]` | `setup_cover` cover photo |
+| `_id` | `browserManager`, `check_ip`, `create_page`/`setup_about` PATCH target |
+| `firstName`/`lastName` | `switch_profile` userName, identity prompts |
+| `emails[].address` (selected or `[0]`) | `create_page` email |
+| `city` / `hometown` | `setup_about`, `create_page` city/town (via `parseCityState`), `search` (mode=page) |
+| `bio` | `setup_about` profile bio. NOT used for `create_page` — uses `linkedPage.bio` only. |
+| `personal`, `work`, `education`, `hobbies`, `travel`, `interests` | `setup_about` |
+| `identityPrompt` | `userIdentity` for `share_posts`/`share_post` message generation |
+| `images[0]` (has face annotation) | `setup_avatar` |
+| `images[1]` | `setup_cover` |
 | `linkedPage.pageName` / `bio` / `assets[0]` / `assets[1]` / `posts` | `create_page` + `schedule_posts` |
-| `browsers[0]` | `browserManager` — `browserId` + `provider` (defaults to `"hidemium"`) |
-| `pageUrl` | Written back via PATCH after `create_page` succeeds |
+| `browsers[0]` | `browserManager` — `browserId` + `provider` (defaults `"hidemium"`) |
+| `pageUrl` | PATCHed back after `create_page` succeeds |
 
-Image URLs are built as `IMAGE_SERVER_BASE_URL + imageId.filename`. Page assets use
-positional fallback via `resolveSetupPageImages()` — `linkedPage.assets[0]` → profile,
-`linkedPage.assets[1]` → cover, since FB-scraped filenames don't contain reliable
-"profile"/"cover" keywords.
+Image URLs are built as `IMAGE_SERVER_BASE_URL + imageId.filename`. Page assets
+use **positional fallback** via `resolveSetupPageImages()` — `linkedPage.assets[0]`
+→ profile, `linkedPage.assets[1]` → cover (FB-scraped filenames don't contain
+reliable keywords). `getAssetFilename(asset)` checks
+`asset.imageId.filename → asset.filename → asset.fileName → asset.url`.
 
-### `config/profiles.json` — human reference only
+## Playwright conventions (anti-detection)
 
-No longer imported by code. Just a convenience lookup for operators:
+Facebook aggressively detects automation. Code-level rules:
 
-```json
-[
-  { "name": "Rosalba Wren",  "userId": "69e21c9bbb8fecced7bfda04" },
-  { "name": "Megan Walker",  "userId": "69e4a3378c3f0a567140fbcd" }
-]
-```
+- **Feed scrolling:** use `page.mouse.wheel(0, 500)` — NEVER `window.scrollTo`
+  or `element.scrollIntoView` on the main feed. JS scroll has no acceleration
+  curve and wrong event source.
+- **Form element scrolling:** `scrollIntoViewIfNeeded()` IS acceptable inside
+  About panels and modals — they're isolated containers. Use `scrollToCenter`
+  from `humanBehavior.js` for mouse-wheel scroll to a specific element.
+- **Clicking:** bounding-box clicks via `humanClick(page, box)` for feed/profile
+  buttons. Locator clicks can fail silently on FB's React DOM.
+- **Typing:** `humanType(page, text)` — varies per-char and pauses after
+  punctuation/spaces. NEVER instant-paste, NEVER uniform per-char delay.
+- **Waits:** ALWAYS `humanWait(page, min, max)` — NEVER `waitForTimeout(fixedValue)`.
+- **Two-pass pattern:** for virtualized feeds, scroll first to trigger render,
+  then interact.
+- **Scroll before click (forms):** call `scrollIntoViewIfNeeded()` before clicking
+  form fields — off-screen elements return null bounding boxes.
 
-### Hidemium CDP connection
-
-Playwright connects via CDP — port assigned dynamically by Hidemium at open time:
-
-```javascript
-const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
-```
-
-## Playwright conventions (learned from hidemium-autopilot)
-
-Facebook aggressively detects automation. Follow these rules in every handler:
-
-- **Feed/content scrolling:** use `page.mouse.wheel(0, 500)` — NEVER
-  `window.scrollTo` or `element.scrollIntoView` on the main feed. JS-driven
-  scroll on the feed is trivially detected (no acceleration curve, wrong event source).
-- **Form element scrolling:** `element.scrollIntoViewIfNeeded()` is acceptable
-  inside About page panels and modals — these are isolated containers, not the
-  feed, so scroll event monitoring is not active there. Use `scrollToCenter`
-  from `humanBehavior.js` if you need mouse-wheel scroll for a specific element.
-- **Clicking:** use bounding-box clicks via `page.mouse.click(x, y)` where
-  possible, especially for virtualized/React-rendered elements. Locator
-  clicks can fail silently on FB's React DOM.
-- **Typing:** use `page.keyboard.type(text, { delay: 50 + Math.random() * 100 })`
-  with per-character delay — no instant-paste typing.
-- **Waits:** between actions, always add human-like randomized delays:
-  `await page.waitForTimeout(1000 + Math.random() * 2000)`.
-- **Two-pass pattern:** for feeds with virtualized DOM, scroll first to
-  trigger render, then interact — don't assume elements exist on first look.
-- **Scroll before click (forms):** call `element.scrollIntoViewIfNeeded()` before
-  clicking form fields inside panels/modals. Elements off-screen return null
-  bounding boxes and cause missed clicks.
-
-## Human-like behavior (`utils/humanBehavior.js`)
-
-All action handlers MUST use the shared human behavior utilities to avoid
-detection. Import and use these in every handler:
+### `utils/humanBehavior.js` exports
 
 ```javascript
 const {
-  humanDelay,      // Gaussian-ish random delay (not uniform)
+  humanDelay,      // Gaussian-ish random delay
   humanWait,       // await humanWait(page, min, max)
   humanClick,      // Move mouse smoothly → hover → click with offset
   humanType,       // Type with varied per-character delay
-  scrollToCenter   // Scroll element into viewport center
+  scrollToCenter   // Mouse-wheel scroll element into viewport center
 } = require('../utils/humanBehavior');
 ```
 
-**Why these matter:**
+Add "reading pauses" before interactions (800-1500ms) and "watching pauses"
+after actions (1000-2500ms).
 
-| Behavior | Detectable Pattern | Human-like Alternative |
-|----------|-------------------|----------------------|
-| Uniform delays | `waitForTimeout(1000)` always | `humanWait(page, 800, 1500)` varies |
-| Instant mouse teleport | `mouse.click(x, y)` directly | `humanMouseMove` then click |
-| Dead-center clicks | Always `box.x + width/2` | Random offset within center 60% |
-| Uniform typing | Same delay per char | Longer after punctuation/spaces |
+### Direct `.click()` vs `humanClick`
 
-**Rules:**
-
-- NEVER use `page.waitForTimeout(fixedValue)` — always `humanWait(min, max)`
-- NEVER click without moving mouse first — use `humanClick(page, box)`
-- NEVER type without varied delays — use `humanType(page, text)`
-- Add "reading pauses" before interactions (800-1500ms)
-- Add "watching pauses" after actions complete (1000-2500ms)
+| Context | Use |
+|---------|-----|
+| Feed/profile page buttons | `humanClick(page, box)` |
+| FB modal/overlay buttons (cover photo, save, file upload) | `element.click()` — humanClick offset can miss small targets |
+| After scroll | Always re-fetch `boundingBox()` right before clicking |
 
 ## Conventions
 
 - **Adding a new action:**
-  1. Add its schema entry to `schemas/actionSchemas.js` first
+  1. Add schema entry to `schemas/actionSchemas.js` first
   2. Create `actions/<action_name>.js` exporting `async (page, params) => {...}`
-  3. Register it in the handler map in `runner.js`
-- **Handlers:** validate required params at the top, throw clear errors
-- **Params:** use defaults for optional params (`params.count ?? 1`)
-- **Errors:** per-browser failures must NOT kill the task — use
-  `Promise.allSettled` in the runner
-- **Logging:** log per browser, per step, with profile ID — you'll need it
-- **File size:** one action = one file, keep them small and focused
+  3. Register in the handler map in `runner.js`
+- Validate required params at top of handler, throw clear errors
+- Use defaults for optional params (`params.count ?? 1`)
+- Per-browser failures must NOT kill the task — use `Promise.allSettled`
+- Log per browser, per step, with profile ID
+- One action = one file
 
 ## What NOT to do
 
-- **Don't create combination action types** like `search_and_add` or
-  `homepage_interaction_and_like`. Combinations live in the `steps` array,
-  NOT in type names. If you're about to create a type with "and" in the
-  name, stop and nest steps instead.
-- **Don't hardcode URLs, comments, names, or counts** — everything the user
-  would want to change goes in `params`.
-- **Don't let handlers call other handlers.** The recursive runner handles
-  chaining. Handlers do one job only.
-- **Don't skip per-browser error isolation.** If one browser crashes on
-  step 2, the others should continue.
-- **Don't use JS-driven scrolls or instant-paste typing** — anti-detection.
+- **Don't create combination action types** like `search_and_add`. Combinations
+  live in `steps`, NOT in type names. If you're about to create a type with
+  "and" in the name, nest steps instead.
+- **Don't hardcode URLs, comments, names, or counts** — put them in `params`.
+- **Don't let handlers call other handlers.** The runner handles chaining.
+- **Don't skip per-browser error isolation.**
+- **Don't use JS-driven scrolls or instant-paste typing.**
 - **Don't put Hidemium-specific code outside `utils/browserManager.js`.**
 
 ## `setup_about` — Facebook About page automation
 
-`actions/setup_about.js` fills every section of the Facebook About page for the
-logged-in account. It self-navigates (no `profileUrl` param needed) and covers:
-bio, city/hometown, relationship status, work, education, hobbies, interests,
-travel, and name pronunciation.
+Self-navigates (no `profileUrl` param needed). Covers: bio, city/hometown,
+relationship, work, education, hobbies, interests, travel, name pronunciation.
 
-**Database side-effect:** after every section finishes, the handler PATCHes the
-user record so downstream work can tell the account is ready:
+**Database side-effect:** after all sections complete, PATCHes the user record:
 
 ```
 PATCH {USER_API_BASE_URL}/api/profiles/{userId}
 Body: { "status": "Active", "profileSetup": true }
 ```
 
-`userId` is auto-injected from `user._id` via `injectUserParams`. PATCH errors
-are caught + logged — they never kill the session. The PATCH runs only after
-all sections complete, so a mid-setup failure leaves the flags unchanged and a
-retry re-runs cleanly.
+`userId` auto-injected from `user._id`. PATCH errors are caught + logged. Runs
+only after ALL sections complete — mid-setup failure leaves flags unchanged
+so retry re-runs cleanly.
 
-### Navigation pattern
+### Navigation
 
 ```
-facebook.com/me  →  click About tab  →  click sidebar link  →  click panel button  →  fill form  →  save
+facebook.com/me → About tab → sidebar link → panel button → fill form → save
 ```
 
 - **About tab:** `a[href*="sk=about"][role="tab"]`
-- **Sidebar links:** `a[href*="sk=SECTION"]` — confirmed sk values:
-
-| Section | sk value |
-|---------|----------|
-| Intro (bio) | `directory_intro` |
-| Personal Details (city, hometown, relationship) | `directory_personal_details` |
-| Work | `directory_work` |
-| Education | `directory_education` |
-| Hobbies | `directory_activites` *(Facebook typo — not "activities")* |
-| Interests | `directory_interests` |
-| Travel | `directory_travel` |
-| Names | `directory_names` |
-
-- **Panel buttons** (open the inline form within each section) have no `aria-label`.
-  Use XPath on descendant text:
+- **Sidebar links:** `a[href*="sk=SECTION"]` — confirmed `sk` values:
+  `directory_intro`, `directory_personal_details`, `directory_work`,
+  `directory_education`, `directory_activites` *(FB typo — not "activities")*,
+  `directory_interests`, `directory_travel`, `directory_names`
+- **Panel buttons** have no aria-label. Use XPath on descendant text:
   `xpath=//div[@role="button"][.//span[text()="Button Text"]]`
 
-### Key internal helpers
+### Save patterns — THREE different save button types
 
-| Helper | Purpose |
-|--------|---------|
-| `typeAndSelect(page, selector, value)` | Click input → clear → type → ArrowDown → Enter (picks first suggestion) |
-| `selectYearFromDropdown(page, selector, year)` | Open FB year dropdown → XPath-click matching year option |
-| `clickPanelButton(page, spanText)` | Click a `div[role="button"]` by its inner span text |
-| `setPanelPrivacyPublic(page)` | Open privacy picker → select Public → close modal |
-| `fillPanelWithItems(page, panelText, items)` | Full flow: open panel → set privacy → add items → save |
-| `waitForSaveComplete(page, saveBtnSelector, panelText)` | After save click: wait 10-15s, check save btn is gone, verify panel closed |
-
-### Save patterns
-
-Facebook About uses **three different save button types**:
-
-| Context | Save selector |
-|---------|--------------|
-| Inline panel forms (bio, personal details, hobbies, interests, travel, names) | `xpath=//span[text()="Save"]` |
+| Context | Selector |
+|---------|----------|
+| Inline panel forms (bio, personal, hobbies, interests, travel, names) | `xpath=//span[text()="Save"]` |
 | Current city | `[aria-label="Current city save"]` |
 | Hometown | `[aria-label="Hometown save"]` |
 | Bio (`div[role="button"]` form) | `div[role="button"][aria-label="Save"]` |
 
-Always use `waitForSaveComplete` after clicking save — it retries up to 3×
-(10-15s initial + 5-10s retries) checking that the save button disappears and
-the panel form closes before moving to the next section.
+Always use `waitForSaveComplete` after save — retries 3× (10-15s initial +
+5-10s retries) checking save btn is gone and panel closed before next section.
 
 ### Duplicate prevention
 
-Before adding data, check for the edit button that only appears when data exists:
+Before adding data, check for edit button (only appears when data exists):
+`[aria-label="Edit Workplace"]`, `[aria-label="Edit college"]`, `[aria-label="Edit school"]`.
 
-| Section | Duplicate check selector |
-|---------|--------------------------|
-| Work | `[aria-label="Edit Workplace"]` |
-| College | `[aria-label="Edit college"]` |
-| High school | `[aria-label="Edit school"]` |
+### Key internal helpers
 
-### Known Facebook selectors (confirmed working)
-
-```
-Bio textarea:           textarea[aria-describedby]  or  //textarea[@maxlength="101"]
-Current city input:     [aria-label="Current city"]
-Hometown input:         [aria-label="Hometown"]
-Relationship dropdown:  [aria-label="Select your relationship status"]
-Relationship year:      [aria-label="Edit ending date  year. Current selection is none"]  (double space)
-Company input:          [aria-label="Company"]
-Position input:         [aria-label="Position"]
-Work start year:        [aria-label="Edit starting date workplace year. Current selection is none"]
-Work end year:          [aria-label="Edit ending date workplace year. Current selection is none"]
-Currently work here:    input[name="is_current"]
-College name:           [aria-label="College name"]
-College start year:     [aria-label="Edit starting date college year. Current selection is none"]
-College end year:       [aria-label="Edit ending date college year. Current selection is none"]
-HS school name:         [aria-label="School"]
-HS start year:          [aria-label="Edit starting date secondary school year. Current selection is none"]
-HS end year:            [aria-label="Edit ending date secondary school year. Current selection is none"]
-Graduated checkbox:     input[aria-label="Graduated"]  (default unchecked — only click if graduated: true)
-Hobbies/Interest input: input[aria-label="Search"][role="combobox"]
-Place visited input:    [aria-label="Place visited"]  (use page.$$() and take last element for multi-place)
-Privacy button:         [aria-label="Edit privacy. Sharing with Your friends of friends. "]
-Privacy public radio:   //label[.//span[text()="Public"]]//input[@type="radio"]
-Privacy done button:    [aria-label="Done with privacy audience selection and close dialog"]
-First name pronunc.:    (//input[@name="firstname-pronunciation"])[N]  where N = 1|2|3
-Last name pronunc.:     input[name="lastname-pronunciation"][type="radio"]
-```
+`typeAndSelect` (click → clear → type → ArrowDown → Enter), `selectYearFromDropdown`,
+`clickPanelButton`, `setPanelPrivacyPublic`, `fillPanelWithItems`, `waitForSaveComplete`.
 
 ## `setup_avatar` — Profile picture upload
 
-`actions/setup_avatar.js` uploads a profile picture from a URL for the logged-in
-account. Self-navigates to `/me` — no `profileUrl` param needed.
-
-### Navigation pattern
-
+Self-navigates to `/me`. Flow:
 ```
-facebook.com/me  →  Profile picture actions  →  Choose profile picture  →  Upload photo (file chooser)  →  wait for reposition text  →  Save
+Profile picture actions → Choose profile picture → Upload photo (file chooser)
+  → wait for "Drag or use arrow keys to reposition image" → Save
 ```
 
-### Key implementation notes
+Key notes:
+- Image downloaded to `os.tmpdir()` via Node `https`/`http`, deleted in `finally`
+- Use `Promise.all([page.waitForEvent('filechooser'), btn.click()])` +
+  `fileChooser.setFiles(path)`. Do NOT use `setInputFiles` on the hidden input.
+- Wait for reposition-text span before proceeding — signals upload complete.
+- `description` optional (default `""`) — only typed if non-empty.
 
-- **File download:** image is downloaded to `os.tmpdir()` via Node `https`/`http`,
-  then deleted in a `finally` block after upload.
-- **File chooser:** use `Promise.all([page.waitForEvent('filechooser'), btn.click()])` +
-  `fileChooser.setFiles(path)` — do NOT use `setInputFiles` on the hidden input directly.
-  Clicking "Upload photo" opens the OS file picker; intercepting the `filechooser` event
-  is the correct Playwright pattern.
-- **Upload complete signal:** wait for `xpath=//span[text()="Drag or use arrow keys to reposition image"]`
-  before proceeding — this appears once FB finishes processing the image.
-- **Description:** optional param, defaults to `""`. Only typed if non-empty.
-
-### Confirmed selectors
-
-```
-Profile picture actions btn:  [aria-label="Profile picture actions"]
-Choose profile picture:       xpath=//div[@role="menuitem"][.//span[text()="Choose profile picture"]]
-Upload photo btn:             [aria-label="Upload photo"]
-File input (hidden):          input[type="file"][accept*="image"]  (state: 'attached')
-Upload complete signal:       xpath=//span[text()="Drag or use arrow keys to reposition image"]
-Description textarea:         xpath=//label[.//span[text()="Description"]]//textarea
-Save button:                  xpath=//div[@role="button"][.//span[text()="Save"]]
-```
-
-### Params
-
-| Param | Type | Required | Description |
-|-------|------|----------|-------------|
-| `photoUrl` | string | yes | Public URL of image to upload |
-| `description` | string | no (default `""`) | Caption for the profile picture post |
+Params: `photoUrl` (required), `description` (optional).
 
 ## `setup_cover` — Cover photo upload
 
-`actions/setup_cover.js` uploads a cover photo from a URL. Self-navigates to `/me`.
-
-### Navigation pattern
-
+Self-navigates to `/me`. Flow:
 ```
-facebook.com/me  →  Add cover photo  →  Upload photo (menuitem, file chooser)  →  wait for Save changes enabled  →  Save
+Add cover photo → Upload photo menuitem (file chooser) → wait for Save changes enabled → Save
 ```
 
-### Key implementation notes
-
-- **"Add cover photo" button** uses direct `.click()` — `humanClick` bounding-box misses it.
-- **"Save changes"** starts as `aria-disabled="true"` while image processes. Wait for
-  `:not([aria-disabled="true"])` before clicking, then use direct `.click()`.
-- Same `filechooser` intercept pattern as `setup_avatar`.
-
-### Key implementation notes
-
-- FB renders **2 elements** matching `[aria-label="Save changes"]` — `waitForSelector` confuses
-  Playwright when there are duplicates. Use `waitForFunction` + `querySelectorAll` instead:
+Key notes:
+- "Add cover photo" uses direct `.click()` (humanClick bounding box misses it).
+- "Save changes" starts as `aria-disabled="true"` while image processes.
+- FB renders **2 elements** matching `[aria-label="Save changes"]` — `waitForSelector`
+  gets confused by duplicates. Use `waitForFunction` + `querySelectorAll`:
   ```javascript
   await page.waitForFunction(() => {
     const btns = Array.from(document.querySelectorAll('[aria-label="Save changes"]'));
     return btns.some(btn => btn.getAttribute('aria-disabled') !== 'true');
   }, { timeout: 45000 });
   ```
-- Click the enabled button via `evaluateHandle` to avoid strict-mode selector issues.
-
-### Confirmed selectors
-
-```
-Add cover photo btn:    [aria-label="Add cover photo"]
-Upload photo menuitem:  xpath=//div[@role="menuitem"][.//span[text()="Upload photo"]]
-Save changes (polling): querySelectorAll('[aria-label="Save changes"]') via waitForFunction
-```
+- Click enabled button via `evaluateHandle` to avoid strict-mode selector issues.
 
 ## Facebook Page setup — `create_page` + `schedule_posts` + `switch_profile`
 
-Facebook Page setup is split into three composable actions so each step is
-retryable on its own and doesn't re-run Page creation on downstream failures:
+Split into three composable actions so each is retryable and failures don't
+re-create Pages:
 
 | Action | Kind | Responsibility |
 |--------|------|----------------|
-| `create_page` | Navigator | Open Facebook menu → Pages → Create Page, fill all form fields, upload profile + cover, advance through Steps 2-5. Ends on the new Page URL (`/profile.php?id=*`). |
-| `schedule_posts` | Leaf | Schedule posts from `params.posts[]` on the currently loaded Page — one per day starting tomorrow. Individual post failures are logged, not rethrown. |
+| `create_page` | Navigator | Menu → Pages → Create Page, fill all fields, upload profile/cover, advance through Steps 2-5. Ends on `/profile.php?id=*`. |
+| `schedule_posts` | Leaf | Schedule `params.posts[]` on loaded Page, one per day from tomorrow. Per-post failures logged, not thrown. |
 | `switch_profile` | Leaf | Your profile → Switch to [userName] → 50s cooldown. Falls back to "Quick switch profiles". |
 
-Composed via the `setup_page_full` preset (`config/presets.json`):
-
+Composed via the `setup_page_full` preset, or nested:
 ```json
-{ "type": "random_preset", "params": { "from": ["setup_page_full"] } }
+{ "type": "create_page", "steps": [
+  { "type": "schedule_posts" },
+  { "type": "switch_profile" }
+]}
 ```
 
-Or directly as nested steps:
+Shared helpers in `utils/pageSetupHelpers.js`.
 
-```json
-{
-  "type": "create_page",
-  "steps": [
-    { "type": "schedule_posts" },
-    { "type": "switch_profile" }
-  ]
-}
-```
-
-Shared helpers live in `utils/pageSetupHelpers.js` (`stepWait`, `downloadToTemp`,
-`clickAndReplace`, `typeAndSelect`, `clickLocator`, `uploadImageFromButton`,
-`getFirstVisibleLocator`).
-
-### Navigation pattern
+### Navigation
 
 ```
 create_page:
-  facebook.com  →  Facebook menu  →  Pages  →  Create Page  →  Public Page  →  Next
-    →  Get started  →  fill name/category/bio  →  Create Page (advance)
-    →  fill contact/location/hours  →  Next
-    →  Step 2: upload profile + cover  →  Next
-    →  Step 3: Connect WhatsApp       →  Skip
-    →  Step 4: Build Page audience    →  Next
-    →  Step 5: Stay informed          →  Done  (page now created)
-    →  wait for URL: facebook.com/profile.php?id=*  (confirms creation)
-    →  dismiss cookies popup if present
+  facebook.com → Facebook menu → Pages → Create Page → Public Page → Next
+    → Get started → fill name/category/bio → Create Page (advance)
+    → fill contact/location/hours → Next
+    → Step 2: upload profile + cover → Next
+    → Step 3: Connect WhatsApp       → Skip
+    → Step 4: Build audience         → Next
+    → Step 5: Stay informed          → Done
+    → wait URL: /profile.php?id=*  (confirms creation)
+    → dismiss cookies popup if present
 
-schedule_posts (child step — runs on the newly created Page):
-  loop posts → What's on your mind? → dismiss Not now → type content → Next
+schedule_posts:
+  loop posts → What's on your mind? → dismiss Not now → type → Next
     → Scheduling options → pick date → Schedule for later → Schedule
-    → confirm Publish Original Post if shown → handleAfterSchedule (30-60s wait)
+    → confirm Publish Original Post if shown → handleAfterSchedule (30-60s)
 
-switch_profile (child step):
-  Your profile  →  Switch to [userName]  →  50s cooldown
+switch_profile:
+  Your profile → Switch to [userName] → 50s cooldown
 ```
 
-### Image resolution — `linkedPage.assets`
+### City/town typeahead
 
-Page images come from `user.linkedPage.assets[]`, not `user.images[]`.
-Asset filenames are generic (e.g. `page_post_abc123.png`) — no `profile`/`cover`
-keywords. Resolution uses **positional fallback**:
-
-```
-assets[0] → profile photo
-assets[1] → cover photo   (falls back to assets[0] if only one asset)
-```
-
-`getAssetFilename(asset)` checks `asset.imageId.filename → asset.filename → asset.fileName → asset.url`.
-
-### City/town typeahead input
-
-FB's City/town field is a typeahead. Type `cityName + ", " + first half of stateName`
-to get the right suggestion — typing just the city name often returns too many results:
-
-```
-"Birmingham, Alabama"  →  type  "Birmingham, Alaba"
-"Los Angeles, California"  →  type  "Los Angeles, Calif"
-```
-
-`address.stateName` comes from `buildPageAddress()` in `utils/pageAddressData.js`.
+Type `cityName + ", " + first half of stateName` (e.g. `"Birmingham, Alaba"`)
+— typing just the city returns too many results. `address.stateName` comes from
+`buildPageAddress()` in `utils/pageAddressData.js`.
 
 ### Post scheduling loop
 
-After page creation, loops through `params.posts[]` (injected from `user.linkedPage.posts`).
-Each post = 1 day: post[0] → today+1, post[1] → today+2, etc. `getScheduleDate(dayOffset)`
-handles month/year rollover automatically via JS `Date.setDate`.
+post[0] → today+1, post[1] → today+2, etc. `getScheduleDate(dayOffset)` handles
+month/year rollover via JS `Date.setDate`.
 
-**"Not now" modal handling** — FB shows this popup randomly after scheduling:
-- `dismissNotNow()`: loops until no more "Not now" modals (4s timeout each, 5-8s wait after click)
+**"Not now" modal handling** — FB shows this randomly:
+- `dismissNotNow()`: loops until no more "Not now" modals (4s timeout each, 5-8s wait)
 - Called before each post AND between "What's on your mind?" click and modal load
-- `handleAfterSchedule()`: after every Schedule click, checks "Not now" up to 3×
-  (5s each), then always waits 30–60s before next post regardless
+- `handleAfterSchedule()`: checks "Not now" up to 3× (5s each), then always
+  waits 30-60s before next post
 
-**Lexical editor typing** — FB's post composer uses a Lexical contenteditable.
+**Lexical editor typing** — FB's composer uses a Lexical contenteditable.
 `page.keyboard.type()` sends keystrokes to the page and causes scroll jumping.
 Fix: click "Create post" heading first, then Tab ×3 with 1s delays to focus
-the editor, then `page.keyboard.type(content, { delay: 80 })`.
+the editor, then type.
 
-### Post-creation error safety
+### Page URL persistence
 
-The split itself enforces retry safety — `runner.js` retries only the failing
-step, so a `schedule_posts` or `switch_profile` failure never re-runs
-`create_page` and never creates a duplicate Facebook Page.
-
-- `create_page` errors → runner retries safely (Page not yet created on attempt 1)
-- `schedule_posts` errors → per-post retry inside the handler (reload + retry
-  up to 3×); final failures logged and skipped so the loop continues
-- `switch_profile` errors → handler retries per normal step retry policy
-
-### Page URL persistence — PATCH back to the user profile
-
-After clicking Done, `create_page` captures `page.url()` before and after. If the
-URL changed AND `waitForURL('**/profile.php?id=**')` confirmed the navigation,
-the new URL is PATCHed to the user profile so the database records which Page
-belongs to this account:
+After Done, `create_page` captures `page.url()` before/after. If URL changed AND
+`waitForURL('**/profile.php?id=**')` confirmed, PATCHes:
 
 ```
 PATCH {USER_API_BASE_URL}/api/profiles/{userId}
-Content-Type: application/json
-
 { "pageUrl": "https://www.facebook.com/profile.php?id=..." }
 ```
 
-- `userId` is auto-injected from `user._id` via `injectUserParams`
-- PATCH errors are caught + logged — never kill the session
-- If URL didn't change (e.g. page creation silently failed), the PATCH is
-  skipped so a stale URL never overwrites a good one
+Skipped if URL didn't change (page creation silently failed) so stale URL never
+overwrites a good one.
 
-### Confirmed selectors
-
-```
-Facebook menu btn:        div[aria-label="Facebook menu"]
-Pages link:               xpath=//a[@role="link"]//span[text()="Pages"]
-Create Page btn:          [aria-label="Create Page"]
-Public Page option:       label:has-text("Public Page")
-Next btn:                 div[aria-label="Next"]  or  [aria-label="Next"]
-Get started link:         a[aria-label="Get started"]
-Page name input:          label:has-text("Page name (required)") input
-Category input:           input[aria-label="Category (required)"]
-Bio textarea:             xpath=//span[contains(text(), "Bio")]/following::textarea[1]
-Create Page (advance):    div[aria-label="Create Page"][role="button"]
-Email input:              label:has-text("Email") input
-Address input:            label:has-text("Address") input
-City/town input:          input[aria-label="City/town"]
-ZIP code input:           label:has-text("ZIP code") input
-Hours options:            input[type="radio"][value="NO_HOURS_AVAILABLE|ALWAYS_OPEN"]
-Add profile picture btn:  div[role="button"]:has-text("Add profile picture")
-Add cover photo btn:      div[role="button"]:has-text("Add cover photo")
-Skip btn (WhatsApp):      [aria-label="Skip"]
-Done btn (Step 5):        [aria-label="Done"]
-Allow all cookies popup:  div[aria-label="Allow all cookies"]
-What's on your mind btn:  div[role="button"]:has-text("What's on your mind?")
-Create post modal:        div[role="dialog"][aria-label="Create post"]  (.first())
-Lexical editor:           div[role="textbox"][data-lexical-editor="true"]
-Scheduling options:       xpath=//span[contains(text(), "Scheduling options")]
-Schedule for later wait:  div[role="button"]:has-text("Schedule for later")
-Date input:               div:has(span[aria-label="Open Date Picker"]) input[type="text"]
-Schedule for later btn:   div[role="button"][aria-label="Schedule for later"]
-Schedule confirm btn:     [aria-label="Schedule"]
-Not now modal btn:        [aria-label="Not now"]
-Your profile btn:         [aria-label="Your profile"]
-Switch to user btn:       [aria-label="Switch to {userName}"]  (fallback: [aria-label="Quick switch profiles"])
-```
-
-### Params (auto-injected by `injectUserParams`)
-
-| Step type | Param | Source |
-|-----------|-------|--------|
-| `create_page` | `pageName` | `user.linkedPage.pageName` |
-| `create_page` | `bio` | `user.linkedPage.bio` (page bio only — NOT the profile `user.bio`) |
-| `create_page` | `email` | `user.emails` (selected or first) |
-| `create_page` | `city` / `state` / `zipCode` / `streetAddress` | `buildPageAddress({ city, state, zip_code })` |
-| `create_page` | `profilePhotoUrl` / `coverPhotoUrl` | `resolveSetupPageImages(user)` from `linkedPage.assets` |
-| `schedule_posts` | `posts` | `user.linkedPage.posts` |
-| `switch_profile` | `userName` | `user.firstName + user.lastName` |
-
-## `visit_profile` + `add_friend` — Profile visit and friend request
-
-- `visit_profile` is a **navigator** — navigates to a profile URL, then child steps act on it.
-- `add_friend` is a **leaf** — clicks the Add Friend button on whatever is currently showing.
-- Works in **two contexts**, picked via union locator:
-  - Dedicated profile page — `[aria-label^="Add Friend"]` (capital F, dynamic "Add Friend Joan")
-  - Inline search-result card — `[aria-label="Add friend"]` (lowercase f, exact)
-- Scrolls the button to viewport center (`scrollToCenter`) before clicking so virtualized/off-screen buttons don't return null bounding boxes.
-
-### Usage
-
-```json
-{
-  "type": "visit_profile",
-  "params": { "url": "https://www.facebook.com/some.profile" },
-  "steps": [{ "type": "add_friend" }]
-}
-```
-
-### Confirmed selectors
-
-```
-Add Friend (profile page)   :  div[role="button"][aria-label^="Add Friend"]
-Add friend (inline on card) :  div[role="button"][aria-label="Add friend"]
-```
-
-## `search` + `open_search_result` + `follow` — Search flow
-
-Three composable actions for searching Facebook and interacting with results.
-
-| Action | Kind | Responsibility |
-|--------|------|----------------|
-| `search` | Navigator | Types a query into the FB search box, submits, optionally clicks a results-tab filter. Ends on the search-results page. |
-| `open_search_result` | Navigator | Picks one `a[href*="/profile.php?id="]` anchor from the current results page, scrolls it into center, clicks it. Ends on that profile/page. |
-| `follow` | Leaf | Clicks `[aria-label="Follow"]` on the current page — same selector works on profiles, pages, and inline inside search-result cards. |
-
-### `search` — query generation
-
-Three modes, all overridable by explicit `query`:
-
-| Mode | Generation |
-|------|------------|
-| `name` (default) | `{first} {last}` — random from two 100-entry pools (~10,000 combos) |
-| `news` | `{US state} {keyword}` — 50 states × 12 keywords |
-| `page` | `{category} in {city}` — 25-entry category pool; `city` auto-injected from `user.city` (e.g. `"Photography in Cincinnati, Ohio"`) |
-
-Optional `filter` param clicks a results tab after submission (`"People"`, `"Pages"`, `"Posts"`, `"Videos"`, `"Groups"`). Filter text is matched against visible `<span>` text inside `a[role="link"]`.
-
-### `open_search_result` — pick strategy
-
-1. `await page.$$('a[href*="/profile.php?id="]')` — collects all profile/page anchors currently in DOM.
-2. Dedupes by href (the avatar link and the name link often point at the same target; without dedupe the random pick is weighted toward whoever appears twice).
-3. `pick` param: `"random"` (default), `"first"`, or integer index.
-4. Uses `scrollToCenter` from `humanBehavior.js` (mouse-wheel, not JS scroll) before clicking.
-
-Because `/profile.php?id=*` is FB's canonical URL for **both** users and pages, this action handles either target uniformly. Filter the result type by setting `search.filter` upstream — `"People"` yields user links, `"Pages"` yields page links.
-
-### Usage patterns
-
-```json
-// Inline follow on any person matching a random name
-{ "type": "search", "params": { "mode": "name", "filter": "People" },
-  "steps": [{ "type": "follow" }] }
-
-// Inline add friend on a name search
-{ "type": "search", "params": { "mode": "name", "filter": "People" },
-  "steps": [{ "type": "add_friend" }] }
-
-// Category-in-city page search → open a page → scroll, like, follow
-{ "type": "search", "params": { "mode": "page", "filter": "Pages" },
-  "steps": [{
-    "type": "open_search_result",
-    "steps": [
-      { "type": "scroll",     "params": { "duration": 10 } },
-      { "type": "like_posts", "params": { "count": 2 } },
-      { "type": "follow" }
-    ]
-  }] }
-
-// News search → scroll + like + share
-{ "type": "search", "params": { "mode": "news", "filter": "Posts" },
-  "steps": [
-    { "type": "scroll",      "params": { "duration": 8 } },
-    { "type": "like_posts",  "params": { "count": 2 } },
-    { "type": "share_posts", "params": { "count": 1 } }
-  ] }
-```
-
-### Confirmed selectors
-
-```
-Search input (union):   input[aria-label="Search Facebook"][type="search"],
-                        input[placeholder="Search Facebook"][role="combobox"],
-                        input[type="search"][role="combobox"]
-Results-tab filter:     xpath=//a[@role="link"][.//span[normalize-space(text())="<FilterText>"]]
-Profile/page anchor:    a[href*="/profile.php?id="]
-Follow button:          [aria-label="Follow"]
-```
-
-### Auto-injection
+### Params (auto-injected)
 
 | Step | Param | Source |
 |------|-------|--------|
-| `search` | `city` (for mode=page) | `user.city` via `injectUserParams` |
-| `open_search_result` | — | — |
-| `follow` | — | — |
+| `create_page` | `pageName` | `user.linkedPage.pageName` |
+| `create_page` | `bio` | `user.linkedPage.bio` (NOT profile `user.bio`) |
+| `create_page` | `email` | `user.emails` (selected or first) |
+| `create_page` | `city` / `state` / `zipCode` / `streetAddress` | `buildPageAddress(...)` |
+| `create_page` | `profilePhotoUrl` / `coverPhotoUrl` | `resolveSetupPageImages(user)` |
+| `schedule_posts` | `posts` | `user.linkedPage.posts` |
+| `switch_profile` | `userName` | `user.firstName + user.lastName` |
+
+## `visit_profile` + `add_friend`
+
+- `visit_profile` — navigator, navigates to profile URL.
+- `add_friend` — leaf, works in **two contexts** via union locator:
+  - Profile page — `[aria-label^="Add Friend"]` (capital F, dynamic e.g. "Add Friend Joan")
+  - Inline search card — `[aria-label="Add friend"]` (lowercase f, exact)
+- Scrolls button to viewport center (`scrollToCenter`) before clicking.
+
+```json
+{ "type": "visit_profile", "params": { "url": "..." },
+  "steps": [{ "type": "add_friend" }] }
+```
+
+## `search` + `open_search_result` + `follow`
+
+| Action | Kind | Responsibility |
+|--------|------|----------------|
+| `search` | Navigator | Types query into FB search, submits, optionally clicks results-tab filter |
+| `open_search_result` | Navigator | Picks one `a[href*="/profile.php?id="]` anchor, scrolls to center, clicks |
+| `follow` | Leaf | Clicks `[aria-label="Follow"]` — works on profiles, pages, AND inline cards |
+
+### `search` modes
+
+| Mode | Generation |
+|------|------------|
+| `name` (default) | `{first} {last}` — random from 100×100 pools |
+| `news` | `{US state} {keyword}` — 50 states × 12 keywords |
+| `page` | `{category} in {city}` — 25 categories; `city` from `user.city` |
+
+Optional `filter`: `"People"`, `"Pages"`, `"Posts"`, `"Videos"`, `"Groups"` — clicks
+results tab. Filter text matched against visible `<span>` in `a[role="link"]`.
+
+### `open_search_result` pick strategy
+
+1. `page.$$('a[href*="/profile.php?id="]')` — collects all profile/page anchors
+2. Dedupes by href (avatar + name link point to same target — without dedupe
+   random pick is weighted)
+3. `pick`: `"random"` (default), `"first"`, or integer index
+4. Uses `scrollToCenter` (mouse-wheel, not JS scroll) before clicking
+
+`/profile.php?id=*` is FB's canonical URL for **both** users and pages. Filter
+the result type upstream via `search.filter`.
+
+### Usage examples
+
+```json
+// News → scroll + like + share
+{ "type": "search", "params": { "mode": "news", "filter": "Posts" },
+  "steps": [
+    { "type": "scroll", "params": { "duration": 8 } },
+    { "type": "like_posts", "params": { "count": 2 } },
+    { "type": "share_posts", "params": { "count": 1 } }
+  ] }
+
+// Category in city → open page → scroll, like, follow
+{ "type": "search", "params": { "mode": "page", "filter": "Pages" },
+  "steps": [{ "type": "open_search_result", "steps": [
+    { "type": "scroll", "params": { "duration": 10 } },
+    { "type": "like_posts", "params": { "count": 2 } },
+    { "type": "follow" }
+  ]}] }
+```
 
 ## Virtualized feed — `like_posts` and `share_posts`
 
-Facebook's feed uses virtualized DOM — only posts near the viewport stay in the DOM.
-After a bulk scroll, old posts are removed and only ~4 near the bottom remain.
+FB's feed uses virtualized DOM — only posts near viewport stay in DOM. After
+a bulk scroll, old posts are removed and only ~4 near the bottom remain.
 
 **Never query all posts after a bulk scroll and expect to find many.**
 
-### Correct pattern (both `like_posts` and `share_posts`)
+### Correct pattern
 
-Use `div[aria-posinset]` to enumerate currently-rendered posts, filter for those
-with the target button, pick randomly, scroll to each with `mouse.wheel`, act on it,
-then scroll a bit more to load new posts. Loop until target count reached.
-
-```javascript
-const allPosts = await page.$$('div[aria-posinset]');
-// filter by aria-posinset value (dedup) + presence of Like/Share button
-// shuffle candidates, pick one
-// scroll to it with mouse.wheel loop
-// act, then scroll down to load more
-```
-
-Track processed posts by `aria-posinset` value (unique per post) to avoid repeating.
+Use `div[aria-posinset]` to enumerate currently-rendered posts, filter for
+those with target button, pick randomly, scroll to each with `mouse.wheel`,
+act, then scroll more to load new posts. Track processed posts by
+`aria-posinset` value to avoid repeating.
 
 ### Post context extraction — always use `post.evaluate()`
 
-To extract text/image/sub-description from a specific post, run it **inside the browser**
-on the exact element. Never use Playwright's `element.$('xpath=//...')` for this —
-`//` searches from document root regardless of scope.
+To extract text/image/sub-description, run it **inside the browser** on the
+exact element. Never use Playwright's `element.$('xpath=//...')` — `//` searches
+from document root regardless of scope.
 
 ```javascript
 const postContext = await post.evaluate(el => {
@@ -903,153 +511,164 @@ const postContext = await post.evaluate(el => {
 });
 ```
 
-### Confirmed feed selectors
+### Key feed selectors
 
 ```
-Virtualized post container:  div[aria-posinset]
-Like button (unliked):       [aria-label="Like"]       (within post container)
-Like confirmed:              [aria-label="Remove Like"]  (appears after successful like)
-Share button:                [aria-label="Send this to friends or post it on your profile."]
-Share modal confirm:         [aria-label="Share now"]
-Share message input:         [aria-placeholder="Say something about this..."]
-Post text:                   [data-ad-rendering-role="story_message"] [dir="auto"]
-Post image alt:              img[data-imgperflogname="feedImage"]  → getAttribute('alt')
-Post sub-description:        [data-ad-rendering-role="description"]
+Virtualized post:        div[aria-posinset]
+Like (unliked):          [aria-label="Like"]
+Like confirmed:          [aria-label="Remove Like"]  (or [aria-label="Unlike"])
+Share button:            [aria-label="Send this to friends or post it on your profile."]
+Share modal confirm:     [aria-label="Share now"]
+Share message input:     [aria-placeholder="Say something about this..."]
 ```
 
-### Like verification
-
-After clicking Like, verify it registered by checking for `[aria-label="Unlike"]`
-in the same post container. If not found, retry once with fresh bounding box.
-
-### Timing
-
-Between likes: random 5–10s pause (human reading/browsing gap).
+After Like click, verify by checking `[aria-label="Unlike"]` in same post
+container. If not found, retry once with fresh bounding box.
+Between likes: random 5-10s.
 
 ## `share_post` — Share a specific post by URL
 
-Single-post version of `share_posts`. Navigates to the post URL directly, extracts
-context from the page, then shares with static `message` param OR Claude API-generated
-message via `userIdentity` + `instruction` params.
+Single-post version of `share_posts`. Navigates to post URL directly, extracts
+context from page, shares with static `message` param OR API-generated message
+via `userIdentity` + `instruction` params.
 
-## `utils/generateMessage.js` — GitHub Models API for share message generation
+## `utils/generateMessage.js` — Share message generation (GitHub Models)
 
-Generates a human-sounding Facebook share message based on post context and user identity.
-Used by `share_posts` and `share_post` when `userIdentity` param is provided.
+Used by `share_posts`/`share_post` when `userIdentity` is provided.
 
-### Env vars (set in `.env`)
+### `.env` vars
 
 ```
-GITHUB_MODELS_TOKEN       - GitHub personal access token with Models access
-GITHUB_MODELS_MODEL       - model name (default: openai/gpt-4.1)
-GITHUB_MODELS_BASE_URL    - API endpoint (default: https://models.github.ai/inference/chat/completions)
-GITHUB_MODELS_API_VERSION - API version header (default: 2026-03-10)
+GITHUB_MODELS_TOKEN       # PAT with Models access
+GITHUB_MODELS_MODEL       # default: openai/gpt-4.1
+GITHUB_MODELS_BASE_URL    # default: https://models.github.ai/inference/chat/completions
+GITHUB_MODELS_API_VERSION # default: 2026-03-10
 ```
 
 ### Behavior
 
-- Returns a plain string ready to type into the share dialog
-- Returns `''` on any API error — share proceeds silently without a message
-- Returns `''` if model responds with `SKIP` (empty/unreadable post context)
-- Sanitizes output: em dashes (`—`), en dashes (`–`), and spaced hyphens (` - `) are replaced with a space. Hyphens inside words (e.g. "nature-loving") are preserved.
+- Returns plain string ready for share dialog
+- Returns `''` on any API error — share proceeds silently
+- Returns `''` if model responds with `SKIP` (empty/unreadable context)
+- Sanitizes: em/en dashes and spaced hyphens → space. Hyphens inside words preserved.
 
 ### Prompt constraints baked in
 
-- Always in **English** regardless of persona location
-- 5–20 words, plain text only, no hashtags, no quotes
-- Matches persona typing style (casual, lowercase, slang if appropriate)
-- Never starts with "Check this out", "Pretty cool", "Wow", or "Interesting"
-- Reacts dynamically to post mood (news, humor, opinion, product)
-- Skips only if context is truly empty or contains random characters/codes
+- Always **English** regardless of persona location
+- 5-20 words, plain text, no hashtags, no quotes
+- Matches persona typing style (casual, lowercase, slang)
+- Never starts with "Check this out", "Pretty cool", "Wow", "Interesting"
+- Reacts to post mood (news, humor, opinion, product)
 
-### Usage in params
+`userIdentity` alone triggers API generation. `message` (static) takes priority
+over API if both provided.
 
-```json
-{ "type": "share_posts", "params": { "count": 1, "userIdentity": "Dog lover from Sacramento..." } }
-```
+## `utils/claudeApi.js` — Stubbed
 
-`userIdentity` alone triggers API generation. `message` (static) takes priority over API if both provided.
-
-## `utils/claudeApi.js` — Stubbed (kept for `extractPostContext` only)
-
-`generateShareMessage` is commented out — replaced by `utils/generateMessage.js`.
-`extractPostContext` is still used by `share_post.js` for full-page context extraction.
+`generateShareMessage` commented out — replaced by `generateMessage.js`.
+`extractPostContext` still used by `share_post.js`.
 
 ## Network resilience — `runner.js`
 
-### Extended timeouts (set per browser at start of `runBrowser`)
+### Extended timeouts (per browser)
 
 ```javascript
-page.setDefaultNavigationTimeout(90000); // page loads
-page.setDefaultTimeout(60000);           // selectors / actions
+page.setDefaultNavigationTimeout(90000);
+page.setDefaultTimeout(60000);
 ```
 
-### Step-level retry for all errors
+### Step-level retry for ALL errors
 
-Every handler call is wrapped in `runWithRetry` — retries up to 3× for **all** errors.
-Wait time differs by error type:
+Every handler wrapped in `runWithRetry` — retries up to 3×:
+- Network errors (ERR_CONNECTION, ETIMEDOUT, ECONNRESET, proxy, timeout): wait 60s
+- All other errors (selector, bad params, DOM): wait 5s
 
-```
-STEP_RETRY_ATTEMPTS    = 3
-NETWORK_RETRY_WAIT_MS  = 60000  (covers brief proxy disconnections)
-SELECTOR_RETRY_WAIT_MS = 5000   (gives FB DOM time to settle)
-```
-
-Network errors (ERR_CONNECTION, ETIMEDOUT, ECONNRESET, proxy, timeout) wait 60s.
-All other errors (selector not found, bad params, DOM errors) wait 5s then retry.
+Constants: `STEP_RETRY_ATTEMPTS=3`, `NETWORK_RETRY_WAIT_MS=60000`, `SELECTOR_RETRY_WAIT_MS=5000`.
 
 ### Auto-navigate before first step
 
-Before any steps run, `runBrowser` checks the current URL. If the tab is not already
-on basewook.com, it navigates there first so no step ever starts on a blank or wrong page.
+`runBrowser` checks current URL. If not on basewook.com, navigates first so
+no step starts on blank or wrong page.
 
 ### Between-step and post-task delays
 
-Every step pause is randomized to simulate human browsing pace:
-
-```
-Between top-level steps : 5–15s random
-Between child steps     : 5–15s random
-After all steps done    : 10–15s cooldown before browser closes
-```
+- Between top-level steps: 5-15s random
+- Between child steps: 5-15s random
+- After all steps: 10-15s cooldown before close
 
 ### User param injection — `injectUserParams(steps, user)`
 
-Runs inside `runBrowser` before steps execute. Walks the step tree and fills missing
-params from the fetched user object:
+Runs before steps execute. Walks step tree, fills missing params from user:
 
-| Step type | Injected from user |
-|-----------|-------------------|
-| `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `travel`, `userId` (for the PATCH to status=Active, profileSetup=true) |
+| Step | Injected |
+|------|----------|
+| `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `travel`, `userId` |
 | `setup_avatar` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[0].imageId.filename` |
 | `setup_cover` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[1].imageId.filename` |
-| `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId` — from `user.linkedPage` + `buildPageAddress` |
+| `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId` |
 | `schedule_posts` | `posts` from `user.linkedPage.posts` |
-| `switch_profile` | `userName` from `user.firstName` + `user.lastName` |
-| `search` | `city` from `user.city` (used for `mode=page` → `"{category} in {city}"`) |
+| `switch_profile` | `userName` from firstName + lastName |
+| `search` | `city` from `user.city` (mode=page) |
 | `check_ip` | `userId` from `user._id` |
-| `share_posts` / `share_post` | `userIdentity` from `user.identityPrompt` (triggers GitHub Models message generation when `message` is not also set) |
+| `share_posts` / `share_post` | `userIdentity` from `user.identityPrompt` |
 
-Explicit params in `tasks.json` always take priority over injected values.
+Explicit params always win over injected values.
 
-## `homepage_interaction` — Home button selector
+## `create-profile.js` — Create Hidemium profile for a user
 
-Uses `a[href="/"][role="link"]` — **not** `aria-label="Home"`. The aria-label changes
-when notifications are present (e.g. "Home, 3 notifications") making it unreliable.
-The href is always `"/"` regardless of notification state.
+CLI that creates a Hidemium profile + links it back to the user record:
 
-**Flow:** click the Home button if found + has bounding box → fall back to
-`goto https://www.facebook.com` if not.
+```bash
+node create-profile.js <userId> [userId2] ...
+# or: npm run create-profile -- <userId>
+```
+
+Flow per userId:
+1. `fetchUser(userId)` — pulls firstName, lastName, `proxies[0].proxy`
+2. Tests the proxy by fetching `https://ipinfo.io/json` through it (axios native proxy, 20s timeout).
+   Fails if unreachable OR `country !== "US"` (override via `createProfile(userId, { requireCountry: null })`)
+3. `POST ${HIDEMIUM}/create-profile-custom?is_local=true` — **local profile** (lifetime plan
+   allows unlimited local; `is_local=false` hits cloud quota → "Usage limit reached")
+4. Success check: response body contains `uuid`. No `status: "successfully"` wrapper.
+5. `POST ${HIDEMIUM}/update-note` with `{ uuid, note }` — note field not accepted on
+   create-profile-custom, must be set separately. Contains `ip/city/region/country/loc/org/postal/timezone`.
+6. `PATCH ${USER_API_BASE_URL}/api/profiles/{userId}` with
+   `{ browsers: [{ browserId: uuid, provider: "hidemium" }] }` — so `tasks.json` can
+   launch by `userId` immediately after creation
+
+### Profile body — FB-optimized defaults
+
+- `os: "win"`, `osVersion` random from `["10", "11"]`, `browser: "chrome"`, `version: "136"`
+- `canvas: "noise"` — NOT `"perfect"` (identical across fleet) or `"off"` (leaks real canvas)
+- `webGLImage`, `webGLMetadata`, `audioContext`, `clientRectsEnable`, `noiseFont` all `true`
+- `hardwareConcurrency` random from `[4, 8, 12, 16]`, `deviceMemory` from `[4, 8, 16]`,
+  `resolution` from `["1920x1080", "1366x768", "1536x864", "2560x1440"]` — varied per profile
+- `proxy`: `"HTTP|host|port|user|pass"` (pipe-separated, NOT colon)
+- `language: "en-US"`, `StartURL: "https://www.facebook.com"`, `disableAutofillPopup: true`
+- `userAgent` omitted — let Hidemium derive from os+browser+version (mismatches get detected)
+
+Timezone + geolocation auto-derived from proxy IP by Hidemium — no `timezone` field needed.
+
+### Known gaps
+
+- **Proxy Optimize preset** (e.g. "FACEBOOK"): not exposed in the public API. Response body
+  carries `proxy_optimize_id`/`proxy_optimize_ids` fields but there's no documented endpoint
+  to list presets or set them on a profile. Set manually in the Hidemium UI after creation.
+
+## `homepage_interaction` — Home button
+
+Uses `a[href="/"][role="link"]` — NOT `aria-label="Home"` (aria-label changes
+with notification count, e.g. "Home, 3 notifications"). href is always `"/"`.
+
+Flow: click if found + has bounding box → fall back to `goto facebook.com`.
 
 ## `check_ip` — Auto IP recording on every browser open
 
-`actions/check_ip.js` fetches the browser's outbound IP from `https://ipinfo.io/json`
-and POSTs the result to the database. It runs automatically at the start of every
-browser session in `runner.js` (right after the Facebook navigation, before any
-user steps) so every browser open is recorded — and it's also registered as a
-regular leaf action, so it can be composed in `tasks.json` when needed.
+Fetches browser's outbound IP from `https://ipinfo.io/json`, POSTs to DB.
+Auto-runs at browser session start (after FB nav, before user steps). Also
+registered as leaf action — can be composed in tasks.
 
-### How the IP is fetched — `page.evaluate(fetch)`, not Node fetch
+### How the IP is fetched — `page.evaluate(fetch)`, NOT Node fetch
 
 ```javascript
 await page.evaluate(async (url) => {
@@ -1058,195 +677,106 @@ await page.evaluate(async (url) => {
 }, 'https://ipinfo.io/json');
 ```
 
-This runs inside the browser's page context so the request goes through the
-Hidemium profile's configured proxy. A Node `fetch`/`axios` call from the server
-process would exit through the **host machine's IP** — wrong — and
+Runs inside the page context so request goes through the Hidemium profile's
+proxy. A Node `fetch`/`axios` call exits through the **host's IP** (wrong).
 `page.request.get()` uses Playwright's separate APIRequestContext which does
-**not** reliably inherit the CDP-connected browser's proxy.
+NOT reliably inherit CDP browser's proxy.
 
-The page must be on a real origin before calling — `about:blank` has no fetch
-context. That's why the auto-run in `runBrowser` fires only after the Facebook
-navigation has completed. `ipinfo.io` returns `Access-Control-Allow-Origin: *`,
-so the cross-origin fetch from `facebook.com` succeeds.
+Page must be on real origin — `about:blank` has no fetch context. That's why
+auto-run fires only after FB navigation. ipinfo.io returns `Access-Control-Allow-Origin: *`,
+so cross-origin fetch from facebook.com works.
 
-### Endpoint resolution (database POST target)
+### Endpoint resolution
 
-Resolved in this priority order:
+1. `params.endpoint` — explicit override
+2. `IP_LOG_ENDPOINT` env (`:userId` placeholder replaced)
+3. `${USER_API_BASE_URL}/api/profiles/:userId/ip-records` (default)
+4. Logging only — no POST, no error
 
-1. `params.endpoint` — explicit override in a `tasks.json` step
-2. `IP_LOG_ENDPOINT` env var (`:userId` placeholder is replaced at call time)
-3. `${USER_API_BASE_URL}/api/profiles/:userId/ip-records` (default construction)
-4. Falls back to logging only — no POST, no error thrown
+POST payload: `{ userId, recordedAt, ipInfo }`. Errors caught + `console.warn`'d.
+Whole auto-run wrapped in try/catch so proxy hiccup doesn't abort task.
 
-POST payload shape:
+## Anti-detection — behavior-level risks
 
-```json
-{
-  "userId": "69e4a3378c3f0a567140fbcd",
-  "recordedAt": "2026-04-21T14:05:12.000Z",
-  "ipInfo": { "ip": "...", "city": "...", "region": "...", "country": "...", "org": "...", "...": "..." }
-}
-```
+Code-level risks (delays, mouse, offsets, typing variance) are handled by
+`humanBehavior.js`. Any handler bypassing those reintroduces risk.
 
-POST errors are caught and logged with `console.warn` — they never kill the
-session. The whole auto-run is also wrapped in a try/catch in `runBrowser` so a
-proxy hiccup on the IP lookup doesn't abort the task.
+### Historical fixes — don't reintroduce these patterns
 
-### Params
-
-| Param | Type | Required | Description |
-|-------|------|----------|-------------|
-| `userId` | string | no | Auto-injected from `user._id` / `user.id` via `injectUserParams` |
-| `endpoint` | string | no | Full override URL. Defaults to `IP_LOG_ENDPOINT` env → `USER_API_BASE_URL + /api/profiles/:userId/ip-records` |
-
-### `.env` var
-
-```
-IP_LOG_ENDPOINT=https://yourdomain.com/api/profiles/:userId/ip-records
-```
-
-Optional — if unset, the default constructed from `USER_API_BASE_URL` is used.
-
-## Anti-detection — behavior-level risks (read before editing actions)
-
-Code-level anti-detection (varied delays, mouse movement, offset clicks, per-char
-typing variance) is handled by `utils/humanBehavior.js`. Any handler that bypasses
-those helpers reintroduces risk. The audit below tracks known historical issues
-and their fixes — when editing action files, scan for the same patterns.
-
-### Historical fixes (don't reintroduce these patterns)
-
-| Pattern | File | Why it's a red flag | Fix |
-|---------|------|--------------------|-----|
-| `element.click()` on critical interactions | `schedule_posts.js` Create post heading | Instant click, no mouse trajectory, no bounding box randomization. FB's React DOM detection flags it immediately. | `humanClick(page, await locator.boundingBox())` |
-| `page.keyboard.type(text, { delay: N })` | `schedule_posts.js` post content | Uniform per-char delay is trivially fingerprintable. | `humanType(page, text)` — varies per-char and pauses after punctuation/spaces |
-| Fixed `waitForTimeout(fixedValue)` between actions | Any Tab loop, cooldowns | Perfectly periodic pauses are the single clearest bot signature. | `humanWait(page, min, max)` with a real range |
-| Fixed `waitForTimeout` for long cooldowns | `create_page` image processing wait, `switch_profile` cooldown | Lower risk than action-level pauses, but still contributes to a periodic session timeline. | `humanWait(page, min, max)` even for longer waits |
+| Pattern | Fix |
+|---------|-----|
+| `element.click()` on critical interactions | `humanClick(page, await locator.boundingBox())` |
+| `page.keyboard.type(text, { delay: N })` uniform per-char | `humanType(page, text)` — varies + pauses after punctuation |
+| Fixed `waitForTimeout(N)` between actions | `humanWait(page, min, max)` — real range |
+| Fixed `waitForTimeout` for long cooldowns | `humanWait(page, min, max)` — even for longer waits |
 
 ### Behavior-level risks (can't be fixed in code)
 
-**These are workflow/data issues — code can't save you from them.**
-
 1. **Compound session workload.** A brand-new account doing `setup_avatar →
    setup_about → setup_cover → create_page → schedule_posts → switch_profile →
-   add_friend × N` all in one session is a near-certain ban pattern, even with
-   perfectly humanlike clicks. Real humans discover features over days/weeks.
-2. **Early `create_page`.** Page creation is a high-trust action. FB's
-   first-72-hour trust model weights it heavily. Don't call `create_page` on an
-   account with no prior activity.
-3. **Uniform account timing.** If N accounts all run the same task at the same
-   time, the session shape repeats across accounts — detectable at the network
-   fleet level. Stagger start times per account, even by random minutes.
-4. **Duplicate media/content across accounts.** If the same avatar/cover/post
-   text is reused across accounts, FB detects it via media hashing. Each
-   account must have unique assets — this is handled upstream in the database
-   and is NOT something the runner can fix.
+   add_friend × N` in one session = near-certain ban, even with perfect clicks.
+2. **Early `create_page`.** Page creation is high-trust. FB's first-72-hour
+   trust model weights it heavily. Don't call on an account with no history.
+3. **Uniform account timing.** N accounts running same task simultaneously =
+   repeating session shape across accounts, detectable at network fleet level.
+   Stagger start times per account.
+4. **Duplicate media/content.** Reused avatars/covers/posts get hash-detected.
+   Each account must have unique assets (handled upstream in the database).
 
-### Recommended task staging for new accounts
+### Recommended staging for new accounts
 
-Split the setup across multiple sessions spread over days — do not bundle
-`setup_page_full` with the rest of the setup. A safer sequence:
+Spread setup over days — do NOT bundle `setup_page_full` with the rest:
 
 ```
-Day 1   : setup_avatar + setup_about      (light identity setup)
-Day 1-2 : home_feed preset × 2-3 sessions (warmup activity — scroll, like a few)
-Day 3   : setup_cover                     (one more light change)
-Day 3-4 : home_feed × 2-3 more sessions   (continue warmup)
-Day 5+  : add_friend × few                (start social activity)
-Day 7+  : setup_page_full                 (only after account has real history)
+Day 1   : setup_avatar + setup_about      (light identity)
+Day 1-2 : home_feed preset × 2-3          (warmup)
+Day 3   : setup_cover
+Day 3-4 : home_feed × 2-3 more
+Day 5+  : add_friend × few
+Day 7+  : setup_page_full                 (only after real history)
 ```
 
-The `trackerLog` field on each user record records what was done and when, so
-the scheduler can pick the next-safe-action per account without re-reading
-Facebook state.
+`trackerLog` on each user records what was done when, so the scheduler can pick
+next-safe-action per account without re-reading Facebook state.
 
 ### Auto-tracking — one entry per session
 
-`runner.js` → `runBrowser` posts a tracker-log entry at the end of every browser
-session (wrapped in `try/finally`, so partial failures still log what completed):
+`runBrowser` posts a tracker-log at end of every session (in `try/finally` so
+partial failures still log what completed):
 
 ```
 POST {USER_API_BASE_URL}/api/profiles/{userId}/tracker-logs
 Body: { "date": "YYYY-MM-DD", "note": "type1, type2, type3" }
 ```
 
-- `date` — today, ISO short form (`new Date().toISOString().slice(0, 10)`).
-- `note` — comma-separated list of **top-level** step types that completed
-  successfully (children are not enumerated; `random_preset` is logged as
-  `random_preset`, not as the resolved preset's steps).
-- `userId` — resolved from `user._id` / `user.id`.
+- `date` — today ISO short form
+- `note` — comma-separated TOP-LEVEL step types that succeeded (children not
+  enumerated; `random_preset` logged as-is, not as resolved steps)
+- `userId` — from `user._id` / `user.id`
 
-POST errors are caught and `console.warn`'d — they never kill the session or
-the calling task. Posts are skipped if `userId`, `note`, or `USER_API_BASE_URL`
-is empty.
+POST errors caught + `console.warn`'d. Skipped if `userId`, `note`, or
+`USER_API_BASE_URL` empty.
 
-## Direct `.click()` vs `humanClick`
+## Current status
 
-| Context | Use |
-|---------|-----|
-| Feed/profile page buttons | `humanClick(page, box)` — mouse movement looks human |
-| FB modal/overlay buttons (cover photo, save, file upload) | `element.click()` directly — humanClick offset can miss small targets |
-| After scroll (fresh coordinates needed) | Always re-fetch `boundingBox()` right before clicking |
+**Done:** server.js, runner, browserManager, humanBehavior, `homepage_interaction`,
+`scroll`, `like_posts`, `share_posts`, `share_post`, `setup_about` (+ PATCH status/profileSetup),
+`setup_avatar`, `setup_cover`, `visit_profile`, `add_friend` (profile + inline),
+`follow`, `search` (name/news/page), `open_search_result`, `create_page`,
+`schedule_posts`, `switch_profile` (split from old `setup_page`), `check_ip`,
+virtualized-feed rewrite, network resilience + retry-all-errors, user API integration,
+`injectUserParams`, `concurrency` + `blockMedia` task fields, GitHub Models share
+generation, auto-navigate + between-step delays, auto tracker-log, `chat/nlToJson.js`.
 
-## Current status / roadmap
-
-**Phase 1 (proof of concept) — DONE**
-- [x] server.js with POST /execute
-- [x] runner.js with recursive step executor
-- [x] utils/browserManager.js with Hidemium API integration (open/close profiles)
-- [x] utils/humanBehavior.js with anti-detection utilities
-- [x] Handlers: `homepage_interaction`, `scroll`, `like_posts`, `share_posts`
-- [x] Manual testing via `npm run task` with tasks.json
-
-**Phase 2 (feature expansion) — CURRENT**
-- [x] `setup_about` — fills all About page sections (bio, city, hometown, relationship,
-       work, education, hobbies, interests, travel, name pronunciation)
-- [x] `setup_avatar` — uploads profile picture from URL
-- [x] `setup_cover` — uploads cover photo from URL
-- [x] `visit_profile` — navigator action, navigate to profile by URL
-- [x] `add_friend` — send friend request on current profile page
-- [x] `share_post` — share a specific post by URL (static or API-generated message)
-- [x] `like_posts` + `share_posts` rewritten for virtualized feed (aria-posinset)
-- [x] Network resilience in runner (retry + extended timeouts for proxy drops)
-- [x] `utils/generateMessage.js` — GitHub Models API for share message generation (active)
-- [x] `.env` — env vars for GitHub Models token and model config
-- [x] `concurrency` task field — cap parallel browsers (sliding window worker pool)
-- [x] `blockMedia` task field — toggle image/video/font blocking per task
-- [x] All step errors retry (not just network) — selector errors wait 5s, network 60s
-- [x] Auto-navigate to basewook.com before first step if tab is on wrong page
-- [x] `profiles` array in tasks.json — explicit user IDs instead of browser count
-- [x] `utils/userApi.js` — fetch user from 3rd party API (`GET /api/profiles/:id`)
-- [x] `browserManager` resolves `user.browsers[0].browserId` + `user.browsers[0].provider`
-- [x] `injectUserParams` — auto-fills `setup_about/avatar/cover` params from user data
-- [x] Between-step delays (5–15s) and post-task cooldown (10–15s)
-- [x] `setup_cover` fixed for duplicate `[aria-label="Save changes"]` elements
-- [x] `IMAGE_SERVER_BASE_URL` + `USER_API_BASE_URL` + `NODE_ENV` in `.env`
-- [x] `create_page` + `schedule_posts` + `switch_profile` — split from the old `setup_page` action into one navigator + two leaves, composed via the `setup_page_full` preset
-- [x] `utils/pageAddressData.js` — parses city/state strings, seeds ZIP codes by state
-- [x] `search` — navigator with three modes (name, news, page); `mode=page` → `"{category} in {city}"` using user.city
-- [x] `open_search_result` — navigator, picks a random `/profile.php?id=*` anchor from results and clicks in
-- [x] `follow` — leaf, `[aria-label="Follow"]` works on profiles, pages, AND inline result cards
-- [x] `add_friend` — extended to match both `[aria-label^="Add Friend"]` (profile) and `[aria-label="Add friend"]` (inline)
-- [x] `setup_about` PATCHes `status="Active"` + `profileSetup=true` on completion
-- [ ] `comment_post`, `join_group`, `send_message`
-- [ ] Enable Claude API for comment/share generation
-- [ ] Task state tracking (SQLite)
-- [ ] Per-task, per-browser logging
-
-**Phase 3 (chat layer)**
-- [x] `chat/nlToJson.js` — Claude API (Haiku) converts NL → task JSON using actionSchemas as the contract
-- [x] `chat.js` — interactive CLI: type instruction → preview JSON → confirm → writes tasks.json
-- [ ] Web UI for chat input
-- [ ] Schema validation on generated JSON before execution
+**TODO:** `comment_post`, `join_group`, `send_message`; Claude API for comment generation;
+SQLite task state; per-task/per-browser logging; Web UI for chat; schema validation on generated JSON.
 
 ## Notes for Claude Code
 
-When working on this project:
-
-- Before adding features, re-read the "Core pattern" section — it's
-  easy to accidentally violate recursive-steps thinking
-- When asked to add a new action, always update `schemas/actionSchemas.js`
-  in the same change
-- If a Facebook selector isn't working, assume FB changed the DOM (they
-  do this often) — try `page.pause()` and inspect live
-- Prefer small, composable handlers over clever large ones
+- Before adding features, re-read the "Core pattern" section — easy to
+  accidentally violate recursive-steps thinking.
+- When adding a new action, always update `schemas/actionSchemas.js` in the
+  same change.
+- If an FB selector isn't working, assume FB changed the DOM — try `page.pause()`
+  and inspect live.
+- Prefer small, composable handlers over clever large ones.
