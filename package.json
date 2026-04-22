@@ -7,6 +7,7 @@
     "start": "node server.js",
     "task": "node run-task.js",
     "chat": "node chat.js",
+    "create-profile": "node create-profile.js",
     "probe:setup-page": "node run-setup-page-probe.js"
   },
   "dependencies": {
