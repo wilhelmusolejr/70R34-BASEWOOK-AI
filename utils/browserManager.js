@@ -148,22 +148,36 @@ async function updateProxyStatus(proxyId, status, lastKnownIp) {
 }
 
 /**
- * Append a proxy reference to user.proxies without replacing the existing array.
- * `existingProxies` may be populated objects or raw IDs — both are handled.
+ * Attach a proxy to a user via the dedicated endpoint.
+ * POST /api/profiles/:userId/proxies creates the proxy doc (or dedupes onto
+ * an existing one by host+port+username+password) and appends a
+ * { proxyId, assignedAt } entry to user.proxies. Don't PATCH user.proxies
+ * directly — the embedded shape and append semantics live in the backend.
  */
-async function assignProxyToUser(userId, newProxyId, existingProxies = []) {
-  if (!USER_API_BASE_URL) return;
-  const existingIds = (existingProxies || [])
-    .map((p) => (typeof p === 'string' ? p : p?._id))
-    .filter(Boolean);
+async function assignProxyToUser(userId, proxyString, ipInfo = {}) {
+  if (!USER_API_BASE_URL) return null;
+  const [host, port, username, password] = proxyString.split(':');
+  const payload = {
+    host,
+    port: parseInt(port, 10),
+    username,
+    password,
+    protocol: 'http',
+    status: 'active',
+  };
+  if (ipInfo.country) payload.country = ipInfo.country;
+  if (ipInfo.city) payload.city = ipInfo.city;
+
   try {
-    await axios.patch(`${USER_API_BASE_URL}/api/profiles/${userId}`, {
-      proxies: [...existingIds, newProxyId],
-    });
-    console.log(`[browserManager] Proxy ${newProxyId} assigned to user ${userId}`);
+    const { data } = await axios.post(
+      `${USER_API_BASE_URL}/api/profiles/${userId}/proxies`,
+      payload
+    );
+    console.log(`[browserManager] Proxy ${host}:${port} attached to user ${userId}`);
+    return data;
   } catch (err) {
-    const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-    console.warn(`[browserManager] PATCH user proxies failed: ${respBody}`);
+    console.warn(`[browserManager] POST attach proxy failed: ${formatErrorDetails(err)}`);
+    return null;
   }
 }
 
@@ -174,7 +188,7 @@ async function assignProxyToUser(userId, newProxyId, existingProxies = []) {
  * - Works but wrong country              → leave status as pending, continue
  * Gives up after MAX_PROXY_BATCHES rounds.
  */
-async function selectWorkingProxy(userId, existingProxies, { requireCountry = 'US' } = {}) {
+async function selectWorkingProxy(userId, { requireCountry = 'US' } = {}) {
   for (let round = 1; round <= MAX_PROXY_BATCHES; round++) {
     const batch = await fetchPendingProxies(PROXY_BATCH_SIZE);
     if (!batch.length) {
@@ -206,7 +220,7 @@ async function selectWorkingProxy(userId, existingProxies, { requireCountry = 'U
       }
 
       await updateProxyStatus(proxyId, 'active', ipInfo.ip);
-      await assignProxyToUser(userId, proxyId, existingProxies);
+      await assignProxyToUser(userId, proxyString, ipInfo);
 
       return { proxyString, proxyId, ipInfo };
     }
@@ -261,7 +275,6 @@ async function createProfile(userId, { isLocal = true, requireCountry = 'US' } =
   try {
     ({ proxyString: proxy, ipInfo } = await selectWorkingProxy(
       userId,
-      user.proxies || [],
       { requireCountry }
     ));
   } catch (err) {
