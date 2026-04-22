@@ -624,9 +624,16 @@ node create-profile.js <userId> [userId2] ...
 ```
 
 Flow per userId:
-1. `fetchUser(userId)` — pulls firstName, lastName, `proxies[0].proxy`
-2. Tests the proxy by fetching `https://ipinfo.io/json` through it (axios native proxy, 20s timeout).
-   Fails if unreachable OR `country !== "US"` (override via `createProfile(userId, { requireCountry: null })`)
+1. `fetchUser(userId)` — pulls firstName, lastName, existing `proxies[]` refs
+2. **Proxy pool selection** — `selectWorkingProxy(userId, user.proxies)`:
+   - Loop up to **5 rounds × 10 proxies = 50 max**
+   - Each round: `GET /api/proxies?status=pending&limit=10`
+   - Per proxy: `testProxy(proxy)` via axios + ipinfo.io (20s timeout)
+     - ipinfo fetch fails → `PATCH /api/proxies/:id { status:"dead", lastCheckedAt }`, continue
+     - Country ≠ `requireCountry` (default `"US"`) → skip (leave pending), continue
+     - Works + US → `PATCH /api/proxies/:id { status:"active", lastCheckedAt, lastKnownIp }`, break
+   - Append proxy `_id` to `user.proxies` via `PATCH /api/profiles/:userId { proxies: [...existingIds, newId] }` (append, not replace)
+   - Throws if no working proxy after 50 tries
 3. `POST ${HIDEMIUM}/create-profile-custom?is_local=true` — **local profile** (lifetime plan
    allows unlimited local; `is_local=false` hits cloud quota → "Usage limit reached")
 4. Success check: response body contains `uuid`. No `status: "successfully"` wrapper.
