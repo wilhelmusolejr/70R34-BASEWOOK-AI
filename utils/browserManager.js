@@ -19,6 +19,9 @@ const headers = { Authorization: `Bearer ${API_TOKEN}` };
 const OPEN_PROFILE_ATTEMPTS = 3;
 const OPEN_PROFILE_RETRY_MS = 5000;
 
+const PROXY_BATCH_SIZE = 10;
+const MAX_PROXY_BATCHES = 5;
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -67,6 +70,111 @@ async function testProxy(proxyString) {
 }
 
 /**
+ * Fetch a batch of pending proxies from the user API.
+ * Each item is expected to have `_id` and `proxy` (host:port:user:pass).
+ */
+async function fetchPendingProxies(limit = PROXY_BATCH_SIZE) {
+  if (!USER_API_BASE_URL) {
+    throw new Error('USER_API_BASE_URL not set — cannot fetch pending proxies');
+  }
+  const { data } = await axios.get(`${USER_API_BASE_URL}/api/proxies`, {
+    params: { status: 'pending', limit },
+  });
+  if (Array.isArray(data)) return data;
+  return data.proxies || data.data || [];
+}
+
+/**
+ * Update a single proxy's status (e.g. "active" | "dead").
+ * Also stamps lastCheckedAt and optionally lastKnownIp so the DB shows
+ * when we last hit the proxy and what IP it resolved to.
+ * Failures are logged, not thrown — the caller should keep going.
+ */
+async function updateProxyStatus(proxyId, status, lastKnownIp) {
+  if (!USER_API_BASE_URL) return;
+  const payload = { status, lastCheckedAt: new Date().toISOString() };
+  if (lastKnownIp) payload.lastKnownIp = lastKnownIp;
+  try {
+    await axios.patch(`${USER_API_BASE_URL}/api/proxies/${proxyId}`, payload);
+    console.log(`[browserManager] Proxy ${proxyId} → ${status}${lastKnownIp ? ` (${lastKnownIp})` : ''}`);
+  } catch (err) {
+    const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.warn(`[browserManager] PATCH proxy status failed (${proxyId} → ${status}): ${respBody}`);
+  }
+}
+
+/**
+ * Append a proxy reference to user.proxies without replacing the existing array.
+ * `existingProxies` may be populated objects or raw IDs — both are handled.
+ */
+async function assignProxyToUser(userId, newProxyId, existingProxies = []) {
+  if (!USER_API_BASE_URL) return;
+  const existingIds = (existingProxies || [])
+    .map((p) => (typeof p === 'string' ? p : p?._id))
+    .filter(Boolean);
+  try {
+    await axios.patch(`${USER_API_BASE_URL}/api/profiles/${userId}`, {
+      proxies: [...existingIds, newProxyId],
+    });
+    console.log(`[browserManager] Proxy ${newProxyId} assigned to user ${userId}`);
+  } catch (err) {
+    const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.warn(`[browserManager] PATCH user proxies failed: ${respBody}`);
+  }
+}
+
+/**
+ * Pull pending proxies in batches of 10, test each via ipinfo.
+ * - Working + matches requireCountry → mark "active", assign to user, return
+ * - Fails to fetch ipinfo                → mark "dead", continue
+ * - Works but wrong country              → leave status as pending, continue
+ * Gives up after MAX_PROXY_BATCHES rounds.
+ */
+async function selectWorkingProxy(userId, existingProxies, { requireCountry = 'US' } = {}) {
+  for (let round = 1; round <= MAX_PROXY_BATCHES; round++) {
+    const batch = await fetchPendingProxies(PROXY_BATCH_SIZE);
+    if (!batch.length) {
+      console.log(`[browserManager] No more pending proxies available (round ${round})`);
+      break;
+    }
+    console.log(`[browserManager] Testing ${batch.length} proxies (round ${round}/${MAX_PROXY_BATCHES})`);
+
+    for (const record of batch) {
+      const proxyString = record.proxy;
+      const proxyId = record._id;
+
+      if (!proxyString || !proxyId) {
+        console.warn(`[browserManager] Proxy record missing fields, skipping:`, record);
+        continue;
+      }
+
+      let ipInfo;
+      try {
+        ipInfo = await testProxy(proxyString);
+      } catch (err) {
+        console.warn(`[browserManager] Proxy ${proxyId} dead: ${err.message}`);
+        await updateProxyStatus(proxyId, 'dead');
+        continue;
+      }
+
+      if (requireCountry && ipInfo.country !== requireCountry) {
+        console.warn(`[browserManager] Proxy ${proxyId} in ${ipInfo.country} (need ${requireCountry}) — skipping`);
+        continue;
+      }
+
+      await updateProxyStatus(proxyId, 'active', ipInfo.ip);
+      await assignProxyToUser(userId, proxyId, existingProxies);
+
+      return { proxyString, proxyId, ipInfo };
+    }
+  }
+
+  throw new Error(
+    `No working ${requireCountry || ''} proxy found after ${MAX_PROXY_BATCHES} batches of ${PROXY_BATCH_SIZE}`
+  );
+}
+
+/**
  * Format ipinfo JSON into multiline "key: value" note.
  */
 function formatIpInfoNote(info) {
@@ -77,10 +185,12 @@ function formatIpInfoNote(info) {
 /**
  * Create a Hidemium profile optimized for Facebook multi-account use.
  *
- * Fetches the user from the 3rd party API to pull firstName/lastName and
- * the proxy string from `user.proxies[0].proxy` (host:port:user:pass HTTP).
+ * Pulls a working proxy from the shared pool (GET /api/proxies?status=pending)
+ * in batches of 10, testing each via ipinfo.io. The first reachable + correct-
+ * country proxy is marked "active", appended to user.proxies (reference, not
+ * replace), and used for the Hidemium profile. Unreachable proxies are marked
+ * "dead". Gives up after 5 batches (50 proxies).
  *
- * - Tests proxy first via ipinfo.io; throws if unreachable or not US
  * - Windows 10/11 + Chrome, randomized hardware per profile
  * - Canvas noise (unique per profile), spoofed WebGL/audio/fonts/clientRects
  * - Timezone + geolocation auto-derived from proxy IP by Hidemium
@@ -97,22 +207,16 @@ async function createProfile(userId, { isLocal = true, requireCountry = 'US' } =
   const user = await fetchUser(userId);
   const firstName = user.firstName;
   const lastName = user.lastName;
-  const proxy = user.proxies?.[0]?.proxy;
 
   if (!firstName || !lastName) {
     throw new Error(`User ${userId} is missing firstName/lastName`);
   }
-  if (!proxy) {
-    throw new Error(`User ${userId} has no proxies[0].proxy`);
-  }
 
-  const ipInfo = await testProxy(proxy);
-
-  if (requireCountry && ipInfo.country !== requireCountry) {
-    throw new Error(
-      `Proxy country mismatch — expected ${requireCountry}, got ${ipInfo.country} (IP ${ipInfo.ip}, ${ipInfo.city || '?'})`
-    );
-  }
+  const { proxyString: proxy, ipInfo } = await selectWorkingProxy(
+    userId,
+    user.proxies || [],
+    { requireCountry }
+  );
 
   const [host, port, proxyUser, proxyPass] = proxy.split(':');
   const hidemiumProxy = `HTTP|${host}|${port}|${proxyUser}|${proxyPass}`;
