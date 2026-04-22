@@ -47,6 +47,46 @@ function parseProxyString(proxyString) {
   };
 }
 
+function normalizeProxyRecord(record) {
+  if (!record || typeof record !== 'object') {
+    return { proxyId: null, proxyString: null };
+  }
+
+  const proxyId = record._id || record.id || null;
+  const proxyString = record.proxy || (
+    record.host && record.port && record.username && record.password
+      ? `${record.host}:${record.port}:${record.username}:${record.password}`
+      : null
+  );
+
+  return { proxyId, proxyString };
+}
+
+function formatErrorDetails(err) {
+  if (!err) return 'Unknown error';
+
+  const parts = [];
+  if (err.code) parts.push(`code=${err.code}`);
+  if (err.message) parts.push(`message=${err.message}`);
+
+  const status = err.response?.status;
+  if (status) parts.push(`status=${status}`);
+
+  const responseData = err.response?.data;
+  if (responseData !== undefined) {
+    try {
+      parts.push(`response=${JSON.stringify(responseData)}`);
+    } catch (_) {
+      parts.push(`response=${String(responseData)}`);
+    }
+  }
+
+  if (err.cause?.code) parts.push(`causeCode=${err.cause.code}`);
+  if (err.cause?.message) parts.push(`causeMessage=${err.cause.message}`);
+
+  return parts.join(' | ') || String(err);
+}
+
 /**
  * Test a proxy by fetching ipinfo.io through it.
  * Returns the ipinfo JSON if reachable, throws otherwise.
@@ -61,6 +101,8 @@ async function testProxy(proxyString) {
     timeout: 20000,
   });
 
+  console.log(`[browserManager] ipinfo raw response: ${JSON.stringify(data)}`);
+
   if (!data || !data.ip) {
     throw new Error(`ipinfo.io returned no IP through proxy`);
   }
@@ -71,7 +113,9 @@ async function testProxy(proxyString) {
 
 /**
  * Fetch a batch of pending proxies from the user API.
- * Each item is expected to have `_id` and `proxy` (host:port:user:pass).
+ * Supports either:
+ * - `{ _id, proxy }`
+ * - `{ id, host, port, username, password }`
  */
 async function fetchPendingProxies(limit = PROXY_BATCH_SIZE) {
   if (!USER_API_BASE_URL) {
@@ -140,8 +184,7 @@ async function selectWorkingProxy(userId, existingProxies, { requireCountry = 'U
     console.log(`[browserManager] Testing ${batch.length} proxies (round ${round}/${MAX_PROXY_BATCHES})`);
 
     for (const record of batch) {
-      const proxyString = record.proxy;
-      const proxyId = record._id;
+      const { proxyString, proxyId } = normalizeProxyRecord(record);
 
       if (!proxyString || !proxyId) {
         console.warn(`[browserManager] Proxy record missing fields, skipping:`, record);
@@ -152,7 +195,7 @@ async function selectWorkingProxy(userId, existingProxies, { requireCountry = 'U
       try {
         ipInfo = await testProxy(proxyString);
       } catch (err) {
-        console.warn(`[browserManager] Proxy ${proxyId} dead: ${err.message}`);
+        console.warn(`[browserManager] Proxy ${proxyId} test failed: ${formatErrorDetails(err)}`);
         await updateProxyStatus(proxyId, 'dead');
         continue;
       }
@@ -212,16 +255,20 @@ async function createProfile(userId, { isLocal = true, requireCountry = 'US' } =
     throw new Error(`User ${userId} is missing firstName/lastName`);
   }
 
-  const { proxyString: proxy, ipInfo } = await selectWorkingProxy(
-    userId,
-    user.proxies || [],
-    { requireCountry }
-  );
+  let proxy;
+  let ipInfo = null;
 
-  const [host, port, proxyUser, proxyPass] = proxy.split(':');
-  const hidemiumProxy = `HTTP|${host}|${port}|${proxyUser}|${proxyPass}`;
+  try {
+    ({ proxyString: proxy, ipInfo } = await selectWorkingProxy(
+      userId,
+      user.proxies || [],
+      { requireCountry }
+    ));
+  } catch (err) {
+    console.warn(`[browserManager] Proceeding without proxy: ${err.message}`);
+  }
 
-  const note = formatIpInfoNote(ipInfo);
+  const note = ipInfo ? formatIpInfoNote(ipInfo) : '';
 
   const body = {
     name: `${firstName} ${lastName}`,
@@ -241,12 +288,18 @@ async function createProfile(userId, { isLocal = true, requireCountry = 'US' } =
     deviceMemory: pick([4, 8, 16]),
     resolution: pick(['1920x1080', '1366x768', '1536x864', '2560x1440']),
 
-    proxy: hidemiumProxy,
     language: 'en-US',
     StartURL: 'https://www.facebook.com',
 
     disableAutofillPopup: true,
   };
+
+  if (proxy) {
+    const [host, port, proxyUser, proxyPass] = proxy.split(':');
+    body.proxy = `HTTP|${host}|${port}|${proxyUser}|${proxyPass}`;
+  } else {
+    console.log('[browserManager] Creating profile with empty proxy settings');
+  }
 
   const url = `${API}/create-profile-custom?is_local=${isLocal ? 'true' : 'false'}`;
 
@@ -272,14 +325,18 @@ async function createProfile(userId, { isLocal = true, requireCountry = 'US' } =
   console.log(`[browserManager] Profile created: "${body.name}" (${uuid.slice(-8)})`);
 
   // Note isn't accepted on create-profile-custom — try the update-note endpoint
-  try {
-    await axios.post(`${API}/update-note`, { uuid, note }, { headers });
-    console.log(`[browserManager] Note set for ${uuid.slice(-8)}`);
-  } catch (err) {
-    const status = err.response?.status;
-    const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-    console.warn(`[browserManager] update-note failed (${status ?? 'no response'}): ${respBody}`);
-    console.warn('[browserManager] Profile created, but note was not saved. Tell Claude this so the endpoint name can be fixed.');
+  if (note) {
+    try {
+      await axios.post(`${API}/update-note`, { uuid, note }, { headers });
+      console.log(`[browserManager] Note set for ${uuid.slice(-8)}`);
+    } catch (err) {
+      const status = err.response?.status;
+      const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+      console.warn(`[browserManager] update-note failed (${status ?? 'no response'}): ${respBody}`);
+      console.warn('[browserManager] Profile created, but note was not saved. Tell Claude this so the endpoint name can be fixed.');
+    }
+  } else {
+    console.log('[browserManager] Skipping proxy note because no working proxy info was collected');
   }
 
   // Persist browser back to the user record so tasks.json can find it via userId
