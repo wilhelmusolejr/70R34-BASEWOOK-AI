@@ -5,12 +5,77 @@
 
 require('dotenv').config();
 const axios = require('axios');
-const { launchBrowsers, closeBrowsers } = require('./utils/browserManager');
+const { launchBrowsers, closeBrowsers, testProxy } = require('./utils/browserManager');
+const { fetchUser } = require('./utils/userApi');
 const presets = require('./config/presets.json');
 const { buildPageAddress } = require('./utils/pageAddressData');
 
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
 const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
+
+/**
+ * Before opening the browser, fetch current IP via the user's proxy and
+ * append it to user.proxyLog if the IP differs from the last recorded entry.
+ * Non-fatal — any failure (fetch, proxy, PATCH) is logged and skipped.
+ */
+async function recordProxyLog(userId) {
+  if (!USER_API_BASE_URL) {
+    console.warn(`[${userId}] [proxyLog] USER_API_BASE_URL not set — skipping`);
+    return;
+  }
+
+  let user;
+  try {
+    user = await fetchUser(userId);
+  } catch (err) {
+    console.warn(`[${userId}] [proxyLog] fetchUser failed: ${err.message}`);
+    return;
+  }
+
+  const proxy = user.proxies?.[0]?.proxy;
+  if (!proxy) {
+    console.warn(`[${userId}] [proxyLog] No proxies[0].proxy — skipping`);
+    return;
+  }
+
+  let ipInfo;
+  try {
+    ipInfo = await testProxy(proxy);
+  } catch (err) {
+    console.warn(`[${userId}] [proxyLog] Proxy test failed: ${err.message}`);
+    return;
+  }
+
+  const existingLog = Array.isArray(user.proxyLog) ? user.proxyLog : [];
+  const lastEntry = existingLog[existingLog.length - 1];
+
+  if (lastEntry && lastEntry.ip === ipInfo.ip) {
+    console.log(`[${userId}] [proxyLog] IP unchanged (${ipInfo.ip}) — no new entry`);
+    return;
+  }
+
+  const newEntry = {
+    ip: ipInfo.ip || '',
+    city: ipInfo.city || '',
+    region: ipInfo.region || '',
+    country: ipInfo.country || '',
+    loc: ipInfo.loc || '',
+    org: ipInfo.org || '',
+    postal: ipInfo.postal || '',
+    timezone: ipInfo.timezone || '',
+    checkedAt: new Date().toISOString(),
+  };
+
+  try {
+    await axios.patch(`${USER_API_BASE_URL}/api/profiles/${userId}`, {
+      proxyLog: [...existingLog, newEntry],
+    });
+    console.log(`[${userId}] [proxyLog] New entry: ${newEntry.ip} (${newEntry.city}, ${newEntry.region}, ${newEntry.country})`);
+  } catch (err) {
+    const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.warn(`[${userId}] [proxyLog] PATCH failed: ${respBody}`);
+  }
+}
 
 async function persistTrackerLog(userId, note) {
   if (!userId || !note) return;
@@ -355,6 +420,8 @@ async function runTask(task) {
   async function worker() {
     while (queue.length > 0) {
       const [index, userId] = queue.shift();
+
+      await recordProxyLog(userId);
 
       let session;
       try {
