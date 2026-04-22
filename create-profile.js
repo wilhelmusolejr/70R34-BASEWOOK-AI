@@ -6,7 +6,7 @@
  *
  * For each userId:
  *   - Fetches the user from the API (firstName, lastName, proxy.proxy_new)
- *   - Tries to validate a proxy via ipinfo.io (must be reachable + US)
+ *   - Tries to find a working US proxy via ipinfo.io
  *   - Creates a Hidemium profile with FB-optimized settings
  *
  * Failed profiles are logged and skipped - other IDs keep running.
