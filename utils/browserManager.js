@@ -6,6 +6,9 @@
 const axios = require('axios');
 const { chromium } = require('playwright');
 const { fetchUser } = require('./userApi');
+require('dotenv').config();
+
+const USER_API_BASE_URL = process.env.USER_API_BASE_URL;
 
 // Hidemium API configuration
 const API = 'http://127.0.0.1:2222';
@@ -18,6 +21,180 @@ const OPEN_PROFILE_RETRY_MS = 5000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+/**
+ * Parse "host:port:user:pass" proxy string into axios proxy config.
+ */
+function parseProxyString(proxyString) {
+  const parts = proxyString.split(':');
+  if (parts.length !== 4) {
+    throw new Error(`Invalid proxy format. Expected host:port:user:pass, got: "${proxyString}"`);
+  }
+  const [host, port, username, password] = parts;
+  return {
+    host,
+    port: parseInt(port, 10),
+    auth: { username, password },
+    protocol: 'http',
+  };
+}
+
+/**
+ * Test a proxy by fetching ipinfo.io through it.
+ * Returns the ipinfo JSON if reachable, throws otherwise.
+ */
+async function testProxy(proxyString) {
+  const proxyConfig = parseProxyString(proxyString);
+
+  console.log(`[browserManager] Testing proxy ${proxyConfig.host}:${proxyConfig.port}...`);
+
+  const { data } = await axios.get('https://ipinfo.io/json', {
+    proxy: proxyConfig,
+    timeout: 20000,
+  });
+
+  if (!data || !data.ip) {
+    throw new Error(`ipinfo.io returned no IP through proxy`);
+  }
+
+  console.log(`[browserManager] Proxy OK — IP ${data.ip} (${data.city || '?'}, ${data.region || '?'}, ${data.country || '?'})`);
+  return data;
+}
+
+/**
+ * Format ipinfo JSON into multiline "key: value" note.
+ */
+function formatIpInfoNote(info) {
+  const fields = ['ip', 'hostname', 'city', 'region', 'country', 'loc', 'org', 'postal', 'timezone'];
+  return fields.map((k) => `${k}: ${info[k] ?? ''}`).join('\n');
+}
+
+/**
+ * Create a Hidemium profile optimized for Facebook multi-account use.
+ *
+ * Fetches the user from the 3rd party API to pull firstName/lastName and
+ * the proxy string from `user.proxies[0].proxy` (host:port:user:pass HTTP).
+ *
+ * - Tests proxy first via ipinfo.io; throws if unreachable or not US
+ * - Windows 10/11 + Chrome, randomized hardware per profile
+ * - Canvas noise (unique per profile), spoofed WebGL/audio/fonts/clientRects
+ * - Timezone + geolocation auto-derived from proxy IP by Hidemium
+ *
+ * @param {string} userId - 3rd party API user ID
+ * @param {object} [opts]
+ * @param {boolean} [opts.isLocal=true] - local profile (lifetime plan) vs cloud (metered)
+ * @param {string} [opts.requireCountry="US"] - 2-letter country, pass null to skip
+ * @returns {Promise<{uuid: string, ipInfo: object, body: object, user: object}>}
+ */
+async function createProfile(userId, { isLocal = true, requireCountry = 'US' } = {}) {
+  if (!userId) throw new Error('userId is required');
+
+  const user = await fetchUser(userId);
+  const firstName = user.firstName;
+  const lastName = user.lastName;
+  const proxy = user.proxies?.[0]?.proxy;
+
+  if (!firstName || !lastName) {
+    throw new Error(`User ${userId} is missing firstName/lastName`);
+  }
+  if (!proxy) {
+    throw new Error(`User ${userId} has no proxies[0].proxy`);
+  }
+
+  const ipInfo = await testProxy(proxy);
+
+  if (requireCountry && ipInfo.country !== requireCountry) {
+    throw new Error(
+      `Proxy country mismatch — expected ${requireCountry}, got ${ipInfo.country} (IP ${ipInfo.ip}, ${ipInfo.city || '?'})`
+    );
+  }
+
+  const [host, port, proxyUser, proxyPass] = proxy.split(':');
+  const hidemiumProxy = `HTTP|${host}|${port}|${proxyUser}|${proxyPass}`;
+
+  const note = formatIpInfoNote(ipInfo);
+
+  const body = {
+    name: `${firstName} ${lastName}`,
+    os: 'win',
+    osVersion: pick(['10', '11']),
+    browser: 'chrome',
+    version: '136',
+
+    canvas: 'noise',
+    webGLImage: true,
+    webGLMetadata: true,
+    audioContext: true,
+    clientRectsEnable: true,
+    noiseFont: true,
+
+    hardwareConcurrency: pick([4, 8, 12, 16]),
+    deviceMemory: pick([4, 8, 16]),
+    resolution: pick(['1920x1080', '1366x768', '1536x864', '2560x1440']),
+
+    proxy: hidemiumProxy,
+    language: 'en-US',
+    StartURL: 'https://www.facebook.com',
+
+    disableAutofillPopup: true,
+  };
+
+  const url = `${API}/create-profile-custom?is_local=${isLocal ? 'true' : 'false'}`;
+
+  let data;
+  try {
+    ({ data } = await axios.post(url, body, { headers }));
+  } catch (err) {
+    if (err.response) {
+      console.error('[browserManager] Hidemium rejected body:', JSON.stringify(body, null, 2));
+      console.error('[browserManager] Hidemium response body:', JSON.stringify(err.response.data, null, 2));
+      throw new Error(
+        `Hidemium ${err.response.status}: ${JSON.stringify(err.response.data)}`
+      );
+    }
+    throw err;
+  }
+
+  // create-profile-custom returns the profile object directly on success
+  const uuid = data.uuid || data.data?.uuid;
+  if (!uuid) {
+    throw new Error(`Failed to create profile — no UUID in response: ${JSON.stringify(data)}`);
+  }
+  console.log(`[browserManager] Profile created: "${body.name}" (${uuid.slice(-8)})`);
+
+  // Note isn't accepted on create-profile-custom — try the update-note endpoint
+  try {
+    await axios.post(`${API}/update-note`, { uuid, note }, { headers });
+    console.log(`[browserManager] Note set for ${uuid.slice(-8)}`);
+  } catch (err) {
+    const status = err.response?.status;
+    const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.warn(`[browserManager] update-note failed (${status ?? 'no response'}): ${respBody}`);
+    console.warn('[browserManager] Profile created, but note was not saved. Tell Claude this so the endpoint name can be fixed.');
+  }
+
+  // Persist browser back to the user record so tasks.json can find it via userId
+  if (!USER_API_BASE_URL) {
+    console.warn('[browserManager] USER_API_BASE_URL not set — skipping browsers PATCH');
+  } else {
+    try {
+      await axios.patch(`${USER_API_BASE_URL}/api/profiles/${userId}`, {
+        browsers: [{ browserId: uuid, provider: 'hidemium' }],
+      });
+      console.log(`[browserManager] User ${userId} browsers updated → ${uuid}`);
+    } catch (err) {
+      const status = err.response?.status;
+      const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+      console.warn(`[browserManager] PATCH browsers failed (${status ?? 'no response'}): ${respBody}`);
+    }
+  }
+
+  return { uuid, ipInfo, body, note, user };
 }
 
 /**
@@ -159,4 +336,6 @@ module.exports = {
   closeProfile,
   launchBrowsers,
   closeBrowsers,
+  createProfile,
+  testProxy,
 };
