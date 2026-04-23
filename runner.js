@@ -87,10 +87,39 @@ async function persistTrackerLog(userId, note) {
   const target = `${USER_API_BASE_URL}/api/profiles/${userId}/tracker-logs`;
   try {
     await axios.post(target, { date: today, note }, { timeout: 15000 });
-    console.log(`  [trackerLog] Logged "${note}" → ${target}`);
+    const preview = note.length > 120 ? `${note.slice(0, 120)}…` : note;
+    console.log(`  [trackerLog] Logged "${preview.replace(/\n/g, ' | ')}" → ${target}`);
   } catch (err) {
     console.warn(`  [trackerLog] Failed to POST tracker log: ${err.message}`);
   }
+}
+
+/**
+ * Flatten a step tree into a " - " joined chain of type names.
+ * Example: search → [open_search_result → [connect, scroll, share_posts]]
+ *   becomes "search - open_search_result - connect - scroll - share_posts"
+ */
+function describeStepChain(step) {
+  const nested = Array.isArray(step.steps) ? step.steps.map(describeStepChain) : [];
+  return [step.type, ...nested].join(' - ');
+}
+
+/**
+ * Build the tracker-log note body.
+ * On success: "SUCCESS\n1. <chain>\n2. <chain>..."
+ * On failure: "FAIL at <type>: <message>\n1. <completed chain>..."
+ */
+function buildTrackerNote(completed, failure) {
+  const lines = [];
+  if (failure) {
+    const where = failure.step?.type ? ` at ${failure.step.type}` : '';
+    const msg = failure.error?.message || String(failure.error || 'unknown error');
+    lines.push(`FAIL${where}: ${msg}`);
+  } else {
+    lines.push('SUCCESS');
+  }
+  completed.forEach((chain, i) => lines.push(`${i + 1}. ${chain}`));
+  return lines.join('\n');
 }
 
 function getAssetFilename(asset) {
@@ -139,6 +168,7 @@ const handlers = {
   search: require('./actions/search'),
   open_search_result: require('./actions/open_search_result'),
   follow: require('./actions/follow'),
+  connect: require('./actions/connect'),
 };
 
 
@@ -196,14 +226,19 @@ function injectUserParams(steps, user) {
       };
     }
 
-    if (step.type === 'setup_avatar' && !(step.params && step.params.photoUrl)) {
-      const img = user.images && user.images[0];
-      if (img) {
-        s.params = {
-          ...(step.params || {}),
-          photoUrl: `${IMAGE_SERVER_BASE_URL}${img.imageId.filename}`,
-        };
+    if (step.type === 'setup_avatar') {
+      const next = { ...(step.params || {}) };
+
+      if (!next.photoUrl) {
+        const img = user.images && user.images[0];
+        if (img) next.photoUrl = `${IMAGE_SERVER_BASE_URL}${img.imageId.filename}`;
       }
+
+      if (!next.userIdentity) {
+        next.userIdentity = user.identityPrompt || '';
+      }
+
+      s.params = next;
     }
 
     if (step.type === 'setup_cover' && !(step.params && step.params.photoUrl)) {
@@ -378,7 +413,8 @@ async function runBrowser(session, steps, options = {}) {
   // }
 
   const injectedSteps = user ? injectUserParams(steps, user) : steps;
-  const completedTypes = [];
+  const completed = [];
+  let failure = null;
 
   try {
     for (let i = 0; i < injectedSteps.length; i++) {
@@ -387,12 +423,18 @@ async function runBrowser(session, steps, options = {}) {
         console.log(`[${profileId}] Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
         await new Promise(r => setTimeout(r, betweenMs));
       }
-      await runStep(page, injectedSteps[i], profileId, user);
-      completedTypes.push(injectedSteps[i].type);
+      const step = injectedSteps[i];
+      try {
+        await runStep(page, step, profileId, user);
+        completed.push(describeStepChain(step));
+      } catch (err) {
+        failure = { step, error: err };
+        throw err;
+      }
     }
   } finally {
     const userId = user?._id || user?.id || '';
-    const note = completedTypes.join(', ');
+    const note = buildTrackerNote(completed, failure);
     await persistTrackerLog(userId, note);
   }
 
