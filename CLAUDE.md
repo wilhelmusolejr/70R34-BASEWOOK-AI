@@ -302,7 +302,11 @@ Key notes:
 - Wait for reposition-text span before proceeding — signals upload complete.
 - `description` optional (default `""`) — only typed if non-empty.
 
-Params: `photoUrl` (required), `description` (optional).
+Params: `photoUrl` (required), `description` (optional), `userIdentity` (optional, auto-injected from `user.identityPrompt`).
+
+**Caption priority** — explicit `description` → AI-generated via `utils/generateAvatarDescription.js` from `userIdentity` → random fallback from `DESCRIPTION_POOLS` (5 categories × 20 entries = 100 total: `bible_verses`, `inspirational_quotes`, `gratitude`, `life_mottos`, `blessings`). Fallback picks a random category first, then a random entry. Final text gets a light emoji sprinkle (~40% chance, one symbol max from a 10-entry pool). Generator always returns a non-empty string.
+
+**Trigger probe** — looks for `[aria-label="Profile picture actions"]` on the current page with a 3s timeout before navigating to `/me`. That button only appears on your own profile, so "not found" is a safe signal to navigate. Avoids a redundant goto when a prior step (e.g. `setup_about`) already landed on `/me`.
 
 ## `setup_cover` — Cover photo upload
 
@@ -435,6 +439,7 @@ overwrites a good one.
 | `search` | Navigator | Types query into FB search, submits, optionally clicks results-tab filter |
 | `open_search_result` | Navigator | Picks one `a[href*="/profile.php?id="]` anchor, scrolls to center, clicks |
 | `follow` | Leaf | Clicks `[aria-label="Follow"]` — works on profiles, pages, AND inline cards |
+| `connect` | Leaf | Clicks whichever of Add Friend / Follow is present on the loaded profile/page. Never throws if neither is visible — logs + skips. `params.both` (default `true`) controls whether it clicks both when both are shown. |
 
 ### `search` modes
 
@@ -603,7 +608,7 @@ Runs before steps execute. Walks step tree, fills missing params from user:
 | Step | Injected |
 |------|----------|
 | `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `travel`, `userId` |
-| `setup_avatar` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[0].imageId.filename` |
+| `setup_avatar` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[0].imageId.filename`, `userIdentity` = `user.identityPrompt` |
 | `setup_cover` | `photoUrl` = `IMAGE_SERVER_BASE_URL + images[1].imageId.filename` |
 | `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId` |
 | `schedule_posts` | `posts` from `user.linkedPage.posts` |
@@ -632,7 +637,7 @@ Flow per userId:
      - ipinfo fetch fails → `PATCH /api/proxies/:id { status:"dead", lastCheckedAt }`, continue
      - Country ≠ `requireCountry` (default `"US"`) → skip (leave pending), continue
      - Works + US → `PATCH /api/proxies/:id { status:"active", lastCheckedAt, lastKnownIp }`, break
-   - Append proxy `_id` to `user.proxies` via `PATCH /api/profiles/:userId { proxies: [...existingIds, newId] }` (append, not replace)
+   - Append to `user.proxies` via `PATCH /api/profiles/:userId { proxies: [...existingEntries, { proxyId, assignedAt }] }` — preserves prior entries (already in `{ proxyId, assignedAt }` shape) and appends the new one. `proxyId` refs the `proxies` collection; `assignedAt` is ISO-now.
    - Throws if no working proxy after 50 tries
 3. `POST ${HIDEMIUM}/create-profile-custom?is_local=true` — **local profile** (lifetime plan
    allows unlimited local; `is_local=false` hits cloud quota → "Usage limit reached")
@@ -753,13 +758,29 @@ partial failures still log what completed):
 
 ```
 POST {USER_API_BASE_URL}/api/profiles/{userId}/tracker-logs
-Body: { "date": "YYYY-MM-DD", "note": "type1, type2, type3" }
+Body: { "date": "YYYY-MM-DD", "note": "<multiline note>" }
 ```
 
 - `date` — today ISO short form
-- `note` — comma-separated TOP-LEVEL step types that succeeded (children not
-  enumerated; `random_preset` logged as-is, not as resolved steps)
 - `userId` — from `user._id` / `user.id`
+- `note` — multiline body, first line is `SUCCESS` or `FAIL at <stepType>: <msg>`,
+  then a numbered list of completed top-level steps with their child chains
+  flattened via ` - ` (e.g. `search - open_search_result - connect - scroll - share_posts`).
+  `random_preset` logged as-is, not as resolved steps.
+
+Example success body:
+```
+SUCCESS
+1. search - open_search_result - connect - scroll - share_posts
+2. setup_avatar
+3. setup_about
+```
+
+Example failure body (failed on step 2, nothing after it logged):
+```
+FAIL at setup_avatar: photoUrl is required
+1. search - open_search_result - connect - scroll - share_posts
+```
 
 POST errors caught + `console.warn`'d. Skipped if `userId`, `note`, or
 `USER_API_BASE_URL` empty.
