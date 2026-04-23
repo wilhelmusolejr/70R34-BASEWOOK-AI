@@ -123,14 +123,17 @@ module.exports = async function setup_avatar(page, params) {
       await humanWait(page, 500, 1000);
     }
 
-    // 8. Click Save
+    // 8. Click Save — scroll into view first so the button is actually
+    // in the viewport (long descriptions push it below the fold), then
+    // use direct .click() per CLAUDE.md convention for modal save buttons
+    // (humanClick's cursor offset can miss and FB silently ignores it).
     const saveBtn = await page.waitForSelector(
       'div[aria-label="Save"][role="button"]',
       { timeout: 8000 }
     );
-    const saveBox = await saveBtn.boundingBox();
+    await saveBtn.scrollIntoViewIfNeeded();
     await humanWait(page, 800, 1500);
-    await humanClick(page, saveBox);
+    await saveBtn.click();
     console.log('Save clicked');
 
     // 9. Wait for modal to close
