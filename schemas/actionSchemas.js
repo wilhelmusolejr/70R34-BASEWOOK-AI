@@ -124,10 +124,11 @@ const actionSchemas = {
     hasChildren: false
   },
   setup_avatar: {
-    description: 'Upload a profile picture from a URL. Self-navigates to /me — no profileUrl needed.',
+    description: 'Upload a profile picture from a URL. Probes the current page for the "Profile picture actions" trigger; navigates to /me only on miss. Caption priority: explicit description → AI-generated from userIdentity → random Bible verse fallback.',
     params: {
       photoUrl: { type: 'string', description: 'Public URL of the image to upload as profile picture' },
-      description: { type: 'string', default: '', description: 'Optional caption/description for the profile picture post' }
+      description: { type: 'string', default: '', description: 'Explicit caption — overrides AI generation when provided.' },
+      userIdentity: { type: 'string', default: '', description: 'Persona POV for AI caption. Auto-injected from user.identityPrompt when omitted.' }
     },
     hasChildren: false
   },
@@ -192,6 +193,13 @@ const actionSchemas = {
   follow: {
     description: 'Leaf: click the Follow button on the currently loaded page. Selector is the same on profiles, pages, and inline search-result cards.',
     params: {},
+    hasChildren: false
+  },
+  connect: {
+    description: 'Leaf: click whichever of "Add Friend" / "Follow" is present on the loaded profile or page. Never throws if neither is visible — logs and skips.',
+    params: {
+      both: { type: 'boolean', default: true, description: 'When true, click both if both are visible. When false, click Add Friend first and skip Follow if friend request was sent.' }
+    },
     hasChildren: false
   },
   check_ip: {
