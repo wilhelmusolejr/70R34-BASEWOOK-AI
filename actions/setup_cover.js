@@ -40,13 +40,20 @@ module.exports = async function setup_cover(page, params) {
   console.log(`Image saved to ${tmpPath}`);
 
   try {
-    // 1. Navigate to own profile
-    console.log('Navigating to own profile...');
-    await page.goto('https://www.facebook.com/me', { waitUntil: 'domcontentloaded' });
-    await humanWait(page, 2000, 3500);
+    // 1. Locate trigger — try current page first, navigate to /me only if missing
+    const SELECTOR = '[aria-label="Add cover photo"]';
+    let coverBtn;
+    try {
+      coverBtn = await page.waitForSelector(SELECTOR, { timeout: 3000 });
+      console.log('Already on own profile — reusing current page.');
+    } catch (_) {
+      console.log('Navigating to own profile...');
+      await page.goto('https://www.facebook.com/me', { waitUntil: 'domcontentloaded' });
+      await humanWait(page, 2000, 3500);
+      coverBtn = await page.waitForSelector(SELECTOR, { timeout: 10000 });
+    }
 
     // 2. Click "Add cover photo" button
-    const coverBtn = await page.waitForSelector('[aria-label="Add cover photo"]', { timeout: 10000 });
     await coverBtn.scrollIntoViewIfNeeded();
     await humanWait(page, 500, 1000);
     await coverBtn.click();
