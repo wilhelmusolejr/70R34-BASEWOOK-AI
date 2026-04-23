@@ -349,6 +349,24 @@ Composed via the `setup_page_full` preset, or nested:
 
 Shared helpers in `utils/pageSetupHelpers.js`.
 
+### Retry strategy — split on the "Create Page" commit click
+
+The click on `div[aria-label="Create Page"][role="button"]` (after
+name/category/bio) is what actually commits the Page on FB's side, so retry
+semantics differ on each side:
+
+| Phase | Scope | Attempts | Wait |
+|-------|-------|----------|------|
+| Pre-create (FB home → Pages menu → modal → fill name/category/bio → commit click) | **Whole block restarts** — navigates back to `facebook.com` and presses Escape to dismiss any leftover modal between tries | 3 | 60s |
+| Post-create (fill email/address/hours → upload images → advance Steps 2-5 → Done) | **Each action independently** — per-field retry (email fill, street fill, upload profile, Step 2 Next, etc.) | 2 | 60s |
+
+On final exhaustion either phase throws with `err.noRetry = true` so `runner.js`
+won't re-run the whole `create_page` handler (a whole-handler retry after the
+commit click would spawn a duplicate Page).
+
+Constants in `actions/create_page.js`: `PRE_CREATE_ATTEMPTS=3`,
+`POST_FIELD_ATTEMPTS=2`, `RETRY_WAIT_MS=60000`.
+
 ### Navigation
 
 ```
@@ -589,6 +607,11 @@ Every handler wrapped in `runWithRetry` — retries up to 3×:
 - All other errors (selector, bad params, DOM): wait 5s
 
 Constants: `STEP_RETRY_ATTEMPTS=3`, `NETWORK_RETRY_WAIT_MS=60000`, `SELECTOR_RETRY_WAIT_MS=5000`.
+
+**`err.noRetry = true` opts out of step-level retry.** Handlers that run their
+own internal retries (e.g. `create_page`) set this flag on the final error so
+`runWithRetry` does NOT restart the whole handler — doing so would re-trigger
+side effects already committed (e.g. duplicate Pages on FB).
 
 ### Auto-navigate before first step
 
