@@ -105,9 +105,10 @@ const actionSchemas = {
     hasChildren: false
   },
   visit_profile: {
-    description: 'Navigate to a Facebook profile by URL. Use child steps to act on the profile.',
+    description: 'Navigate to a Facebook profile/page by URL. Use child steps to act on the target. Provide url OR pool (random pick from config pool file).',
     params: {
-      url: { type: 'string', description: 'Full Facebook profile URL' }
+      url: { type: 'string', description: 'Full Facebook profile/page URL. Wins over pool when both set.' },
+      pool: { type: 'string', enum: ['friends', 'sharers', 'users'], description: 'Random pick from a named pool: "friends" → config/friend_targets.json, "sharers" → config/share_sources.json, "users" → live DB fetch (5 random Active profiles with non-empty profileUrl)' }
     },
     hasChildren: true
   },

@@ -21,7 +21,7 @@
     "steps": [
       {
         "type": "visit_profile",
-        "params": { "random": true },
+        "params": { "pool": "friends" },
         "steps": [{ "type": "add_friend" }]
       }
     ]

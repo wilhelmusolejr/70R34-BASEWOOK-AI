@@ -113,7 +113,7 @@ happens via the `steps` array in JSON, not via code.
     { "type": "setup_cover" },
     {
       "type": "visit_profile",
-      "params": { "random": true },
+      "params": { "pool": "friends" },
       "steps": [{ "type": "add_friend" }]
     }
   ]
@@ -450,15 +450,36 @@ overwrites a good one.
 
 ## `visit_profile` + `add_friend`
 
-- `visit_profile` — navigator, navigates to profile URL.
+- `visit_profile` — navigator, navigates to a profile/page URL. Provide `url`
+  for a specific target, or `pool` to random-pick from a config pool file.
+  `url` wins when both are set.
 - `add_friend` — leaf, works in **two contexts** via union locator:
   - Profile page — `[aria-label^="Add Friend"]` (capital F, dynamic e.g. "Add Friend Joan")
   - Inline search card — `[aria-label="Add friend"]` (lowercase f, exact)
 - Scrolls button to viewport center (`scrollToCenter`) before clicking.
 
+| Pool value | Source | Purpose |
+|------------|--------|---------|
+| `"friends"` | `config/friend_targets.json` | Profiles to send friend requests to |
+| `"sharers"` | `config/share_sources.json` | Active pages/profiles that post daily — visit to scroll/like/share from |
+| `"users"` | `GET /api/profiles?status=Active&limit=5&random=1` | 5 random Active users from our DB; empty/null `profileUrl` filtered out before random pick |
+
 ```json
+// Specific URL
 { "type": "visit_profile", "params": { "url": "..." },
   "steps": [{ "type": "add_friend" }] }
+
+// Random friend target
+{ "type": "visit_profile", "params": { "pool": "friends" },
+  "steps": [{ "type": "add_friend" }] }
+
+// Random sharer → consume content
+{ "type": "visit_profile", "params": { "pool": "sharers" },
+  "steps": [
+    { "type": "scroll", "params": { "duration": 8 } },
+    { "type": "like_posts", "params": { "count": 2 } },
+    { "type": "share_posts", "params": { "count": 1 } }
+  ] }
 ```
 
 ## `search` + `open_search_result` + `follow`
