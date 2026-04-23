@@ -39,6 +39,31 @@ async function clickAboutTab(page) {
   console.log('  [setup_about] Clicked About tab');
 }
 
+/**
+ * If FB shows a "You have unsaved changes — Leave Page?" modal after
+ * clicking a sidebar tab, click Leave Page to discard the leftover input
+ * and let navigation proceed. Probes with a short timeout so the common
+ * (no-modal) case isn't slowed down.
+ */
+async function dismissLeavePageDialog(page, { timeout = 2500 } = {}) {
+  const btn = page.locator('[aria-label="Leave Page"]').first();
+  try {
+    await btn.waitFor({ state: 'visible', timeout });
+  } catch {
+    return false;
+  }
+
+  try {
+    await btn.click();
+    console.log('  [setup_about] Leave Page confirmation dismissed (unsaved changes discarded)');
+    await humanWait(page, 800, 1500);
+    return true;
+  } catch (err) {
+    console.warn(`  [setup_about] Leave Page click failed: ${err.message}`);
+    return false;
+  }
+}
+
 async function clickSubsection(page, skFragment, fallbackText) {
   try {
     const el = await page.$(`a[href*="${skFragment}"]`);
@@ -49,6 +74,7 @@ async function clickSubsection(page, skFragment, fallbackText) {
       if (box) {
         await humanClick(page, box);
         await humanWait(page, 1800, 2800);
+        await dismissLeavePageDialog(page);
         console.log(`  [setup_about] Navigated to subsection: ${skFragment}`);
         return true;
       }
@@ -65,6 +91,7 @@ async function clickSubsection(page, skFragment, fallbackText) {
       if (box) {
         await humanClick(page, box);
         await humanWait(page, 1800, 2800);
+        await dismissLeavePageDialog(page);
         console.log(`  [setup_about] Navigated to subsection via text: ${fallbackText}`);
         return true;
       }

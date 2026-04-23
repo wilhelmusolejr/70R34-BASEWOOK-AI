@@ -282,10 +282,21 @@ Always use `waitForSaveComplete` after save — retries 3× (10-15s initial +
 Before adding data, check for edit button (only appears when data exists):
 `[aria-label="Edit Workplace"]`, `[aria-label="Edit college"]`, `[aria-label="Edit school"]`.
 
+### Leave Page confirmation on sidebar switch
+
+If a prior section's save failed silently (proxy hiccup, DOM race), FB keeps
+the half-typed input in memory. Clicking the next sidebar tab then pops a
+"You have unsaved changes — Leave Page?" modal that blocks navigation.
+`clickSubsection` calls `dismissLeavePageDialog` after every sidebar click:
+probes `[aria-label="Leave Page"]` with a 2.5s timeout and clicks it if
+visible (discards the stale input, lets navigation proceed). Common case
+pays only the probe timeout when no modal is shown.
+
 ### Key internal helpers
 
 `typeAndSelect` (click → clear → type → ArrowDown → Enter), `selectYearFromDropdown`,
-`clickPanelButton`, `setPanelPrivacyPublic`, `fillPanelWithItems`, `waitForSaveComplete`.
+`clickPanelButton`, `setPanelPrivacyPublic`, `fillPanelWithItems`, `waitForSaveComplete`,
+`dismissLeavePageDialog`.
 
 ## `setup_avatar` — Profile picture upload
 
