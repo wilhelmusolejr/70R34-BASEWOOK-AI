@@ -84,7 +84,7 @@ async function persistTrackerLog(userId, note) {
     return;
   }
   const today = new Date().toISOString().slice(0, 10);
-  const target = `${USER_API_BASE_URL}/api/profiles/${userId}/tracker-logs`;
+  const target = `${USER_API_BASE_URL}/api/profiles/${userId}/tracker`;
   try {
     await axios.post(target, { date: today, note }, { timeout: 15000 });
     const preview = note.length > 120 ? `${note.slice(0, 120)}…` : note;

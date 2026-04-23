@@ -812,7 +812,7 @@ next-safe-action per account without re-reading Facebook state.
 partial failures still log what completed):
 
 ```
-POST {USER_API_BASE_URL}/api/profiles/{userId}/tracker-logs
+POST {USER_API_BASE_URL}/api/profiles/{userId}/tracker
 Body: { "date": "YYYY-MM-DD", "note": "<multiline note>" }
 ```
 
