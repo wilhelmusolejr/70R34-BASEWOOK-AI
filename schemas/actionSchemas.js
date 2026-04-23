@@ -196,10 +196,8 @@ const actionSchemas = {
     hasChildren: false
   },
   connect: {
-    description: 'Leaf: click whichever of "Add Friend" / "Follow" is present on the loaded profile or page. Never throws if neither is visible — logs and skips.',
-    params: {
-      both: { type: 'boolean', default: true, description: 'When true, click both if both are visible. When false, click Add Friend first and skip Follow if friend request was sent.' }
-    },
+    description: 'Leaf: click every "Add Friend" / "Follow" / "Like" button that is visible on the loaded profile or page, in that priority order. Add Friend matches any aria-label starting with "Add Friend" (dynamic name suffix); Follow and Like match their exact aria-label so already-followed / already-liked states do not re-click. Never throws if none are visible — logs and skips.',
+    params: {},
     hasChildren: false
   },
   check_ip: {

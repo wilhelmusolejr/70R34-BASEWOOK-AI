@@ -439,7 +439,7 @@ overwrites a good one.
 | `search` | Navigator | Types query into FB search, submits, optionally clicks results-tab filter |
 | `open_search_result` | Navigator | Picks one `a[href*="/profile.php?id="]` anchor, scrolls to center, clicks |
 | `follow` | Leaf | Clicks `[aria-label="Follow"]` — works on profiles, pages, AND inline cards |
-| `connect` | Leaf | Clicks whichever of Add Friend / Follow is present on the loaded profile/page. Never throws if neither is visible — logs + skips. `params.both` (default `true`) controls whether it clicks both when both are shown. |
+| `connect` | Leaf | Clicks every Add Friend / Follow / Like button visible on the loaded profile/page, in that priority order. Add Friend matches `aria-label^="Add Friend"` (dynamic name suffix, e.g. "Add Friend Joan Blasiro") + `aria-label="Add friend"` (inline cards). Follow and Like use exact `aria-label="Follow"` / `aria-label="Like"` so already-followed / already-liked states do not re-click (those become "Following" / "Liked"). Never throws if none are visible — logs + skips. |
 
 ### `search` modes
 

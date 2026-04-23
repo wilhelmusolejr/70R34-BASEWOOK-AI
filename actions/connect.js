@@ -1,10 +1,19 @@
 /**
  * connect — Leaf action.
- * Clicks whichever of "Add Friend" / "Follow" is present on the loaded page.
- * Profiles usually show "Add Friend" (+ often "Follow"); Pages show "Follow".
- * If neither is visible, logs and returns — NEVER throws, so it's safe to
- * compose under open_search_result or visit_profile where button presence
- * varies by target.
+ * Clicks whichever of Add Friend / Follow / Like are present on the loaded
+ * profile or page. Walks all three in priority order and clicks every one
+ * that is visible. If none are visible, logs and returns — NEVER throws, so
+ * it's safe to compose under open_search_result or visit_profile where the
+ * available buttons vary by target type.
+ *
+ * Selector notes:
+ *   - Add Friend: aria-label starts with "Add Friend" (dynamic name suffix,
+ *     e.g. "Add Friend Joan Blasiro") or the lowercase-f variant used on
+ *     inline search-result cards.
+ *   - Follow:     aria-label="Follow" exact (already-followed buttons become
+ *                 "Following" so the exact match won't re-click).
+ *   - Like:       aria-label="Like" exact (already-liked Pages become "Liked"
+ *                 so the exact match won't re-click).
  */
 
 const { humanWait, humanClick, scrollToCenter } = require('../utils/humanBehavior');
@@ -13,6 +22,7 @@ const ADD_FRIEND_SELECTOR =
   'div[role="button"][aria-label^="Add Friend"], ' +
   'div[role="button"][aria-label="Add friend"]';
 const FOLLOW_SELECTOR = '[aria-label="Follow"]';
+const LIKE_SELECTOR = '[aria-label="Like"]';
 
 async function clickIfPresent(page, locator, label) {
   const visible = await locator.isVisible().catch(() => false);
@@ -40,19 +50,19 @@ async function clickIfPresent(page, locator, label) {
 }
 
 module.exports = async function connect(page, params) {
-  const both = params.both !== false;
+  const targets = [
+    { label: 'Add Friend', locator: page.locator(ADD_FRIEND_SELECTOR).first() },
+    { label: 'Follow', locator: page.locator(FOLLOW_SELECTOR).first() },
+    { label: 'Like', locator: page.locator(LIKE_SELECTOR).first() },
+  ];
 
-  const addFriend = page.locator(ADD_FRIEND_SELECTOR).first();
-  const follow = page.locator(FOLLOW_SELECTOR).first();
-
-  const clickedFriend = await clickIfPresent(page, addFriend, 'Add Friend');
-
-  let clickedFollow = false;
-  if (both || !clickedFriend) {
-    clickedFollow = await clickIfPresent(page, follow, 'Follow');
+  let anyClicked = false;
+  for (const { label, locator } of targets) {
+    const clicked = await clickIfPresent(page, locator, label);
+    if (clicked) anyClicked = true;
   }
 
-  if (!clickedFriend && !clickedFollow) {
-    console.log('  [connect] No Add Friend / Follow button visible — skipping.');
+  if (!anyClicked) {
+    console.log('  [connect] No Add Friend / Follow / Like button visible — skipping.');
   }
 };

@@ -12,7 +12,16 @@
       "Bash(node:*)",
       "Bash(npm run task:*)",
       "Bash(tasklist:*)",
-      "Bash(gh repo *)"
+      "Bash(gh repo *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(python -m json.tool)",
+      "Bash(git commit *)",
+      "Bash(git check-ignore *)",
+      "WebSearch",
+      "WebFetch(domain:docs.hidemium.io)",
+      "WebFetch(domain:documenter.getpostman.com)"
     ]
   }
 }
