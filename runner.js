@@ -184,6 +184,14 @@ async function runWithRetry(fn, profileId, stepType) {
     } catch (err) {
       lastError = err;
 
+      // Handlers can set err.noRetry = true to opt out of step-level retry
+      // (e.g. create_page, which handles its own retries internally — a
+      // whole-handler restart would spawn a duplicate Page on FB).
+      if (err && err.noRetry) {
+        console.warn(`[${profileId}] ${stepType} threw noRetry error — skipping runner retry: ${err.message}`);
+        break;
+      }
+
       if (attempt >= STEP_RETRY_ATTEMPTS) break;
 
       console.warn(`[${profileId}] Error on ${stepType} (attempt ${attempt}/${STEP_RETRY_ATTEMPTS}): ${err.message}`);
