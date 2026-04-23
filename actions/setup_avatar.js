@@ -10,6 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { humanWait, humanClick, humanType } = require('../utils/humanBehavior');
+const { generateAvatarDescription } = require('../utils/generateAvatarDescription');
 
 function downloadToTemp(url) {
   return new Promise((resolve, reject) => {
@@ -38,20 +39,40 @@ async function goToOwnProfile(page) {
   await humanWait(page, 2000, 3500);
 }
 
+/**
+ * Try to find the profile-picture trigger on the current page first.
+ * Only navigate to /me when it's missing — avoids reloading when a prior
+ * step already left us on the profile.
+ */
+async function findActionsBtn(page) {
+  const SELECTOR = '[aria-label="Profile picture actions"]';
+  try {
+    const btn = await page.waitForSelector(SELECTOR, { timeout: 3000 });
+    console.log('Already on own profile — reusing current page.');
+    return btn;
+  } catch (_) {
+    await goToOwnProfile(page);
+    return page.waitForSelector(SELECTOR, { timeout: 10000 });
+  }
+}
+
 module.exports = async function setup_avatar(page, params) {
-  const { photoUrl, description = '' } = params;
+  const { photoUrl, userIdentity = '' } = params;
   if (!photoUrl) throw new Error('setup_avatar: photoUrl is required');
+
+  // Explicit description wins; otherwise AI-generate from persona, Bible-verse fallback.
+  const description = params.description?.trim()
+    || await generateAvatarDescription(userIdentity);
 
   console.log('Downloading avatar image...');
   const tmpPath = await downloadToTemp(photoUrl);
   console.log(`Image saved to ${tmpPath}`);
 
   try {
-    // 1. Navigate to own profile
-    await goToOwnProfile(page);
+    // 1. Locate trigger — try current page first, navigate to /me only if missing
+    const actionsBtn = await findActionsBtn(page);
 
     // 2. Click "Profile picture actions" button
-    const actionsBtn = await page.waitForSelector('[aria-label="Profile picture actions"]', { timeout: 10000 });
     await actionsBtn.scrollIntoViewIfNeeded();
     const actionsBox = await actionsBtn.boundingBox();
     await humanClick(page, actionsBox);
