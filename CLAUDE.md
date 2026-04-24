@@ -177,8 +177,12 @@ Facebook aggressively detects automation. Code-level rules:
   or `element.scrollIntoView` on the main feed. JS scroll has no acceleration
   curve and wrong event source.
 - **Form element scrolling:** `scrollIntoViewIfNeeded()` IS acceptable inside
-  About panels and modals — they're isolated containers. Use `scrollToCenter`
-  from `humanBehavior.js` for mouse-wheel scroll to a specific element.
+  About panels and modals — they're isolated containers. Also acceptable for
+  profile/page header buttons (Add Friend / Follow / Like in `connect`) —
+  after a bulk feed scroll the header is off-screen and mouse-wheel
+  `scrollToCenter` can overshoot or stall, but the header is not virtualized
+  so deterministic JS-scroll is safe. Use `scrollToCenter` from
+  `humanBehavior.js` only when mouse-wheel is specifically needed (feed).
 - **Clicking:** bounding-box clicks via `humanClick(page, box)` for feed/profile
   buttons. Locator clicks can fail silently on FB's React DOM.
 - **Typing:** `humanType(page, text)` — varies per-char and pauses after
@@ -489,7 +493,7 @@ overwrites a good one.
 | `search` | Navigator | Types query into FB search, submits, optionally clicks results-tab filter |
 | `open_search_result` | Navigator | Picks one `a[href*="/profile.php?id="]` anchor, scrolls to center, clicks |
 | `follow` | Leaf | Clicks `[aria-label="Follow"]` — works on profiles, pages, AND inline cards |
-| `connect` | Leaf | Clicks every Add Friend / Follow / Like button visible on the loaded profile/page, in that priority order. Add Friend matches `aria-label^="Add Friend"` (dynamic name suffix, e.g. "Add Friend Joan Blasiro") + `aria-label="Add friend"` (inline cards). Follow and Like use exact `aria-label="Follow"` / `aria-label="Like"` so already-followed / already-liked states do not re-click (those become "Following" / "Liked"). Never throws if none are visible — logs + skips. |
+| `connect` | Leaf | Clicks Add Friend / Follow / Like on the loaded profile/page, in that priority order. Targets via has-text XPath on exact inner `<span>` text (`"Add friend"`, `"Follow"`, `"Like"`) — stable across FB's aria-label variants (`"Add Friend Joan Blasiro"` vs `"Add friend"`) and avoids feed-post `[aria-label="Like"]` false matches. Already-followed/liked become `"Following"`/`"Liked"`, so exact text match naturally skips re-clicks. Per target: check presence → visibility → `scrollIntoViewIfNeeded` → `boundingBox` → `humanClick` → verify button no longer visible. Only logs `Clicked "X"` after post-click verification; otherwise logs the specific skip reason (not present / not visible / no box / click didn't register). Uses `scrollIntoViewIfNeeded` (not `scrollToCenter`) because profile/page headers are static containers — deterministic built-in scroll lands the exact element in viewport, mouse-wheel scroll can leave the header button off-screen after bulk feed scrolls. Never throws. |
 
 ### `search` modes
 

@@ -12,7 +12,7 @@
  * signal for the actual button we want.
  */
 
-const { humanWait, humanClick, scrollToCenter } = require('../utils/humanBehavior');
+const { humanWait, humanClick } = require('../utils/humanBehavior');
 
 const TARGETS = [
   {
@@ -50,10 +50,8 @@ async function tryClick(page, target) {
     return false;
   }
 
-  const viewport = page.viewportSize();
-  const viewportHeight = viewport && viewport.height ? viewport.height : 800;
-  await scrollToCenter(page, handle, viewportHeight);
-  await humanWait(page, 1200, 2000);
+  await handle.scrollIntoViewIfNeeded().catch(() => null);
+  await humanWait(page, 1000, 1800);
 
   const box = await handle.boundingBox().catch(() => null);
   if (!box || !box.width || !box.height) {
