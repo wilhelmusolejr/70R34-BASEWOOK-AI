@@ -152,7 +152,9 @@ function sprinkleEmoji(text) {
 async function requestGitHubModels(messages, options = {}) {
   const token = String(process.env.GITHUB_MODELS_TOKEN || '').trim();
   const model = String(process.env.GITHUB_MODELS_MODEL || 'openai/gpt-4.1').trim();
-  const endpoint = String(process.env.GITHUB_MODELS_BASE_URL || 'https://models.github.ai/inference/chat/completions').trim();
+  const endpoint = String(
+    process.env.GITHUB_MODELS_BASE_URL || 'https://models.github.ai/inference/chat/completions'
+  ).trim();
   const apiVersion = String(process.env.GITHUB_MODELS_API_VERSION || '2026-03-10').trim();
 
   if (!token) throw new Error('Missing GITHUB_MODELS_TOKEN in environment.');
@@ -160,17 +162,17 @@ async function requestGitHubModels(messages, options = {}) {
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
-      'Accept': 'application/vnd.github+json',
-      'Authorization': `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
-      'X-GitHub-Api-Version': apiVersion
+      'X-GitHub-Api-Version': apiVersion,
     },
     body: JSON.stringify({
       model,
       temperature: options.temperature ?? 0.9,
       max_tokens: options.maxTokens ?? 80,
-      messages
-    })
+      messages,
+    }),
   });
 
   if (!response.ok) {
@@ -223,7 +225,7 @@ async function generateAvatarDescription(userIdentity) {
 
     const payload = await requestGitHubModels([
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: 'Generate the profile-picture caption:' }
+      { role: 'user', content: 'Generate the profile-picture caption:' },
     ]);
 
     const raw = payload.choices[0]?.message?.content?.trim().replace(/^["']|["']$/g, '') ?? '';
@@ -232,7 +234,10 @@ async function generateAvatarDescription(userIdentity) {
       return fallbackQuote();
     }
 
-    const cleaned = raw.replace(/[—–]|(?<= )-(?= )/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    const cleaned = raw
+      .replace(/[—–]|(?<= )-(?= )/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
 
     if (!cleaned) {
       return fallbackQuote();
@@ -241,7 +246,6 @@ async function generateAvatarDescription(userIdentity) {
     const finalText = sprinkleEmoji(cleaned);
     console.log(`  [generateAvatarDescription] generated: "${finalText}"`);
     return finalText;
-
   } catch (err) {
     console.warn(`  [generateAvatarDescription] API error: ${err.message} — using fallback quote`);
     return fallbackQuote();

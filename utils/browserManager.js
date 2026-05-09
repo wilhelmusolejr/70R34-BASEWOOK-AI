@@ -4,17 +4,28 @@
  */
 
 const axios = require('axios');
+const crypto = require('crypto');
 const { chromium } = require('playwright');
 const { fetchUser } = require('./userApi');
 require('dotenv').config();
 
 const USER_API_BASE_URL = process.env.USER_API_BASE_URL;
 
+const BROWSER_PROVIDER = (process.env.BROWSER_PROVIDER || 'hidemium').toLowerCase();
+
 // Hidemium API configuration
 const API = 'http://127.0.0.1:2222';
 const API_TOKEN = 'pMgajBtFminGid3d6Wh0zFu2gPGx3BhUt3KX0S';
 
 const headers = { Authorization: `Bearer ${API_TOKEN}` };
+
+// Multilogin X API configuration
+const MLX_SIGNIN_URL = 'https://api.multilogin.com/user/signin';
+const MLX_REFRESH_TOKEN_URL = 'https://api.multilogin.com/user/refresh_token';
+const MLX_LAUNCHER = 'https://launcher.mlx.yt:45001';
+const MLX_API = 'https://api.multilogin.com';
+const MLX_PROXY_GEN_URL = 'https://profile-proxy.multilogin.com/v1/proxy/connection_url';
+let mlxToken = null;
 
 const OPEN_PROFILE_ATTEMPTS = 3;
 const OPEN_PROFILE_RETRY_MS = 5000;
@@ -53,11 +64,11 @@ function normalizeProxyRecord(record) {
   }
 
   const proxyId = record._id || record.id || null;
-  const proxyString = record.proxy || (
-    record.host && record.port && record.username && record.password
+  const proxyString =
+    record.proxy ||
+    (record.host && record.port && record.username && record.password
       ? `${record.host}:${record.port}:${record.username}:${record.password}`
-      : null
-  );
+      : null);
 
   return { proxyId, proxyString };
 }
@@ -107,7 +118,9 @@ async function testProxy(proxyString) {
     throw new Error('ipinfo.io returned no IP through proxy');
   }
 
-  console.log(`[browserManager] Proxy OK - IP ${data.ip} (${data.city || '?'}, ${data.region || '?'}, ${data.country || '?'})`);
+  console.log(
+    `[browserManager] Proxy OK - IP ${data.ip} (${data.city || '?'}, ${data.region || '?'}, ${data.country || '?'})`
+  );
   return data;
 }
 
@@ -145,10 +158,14 @@ async function updateProxyStatus(proxyId, status, lastKnownIp) {
 
   try {
     await axios.patch(`${USER_API_BASE_URL}/api/proxies/${proxyId}`, payload);
-    console.log(`[browserManager] Proxy ${proxyId} -> ${status}${lastKnownIp ? ` (${lastKnownIp})` : ''}`);
+    console.log(
+      `[browserManager] Proxy ${proxyId} -> ${status}${lastKnownIp ? ` (${lastKnownIp})` : ''}`
+    );
   } catch (err) {
     const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-    console.warn(`[browserManager] PATCH proxy status failed (${proxyId} -> ${status}): ${respBody}`);
+    console.warn(
+      `[browserManager] PATCH proxy status failed (${proxyId} -> ${status}): ${respBody}`
+    );
   }
 }
 
@@ -165,10 +182,9 @@ async function assignProxyToUser(userId, proxyId, existingProxies = []) {
   ];
 
   try {
-    const { data } = await axios.patch(
-      `${USER_API_BASE_URL}/api/profiles/${userId}`,
-      { proxies: nextEntries }
-    );
+    const { data } = await axios.patch(`${USER_API_BASE_URL}/api/profiles/${userId}`, {
+      proxies: nextEntries,
+    });
     console.log(`[browserManager] Proxy ${proxyId} linked to user ${userId}`);
     return data;
   } catch (err) {
@@ -191,7 +207,9 @@ async function selectWorkingProxy(userId, existingProxies = [], { requireCountry
       break;
     }
 
-    console.log(`[browserManager] Testing ${batch.length} proxies (round ${round}/${MAX_PROXY_BATCHES})`);
+    console.log(
+      `[browserManager] Testing ${batch.length} proxies (round ${round}/${MAX_PROXY_BATCHES})`
+    );
 
     for (const record of batch) {
       const { proxyString, proxyId } = normalizeProxyRecord(record);
@@ -211,7 +229,9 @@ async function selectWorkingProxy(userId, existingProxies = [], { requireCountry
       }
 
       if (requireCountry && ipInfo.country !== requireCountry) {
-        console.warn(`[browserManager] Proxy ${proxyId} in ${ipInfo.country} (need ${requireCountry}) - skipping`);
+        console.warn(
+          `[browserManager] Proxy ${proxyId} in ${ipInfo.country} (need ${requireCountry}) - skipping`
+        );
         continue;
       }
 
@@ -231,7 +251,17 @@ async function selectWorkingProxy(userId, existingProxies = [], { requireCountry
  * Format ipinfo JSON into multiline note text.
  */
 function formatIpInfoNote(info) {
-  const fields = ['ip', 'hostname', 'city', 'region', 'country', 'loc', 'org', 'postal', 'timezone'];
+  const fields = [
+    'ip',
+    'hostname',
+    'city',
+    'region',
+    'country',
+    'loc',
+    'org',
+    'postal',
+    'timezone',
+  ];
   return fields.map((key) => `${key}: ${info[key] ?? ''}`).join('\n');
 }
 
@@ -253,7 +283,9 @@ async function createProfile(userId, { isLocal = true, requireCountry = 'US' } =
   let ipInfo = null;
 
   try {
-    ({ proxyString: proxy, ipInfo } = await selectWorkingProxy(userId, user.proxies || [], { requireCountry }));
+    ({ proxyString: proxy, ipInfo } = await selectWorkingProxy(userId, user.proxies || [], {
+      requireCountry,
+    }));
   } catch (err) {
     console.warn(`[browserManager] Proceeding without proxy: ${err.message}`);
   }
@@ -295,7 +327,10 @@ async function createProfile(userId, { isLocal = true, requireCountry = 'US' } =
   } catch (err) {
     if (err.response) {
       console.error('[browserManager] Hidemium rejected body:', JSON.stringify(body, null, 2));
-      console.error('[browserManager] Hidemium response body:', JSON.stringify(err.response.data, null, 2));
+      console.error(
+        '[browserManager] Hidemium response body:',
+        JSON.stringify(err.response.data, null, 2)
+      );
       throw new Error(`Hidemium ${err.response.status}: ${JSON.stringify(err.response.data)}`);
     }
     throw err;
@@ -305,7 +340,9 @@ async function createProfile(userId, { isLocal = true, requireCountry = 'US' } =
   // some newer endpoints/examples show a local-* browser_uuid, so accept both.
   const browserId = data.browser_uuid || data.uuid || data.data?.browser_uuid || data.data?.uuid;
   if (!browserId) {
-    throw new Error(`Failed to create profile - no browser ID in response: ${JSON.stringify(data)}`);
+    throw new Error(
+      `Failed to create profile - no browser ID in response: ${JSON.stringify(data)}`
+    );
   }
   console.log(`[browserManager] Profile created: "${body.name}" (${browserId.slice(-8)})`);
 
@@ -317,7 +354,9 @@ async function createProfile(userId, { isLocal = true, requireCountry = 'US' } =
       const status = err.response?.status;
       const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
       console.warn(`[browserManager] update-note failed (${status ?? 'no response'}): ${respBody}`);
-      console.warn('[browserManager] Profile created, but note was not saved. Tell Claude this so the endpoint name can be fixed.');
+      console.warn(
+        '[browserManager] Profile created, but note was not saved. Tell Claude this so the endpoint name can be fixed.'
+      );
     }
   } else {
     console.log('[browserManager] Skipping proxy note because no working proxy info was collected');
@@ -334,7 +373,9 @@ async function createProfile(userId, { isLocal = true, requireCountry = 'US' } =
     } catch (err) {
       const status = err.response?.status;
       const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-      console.warn(`[browserManager] PATCH browsers failed (${status ?? 'no response'}): ${respBody}`);
+      console.warn(
+        `[browserManager] PATCH browsers failed (${status ?? 'no response'}): ${respBody}`
+      );
     }
   }
 
@@ -368,12 +409,14 @@ async function openProfile(uuid) {
       let page = context.pages()[0];
       if (!page) page = await context.newPage();
 
-      return { browser, context, page, port, profileId: uuid };
+      return { browser, context, page, port, profileId: uuid, provider: 'hidemium' };
     } catch (error) {
       lastError = error;
       if (browser) await browser.close().catch(() => {});
 
-      console.error(`[browserManager] Open profile failed for ${uuid.slice(-8)} (attempt ${attempt}/${OPEN_PROFILE_ATTEMPTS}): ${error.message}`);
+      console.error(
+        `[browserManager] Open profile failed for ${uuid.slice(-8)} (attempt ${attempt}/${OPEN_PROFILE_ATTEMPTS}): ${error.message}`
+      );
 
       if (attempt >= OPEN_PROFILE_ATTEMPTS) break;
 
@@ -386,44 +429,326 @@ async function openProfile(uuid) {
 }
 
 /**
- * Open a browser for a given userId.
+ * Sign in to Multilogin and cache the bearer token.
+ */
+async function mlxSignIn() {
+  const email = process.env.MULTILOGIN_EMAIL;
+  const password = process.env.MULTILOGIN_PASSWORD;
+  const workspaceId = process.env.MULTILOGIN_WORKSPACE_ID;
+  if (!email || !password) {
+    throw new Error('MULTILOGIN_EMAIL and MULTILOGIN_PASSWORD must be set');
+  }
+  if (!workspaceId) {
+    throw new Error('MULTILOGIN_WORKSPACE_ID must be set');
+  }
+
+  const passwordMd5 = crypto.createHash('md5').update(password).digest('hex');
+
+  // Step 1: signin → user token + refresh_token
+  const { data: signinData } = await axios.post(MLX_SIGNIN_URL, {
+    email,
+    password: passwordMd5,
+  });
+  const userToken = signinData?.data?.token;
+  const refreshToken = signinData?.data?.refresh_token;
+  if (!userToken || !refreshToken) {
+    throw new Error(`Multilogin signin missing token/refresh_token: ${JSON.stringify(signinData)}`);
+  }
+  console.log('[browserManager] Multilogin signed in');
+
+  // Step 2: refresh into a workspace-scoped bearer (this is what launcher accepts)
+  const { data: refreshData } = await axios.post(MLX_REFRESH_TOKEN_URL, {
+    email,
+    workspace_id: workspaceId,
+    refresh_token: refreshToken,
+  });
+  const wsToken = refreshData?.data?.token;
+  if (!wsToken) {
+    throw new Error(`Multilogin refresh_token returned no token: ${JSON.stringify(refreshData)}`);
+  }
+  console.log('[browserManager] Multilogin workspace token obtained');
+
+  mlxToken = wsToken;
+  return wsToken;
+}
+
+async function mlxAuthHeaders() {
+  if (!mlxToken) await mlxSignIn();
+  return { Authorization: `Bearer ${mlxToken}`, Accept: 'application/json' };
+}
+
+/**
+ * Parse country/region/city from an MLX proxy username. Format:
+ *   "<id>_<workspace>_multilogin_com-country-us-region-west_virginia-sid-XXX-filter-medium"
+ */
+function parseMlxProxyLocation(username) {
+  const out = {};
+  if (typeof username !== 'string') return out;
+  const parts = username.split('-');
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (parts[i] === 'country' && !out.country) out.country = parts[i + 1];
+    else if (parts[i] === 'region' && !out.region) out.region = parts[i + 1];
+    else if (parts[i] === 'city' && !out.city) out.city = parts[i + 1];
+  }
+  return out;
+}
+
+async function fetchMlxProfileProxy(profileId) {
+  const { data } = await axios.post(
+    `${MLX_API}/profile/metas`,
+    { ids: [profileId] },
+    { headers: { ...(await mlxAuthHeaders()), 'Content-Type': 'application/json' } }
+  );
+  const profile = data?.data?.profiles?.[0];
+  if (!profile) throw new Error(`MLX metas returned no profile for ${profileId}`);
+  return profile.parameters?.proxy || null;
+}
+
+async function generateMlxProxy({ country, region, city, type }) {
+  const protocol = type === 'socks5' ? 'socks5' : 'http';
+  const body = {
+    country: country || 'us',
+    sessionType: 'sticky',
+    protocol,
+    IPTTL: 0,
+    count: 1,
+  };
+  if (region) body.region = region;
+  if (city) body.city = city;
+
+  const { data } = await axios.post(MLX_PROXY_GEN_URL, body, {
+    headers: { ...(await mlxAuthHeaders()), 'Content-Type': 'application/json' },
+  });
+  const connectionString = Array.isArray(data?.data) ? data.data[0] : data?.data;
+  if (typeof connectionString !== 'string') {
+    throw new Error(`generate-proxy: unexpected response ${JSON.stringify(data)}`);
+  }
+
+  // "host:port:username:password" — password may contain ':' so join the tail
+  const parts = connectionString.split(':');
+  if (parts.length < 4) throw new Error(`generate-proxy: bad string "${connectionString}"`);
+  const [host, portStr, username, ...passParts] = parts;
+  const port = parseInt(portStr, 10);
+  if (!Number.isFinite(port)) throw new Error(`generate-proxy: bad port in "${connectionString}"`);
+
+  return {
+    host,
+    port,
+    username,
+    password: passParts.join(':'),
+    type: protocol,
+    save_traffic: false,
+  };
+}
+
+async function applyMlxProxy(profileId, proxyBlock) {
+  // MLX partial_update accepts the request as `parameters.proxy` but silently
+  // no-ops it. The flat top-level `proxy` shape is the one that actually
+  // persists. Confirmed by reading metas before/after.
+  await axios.post(
+    `${MLX_API}/profile/partial_update`,
+    { profile_id: profileId, proxy: proxyBlock },
+    { headers: { ...(await mlxAuthHeaders()), 'Content-Type': 'application/json' } }
+  );
+}
+
+/**
+ * Recover from GET_PROXY_CONNECTION_IP_ERROR: read the profile's bound proxy,
+ * generate a new one in the same country/region (and city, if any), and write
+ * it back to the profile. Same-region — IP rotates, location stays.
+ */
+async function rotateMultiloginProxy(profileId) {
+  const current = await fetchMlxProfileProxy(profileId);
+  if (!current) throw new Error(`No proxy on profile ${profileId}`);
+
+  const loc = parseMlxProxyLocation(current.username);
+  console.log(
+    `[browserManager] Rotating proxy ${profileId.slice(-8)} — country=${loc.country || '?'} region=${loc.region || '?'} city=${loc.city || '?'} type=${current.type}`
+  );
+
+  const next = await generateMlxProxy({ ...loc, type: current.type });
+  await applyMlxProxy(profileId, next);
+  console.log(
+    `[browserManager] Profile ${profileId.slice(-8)} proxy swapped (new sid via ${next.host}:${next.port})`
+  );
+  return next;
+}
+
+/**
+ * Wait for the local CDP socket to accept a connection. MLX reports the port
+ * before the agent has fully bound it, so the first connect can ECONNREFUSED.
+ */
+async function connectCdpWithRetry(endpoint, attempts = 6, intervalMs = 1000) {
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await chromium.connectOverCDP(endpoint);
+    } catch (err) {
+      lastErr = err;
+      if (i >= attempts) break;
+      await sleep(intervalMs);
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * Open a single Multilogin X profile via launcher API and connect via CDP.
+ */
+async function openMultiloginProfile(profileId) {
+  const folderId = process.env.MULTILOGIN_FOLDER_ID;
+  if (!folderId) throw new Error('MULTILOGIN_FOLDER_ID is required');
+
+  const startUrl = `${MLX_LAUNCHER}/api/v2/profile/f/${folderId}/p/${profileId}/start?automation_type=playwright&headless_mode=false`;
+
+  let lastError;
+
+  for (let attempt = 1; attempt <= OPEN_PROFILE_ATTEMPTS; attempt++) {
+    let browser;
+
+    try {
+      let resp;
+      try {
+        resp = await axios.get(startUrl, { headers: await mlxAuthHeaders() });
+      } catch (err) {
+        if (err.response?.status === 401) {
+          console.log('[browserManager] Multilogin token expired, re-signing in');
+          await mlxSignIn();
+          resp = await axios.get(startUrl, { headers: await mlxAuthHeaders() });
+        } else {
+          throw err;
+        }
+      }
+
+      const port = resp.data?.data?.port;
+      if (!port) throw new Error(`Multilogin start returned no port: ${JSON.stringify(resp.data)}`);
+
+      console.log(`[browserManager] MLX profile ${profileId.slice(-8)} opened on port ${port}`);
+
+      // The MLX agent reports the port before the CDP socket is fully accepting
+      // connections. Retry connectOverCDP a few times to bridge the race.
+      browser = await connectCdpWithRetry(`http://127.0.0.1:${port}`);
+
+      const context = browser.contexts()[0];
+      if (!context) throw new Error('No browser context available after connecting');
+
+      let page = context.pages()[0];
+      if (!page) page = await context.newPage();
+
+      return { browser, context, page, port, profileId, provider: 'multilogin' };
+    } catch (error) {
+      lastError = error;
+      if (browser) await browser.close().catch(() => {});
+
+      console.error(
+        `[browserManager] Open MLX profile failed for ${profileId.slice(-8)} (attempt ${attempt}/${OPEN_PROFILE_ATTEMPTS}): ${formatErrorDetails(error)}`
+      );
+
+      if (attempt >= OPEN_PROFILE_ATTEMPTS) break;
+
+      // MLX couldn't reach the bound proxy IP — rotate to a new IP in the
+      // same region before the next attempt. Retrying with the same dead IP
+      // can't succeed.
+      const errCode = error.response?.data?.status?.error_code;
+      if (errCode === 'GET_PROXY_CONNECTION_IP_ERROR') {
+        try {
+          await rotateMultiloginProxy(profileId);
+        } catch (rotateErr) {
+          console.error(
+            `[browserManager] Proxy rotation failed for ${profileId.slice(-8)}: ${formatErrorDetails(rotateErr)}`
+          );
+        }
+      }
+
+      // Best-effort cleanup: if /start succeeded server-side, the profile is
+      // still running. Stop it so the next attempt can start cleanly without
+      // hitting PROFILE_ALREADY_RUNNING.
+      try {
+        await axios.get(`${MLX_LAUNCHER}/api/v1/profile/stop/p/${profileId}`, {
+          headers: await mlxAuthHeaders(),
+        });
+      } catch (_) {
+        // Ignore — if it wasn't running, stop returns 4xx; that's fine.
+      }
+
+      console.log(`[browserManager] Retrying in ${OPEN_PROFILE_RETRY_MS / 1000}s...`);
+      await sleep(OPEN_PROFILE_RETRY_MS);
+    }
+  }
+
+  throw lastError;
+}
+
+/**
+ * Open a browser for a given userId, dispatching by BROWSER_PROVIDER.
  */
 async function openBrowserForUser(userId) {
   const user = await fetchUser(userId);
 
   if (!user.browsers || user.browsers.length === 0) {
-    throw new Error(`User ${userId} (${user.firstName} ${user.lastName}) has no browsers configured`);
+    throw new Error(
+      `User ${userId} (${user.firstName} ${user.lastName}) has no browsers configured`
+    );
   }
 
-  const { browserId, provider } = user.browsers[0];
-  const resolvedProvider = provider || 'hidemium';
+  const entry = user.browsers.find(
+    (b) => (b.provider || 'hidemium').toLowerCase() === BROWSER_PROVIDER
+  );
 
-  if (resolvedProvider !== 'hidemium') {
-    throw new Error(`Unsupported browser provider: "${resolvedProvider}"`);
+  if (!entry) {
+    throw new Error(
+      `User ${userId} (${user.firstName} ${user.lastName}) has no "${BROWSER_PROVIDER}" browser entry`
+    );
   }
 
-  console.log(`[browserManager] Opening browser for ${user.firstName} ${user.lastName} (${resolvedProvider}: ${browserId.slice(-8)})`);
+  const { browserId } = entry;
 
-  const session = await openProfile(browserId);
+  console.log(
+    `[browserManager] Opening browser for ${user.firstName} ${user.lastName} (${BROWSER_PROVIDER}: ${browserId.slice(-8)})`
+  );
+
+  let session;
+  if (BROWSER_PROVIDER === 'multilogin') {
+    session = await openMultiloginProfile(browserId);
+  } else if (BROWSER_PROVIDER === 'hidemium') {
+    session = await openProfile(browserId);
+  } else {
+    throw new Error(`Unsupported BROWSER_PROVIDER: "${BROWSER_PROVIDER}"`);
+  }
+
   return { ...session, user };
 }
 
 /**
- * Close a Hidemium profile.
+ * Close a profile, dispatching by provider stored on the session.
  */
-async function closeProfile(uuid, browser) {
+async function closeProfile(profileId, browser, provider) {
   if (browser) await browser.close().catch(() => {});
-  await axios.get(`${API}/closeProfile?uuid=${uuid}`, { headers }).catch(() => {});
-  console.log(`[browserManager] Profile ${uuid.slice(-8)} closed`);
+
+  const resolvedProvider = (provider || BROWSER_PROVIDER || 'hidemium').toLowerCase();
+
+  if (resolvedProvider === 'multilogin') {
+    try {
+      await axios.get(`${MLX_LAUNCHER}/api/v1/profile/stop/p/${profileId}`, {
+        headers: await mlxAuthHeaders(),
+      });
+    } catch (err) {
+      console.warn(
+        `[browserManager] MLX stop failed for ${profileId.slice(-8)}: ${formatErrorDetails(err)}`
+      );
+    }
+  } else {
+    await axios.get(`${API}/closeProfile?uuid=${profileId}`, { headers }).catch(() => {});
+  }
+
+  console.log(`[browserManager] Profile ${profileId.slice(-8)} closed (${resolvedProvider})`);
 }
 
 /**
  * Open browsers for an explicit list of userIds.
  */
 async function launchBrowsers(userIds) {
-  const connections = await Promise.allSettled(
-    userIds.map((userId) => openBrowserForUser(userId))
-  );
+  const connections = await Promise.allSettled(userIds.map((userId) => openBrowserForUser(userId)));
 
   const successful = [];
   for (let i = 0; i < connections.length; i++) {
@@ -443,7 +768,9 @@ async function launchBrowsers(userIds) {
   }
 
   if (successful.length === 0) {
-    throw new Error('Could not connect to any profiles. Make sure Hidemium is running and API token is correct.');
+    throw new Error(
+      'Could not connect to any profiles. Make sure Hidemium is running and API token is correct.'
+    );
   }
 
   return successful;
@@ -454,7 +781,7 @@ async function launchBrowsers(userIds) {
  */
 async function closeBrowsers(sessions) {
   await Promise.allSettled(
-    sessions.map((session) => closeProfile(session.profileId, session.browser))
+    sessions.map((session) => closeProfile(session.profileId, session.browser, session.provider))
   );
 }
 

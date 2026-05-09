@@ -13,11 +13,16 @@
  */
 
 const { humanWait, humanClick } = require('../utils/humanBehavior');
+const { detectRateLimit, dismissRateLimit } = require('../utils/fbRateLimit');
 
 const TARGETS = [
   {
     label: 'Add Friend',
     selector: 'xpath=//div[@role="button"][.//span[normalize-space(text())="Add friend"]]',
+  },
+  {
+    label: 'Confirm request',
+    selector: 'xpath=//div[@role="button"][.//span[normalize-space(text())="Confirm request"]]',
   },
   {
     label: 'Follow',
@@ -68,7 +73,9 @@ async function tryClick(page, target) {
     .isVisible()
     .catch(() => false);
   if (stillVisible) {
-    console.log(`  [connect] Click on "${target.label}" did not register (button still visible) — skipping.`);
+    console.log(
+      `  [connect] Click on "${target.label}" did not register (button still visible) — skipping.`
+    );
     return false;
   }
 
@@ -81,6 +88,13 @@ module.exports = async function connect(page, params) {
   for (const target of TARGETS) {
     const clicked = await tryClick(page, target);
     if (clicked) anyClicked = true;
+
+    // FB sometimes surfaces the rate-limit modal after a click; dismiss so
+    // it doesn't block the remaining target probes in this loop.
+    if (await detectRateLimit(page, 1000)) {
+      console.warn('  [connect] Rate-limit modal detected — dismissing.');
+      await dismissRateLimit(page);
+    }
   }
 
   if (!anyClicked) {

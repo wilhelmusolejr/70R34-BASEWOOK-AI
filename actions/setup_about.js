@@ -22,6 +22,40 @@ async function markProfileSetup(userId) {
   }
 }
 
+/**
+ * Normalize a captured profile URL — strip trailing /about (and similar tab
+ * suffixes) and any sk= query param so we record the profile root only.
+ */
+function normalizeProfileUrl(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  try {
+    const u = new URL(raw);
+    u.pathname = u.pathname.replace(/\/(about|friends|photos|videos|reels)(?:\/.*)?\/?$/i, '');
+    u.searchParams.delete('sk');
+    let out = u.toString();
+    if (out.endsWith('/')) out = out.slice(0, -1);
+    return out;
+  } catch (_) {
+    return raw;
+  }
+}
+
+/**
+ * If user.profileUrl is empty, PATCH it back to the user record so future
+ * runs can navigate to it directly. Mirrors the create_page → pageUrl flow.
+ */
+async function persistProfileUrl(userId, profileUrl) {
+  if (!userId || !profileUrl) return;
+  if (!USER_API_BASE_URL) return;
+  const target = `${USER_API_BASE_URL}/api/profiles/${userId}`;
+  try {
+    await axios.patch(target, { profileUrl }, { timeout: 15000 });
+    console.log(`  [setup_about] PATCHed profileUrl=${profileUrl} → ${target}`);
+  } catch (err) {
+    console.warn(`  [setup_about] Failed to PATCH profileUrl: ${err.message}`);
+  }
+}
+
 // ========================= NAVIGATION HELPERS =========================
 
 async function goToOwnProfile(page) {
@@ -30,11 +64,48 @@ async function goToOwnProfile(page) {
 }
 
 async function clickAboutTab(page) {
-  const el = await page.$('a[href*="sk=about"][role="tab"]');
-  if (!el) throw new Error('[setup_about] About tab not found on profile page');
-  await el.scrollIntoViewIfNeeded();
+  // FB serves slightly different About-tab markup across account states /
+  // locales / browser fingerprints. Match on ANY of three signals:
+  //   (1) href contains sk=about
+  //   (2) aria-label is "About"
+  //   (3) visible text is "About"
+  // Polled in-page so React render delays (Multilogin's slower stack) are tolerated.
+  let elHandle;
+  try {
+    const jsHandle = await page.waitForFunction(() => {
+      const anchors = Array.from(document.querySelectorAll('a[role="tab"], a[href]'));
+      for (const a of anchors) {
+        const href = a.getAttribute('href') || '';
+        const aria = a.getAttribute('aria-label') || '';
+        // textContent — not innerText — so this works before layout is computed
+        const text = (a.textContent || '').replace(/\s+/g, ' ').trim();
+        const role = a.getAttribute('role') || '';
+
+        const hrefMatch =
+          href.includes('sk=about') ||         // ?sk=about query style
+          /\/about(?:\/|\?|$)/.test(href);     // /<username>/about path style
+
+        const ariaMatch = aria === 'About';
+
+        // Only accept the text fallback when the element is clearly a tab,
+        // so we don't pick up a footer "About" link on the same page.
+        const textMatch = role === 'tab' && text === 'About';
+
+        if (hrefMatch || ariaMatch || textMatch) return a;
+      }
+      return null;
+    }, { timeout: 30000 });
+    elHandle = jsHandle.asElement();
+  } catch (_) {
+    throw new Error('[setup_about] About tab not found on profile page');
+  }
+  if (!elHandle) throw new Error('[setup_about] About tab handle was null');
+
+  await elHandle.scrollIntoViewIfNeeded();
   await humanWait(page, 300, 500);
-  await humanClick(page, await el.boundingBox());
+  const box = await elHandle.boundingBox();
+  if (!box) throw new Error('[setup_about] About tab has no bounding box');
+  await humanClick(page, box);
   await humanWait(page, 2000, 3000);
   console.log('  [setup_about] Clicked About tab');
 }
@@ -79,7 +150,9 @@ async function clickSubsection(page, skFragment, fallbackText) {
         return true;
       }
     }
-  } catch { /* fall through */ }
+  } catch {
+    /* fall through */
+  }
 
   if (fallbackText) {
     try {
@@ -95,7 +168,9 @@ async function clickSubsection(page, skFragment, fallbackText) {
         console.log(`  [setup_about] Navigated to subsection via text: ${fallbackText}`);
         return true;
       }
-    } catch { /* not found */ }
+    } catch {
+      /* not found */
+    }
   }
 
   console.log(`  [setup_about] Could not navigate to subsection: ${skFragment}`);
@@ -146,11 +221,11 @@ async function clickButton(page, namePattern, timeout = 5000) {
 
 async function fillInput(page, selectors, value) {
   if (!value) return false;
-  const list = Array.isArray(selectors) ? selectors : selectors.split(',').map(s => s.trim());
+  const list = Array.isArray(selectors) ? selectors : selectors.split(',').map((s) => s.trim());
   for (const sel of list) {
     try {
       const el = await page.$(sel);
-      if (el && await el.isVisible()) {
+      if (el && (await el.isVisible())) {
         await el.scrollIntoViewIfNeeded();
         await humanWait(page, 300, 500);
         await el.click();
@@ -159,18 +234,20 @@ async function fillInput(page, selectors, value) {
         await humanType(page, String(value));
         return true;
       }
-    } catch { /* try next */ }
+    } catch {
+      /* try next */
+    }
   }
   return false;
 }
 
 async function fillCombobox(page, selectors, value) {
   if (!value) return false;
-  const list = Array.isArray(selectors) ? selectors : selectors.split(',').map(s => s.trim());
+  const list = Array.isArray(selectors) ? selectors : selectors.split(',').map((s) => s.trim());
   for (const sel of list) {
     try {
       const el = await page.$(sel);
-      if (el && await el.isVisible()) {
+      if (el && (await el.isVisible())) {
         await el.scrollIntoViewIfNeeded();
         await humanWait(page, 300, 500);
         await humanClick(page, await el.boundingBox());
@@ -183,12 +260,17 @@ async function fillCombobox(page, selectors, value) {
           await option.scrollIntoViewIfNeeded();
           await humanWait(page, 200, 400);
           const box = await option.boundingBox();
-          if (box) { await humanClick(page, box); return true; }
+          if (box) {
+            await humanClick(page, box);
+            return true;
+          }
         }
         await page.keyboard.press('Enter');
         return true;
       }
-    } catch { /* try next */ }
+    } catch {
+      /* try next */
+    }
   }
   return false;
 }
@@ -203,7 +285,10 @@ async function setYear(page, labelPatterns, value) {
       const selects = await page.$$('select');
       for (const sel of selects) {
         const label = (await sel.getAttribute('aria-label').catch(() => '')) || '';
-        const matches = pattern instanceof RegExp ? pattern.test(label) : label.toLowerCase().includes(pattern.toLowerCase());
+        const matches =
+          pattern instanceof RegExp
+            ? pattern.test(label)
+            : label.toLowerCase().includes(pattern.toLowerCase());
         if (matches) {
           await sel.scrollIntoViewIfNeeded();
           await humanWait(page, 200, 400);
@@ -212,12 +297,14 @@ async function setYear(page, labelPatterns, value) {
           return true;
         }
       }
-    } catch { /* continue */ }
+    } catch {
+      /* continue */
+    }
 
     try {
       const pat = pattern instanceof RegExp ? pattern.source : pattern;
       const el = await page.$(`[aria-label="${pat}"]`);
-      if (el && await el.isVisible()) {
+      if (el && (await el.isVisible())) {
         await el.scrollIntoViewIfNeeded();
         await humanWait(page, 200, 400);
         await el.click();
@@ -225,7 +312,9 @@ async function setYear(page, labelPatterns, value) {
         await humanType(page, str);
         return true;
       }
-    } catch { /* continue */ }
+    } catch {
+      /* continue */
+    }
   }
   return false;
 }
@@ -241,10 +330,15 @@ async function checkBox(page, selectors) {
       const checked = await el.isChecked().catch(() => null);
       if (checked === false) {
         const box = await el.boundingBox();
-        if (box) { await humanClick(page, box); await humanWait(page, 300, 600); }
+        if (box) {
+          await humanClick(page, box);
+          await humanWait(page, 300, 600);
+        }
       }
       return true;
-    } catch { /* try next */ }
+    } catch {
+      /* try next */
+    }
   }
   return false;
 }
@@ -313,10 +407,14 @@ async function waitForSaveComplete(page, saveBtnSelector, panelButtonText, maxRe
     try {
       const el = await page.$(saveBtnSelector);
       saveVisible = el ? await el.isVisible().catch(() => false) : false;
-    } catch { saveVisible = false; }
+    } catch {
+      saveVisible = false;
+    }
 
     if (saveVisible) {
-      console.log(`  [setup_about] Save button still visible (attempt ${attempt}/${maxRetries}), waiting more...`);
+      console.log(
+        `  [setup_about] Save button still visible (attempt ${attempt}/${maxRetries}), waiting more...`
+      );
       await humanWait(page, 5000, 10000);
       continue;
     }
@@ -329,7 +427,9 @@ async function waitForSaveComplete(page, saveBtnSelector, panelButtonText, maxRe
       // If the panel button is back in the DOM it means the form closed (success for most cases)
       // BUT if the panel button XPath still matches the un-filled state label, save may not have stuck
       panelGone = !el;
-    } catch { panelGone = true; }
+    } catch {
+      panelGone = true;
+    }
 
     if (panelGone) {
       console.log(`  [setup_about] Save confirmed: "${panelButtonText}"`);
@@ -337,7 +437,9 @@ async function waitForSaveComplete(page, saveBtnSelector, panelButtonText, maxRe
     }
 
     // Panel button still showing with original text — save likely didn't stick
-    console.log(`  [setup_about] Panel button "${panelButtonText}" still showing after save — may not have saved`);
+    console.log(
+      `  [setup_about] Panel button "${panelButtonText}" still showing after save — may not have saved`
+    );
     return false;
   }
 
@@ -348,17 +450,26 @@ async function waitForSaveComplete(page, saveBtnSelector, panelButtonText, maxRe
 // For work/education dialogs (real <button> save, whole dialog closes)
 async function saveDialog(page) {
   const saved =
-    await clickButton(page, /^save$/i, 4000) ||
-    await clickButton(page, /save changes/i, 3000) ||
-    await clickByText(page, 'Save', 3000);
+    (await clickButton(page, /^save$/i, 4000)) ||
+    (await clickButton(page, /save changes/i, 3000)) ||
+    (await clickByText(page, 'Save', 3000));
 
-  if (!saved) { console.log('  [setup_about] Save button not found — dialog may have auto-closed'); return; }
+  if (!saved) {
+    console.log('  [setup_about] Save button not found — dialog may have auto-closed');
+    return;
+  }
 
   // Wait and verify dialog closed
   for (let attempt = 1; attempt <= 3; attempt++) {
     await humanWait(page, 10000, 15000);
-    const dialogStillOpen = await page.$('[role="dialog"]').then(el => el?.isVisible().catch(() => false)).catch(() => false);
-    if (!dialogStillOpen) { console.log('  [setup_about] Dialog closed — save confirmed'); return; }
+    const dialogStillOpen = await page
+      .$('[role="dialog"]')
+      .then((el) => el?.isVisible().catch(() => false))
+      .catch(() => false);
+    if (!dialogStillOpen) {
+      console.log('  [setup_about] Dialog closed — save confirmed');
+      return;
+    }
     console.log(`  [setup_about] Dialog still open (attempt ${attempt}/3), waiting more...`);
     await humanWait(page, 5000, 10000);
   }
@@ -368,22 +479,34 @@ async function saveDialog(page) {
 // For bio save (div[role="button"][aria-label="Save"])
 async function savePanelForm(page) {
   try {
-    const el = await page.waitForSelector('div[role="button"][aria-label="Save"]', { timeout: 4000 });
+    const el = await page.waitForSelector('div[role="button"][aria-label="Save"]', {
+      timeout: 4000,
+    });
     await el.scrollIntoViewIfNeeded();
     await humanWait(page, 300, 500);
     await humanClick(page, await el.boundingBox());
     await waitForSaveComplete(page, 'div[role="button"][aria-label="Save"]', 'About you');
     return;
-  } catch { /* fall through */ }
+  } catch {
+    /* fall through */
+  }
 
   try {
-    const el = await page.waitForSelector('xpath=//div[@role="button"]//span[text()="Save"]', { timeout: 3000 });
+    const el = await page.waitForSelector('xpath=//div[@role="button"]//span[text()="Save"]', {
+      timeout: 3000,
+    });
     await el.scrollIntoViewIfNeeded();
     await humanWait(page, 300, 500);
     await humanClick(page, await el.boundingBox());
-    await waitForSaveComplete(page, 'xpath=//div[@role="button"]//span[text()="Save"]', 'About you');
+    await waitForSaveComplete(
+      page,
+      'xpath=//div[@role="button"]//span[text()="Save"]',
+      'About you'
+    );
     return;
-  } catch { /* fall through */ }
+  } catch {
+    /* fall through */
+  }
 
   console.log('  [setup_about] Panel save button not found');
 }
@@ -395,17 +518,24 @@ async function setBio(page, bio) {
   console.log('  [setup_about] Setting bio...');
 
   const navigated = await clickSubsection(page, 'directory_intro', 'Intro');
-  if (!navigated) { console.log('  [setup_about] Intro section not found — skipping bio'); return; }
+  if (!navigated) {
+    console.log('  [setup_about] Intro section not found — skipping bio');
+    return;
+  }
 
   const opened = await clickPanelButton(page, 'About you');
   if (!opened) return;
 
-  const filled = await fillInput(page, [
-    'textarea[aria-describedby]',
-    'xpath=//textarea[@maxlength="101"]'
-  ], bio);
+  const filled = await fillInput(
+    page,
+    ['textarea[aria-describedby]', 'xpath=//textarea[@maxlength="101"]'],
+    bio
+  );
 
-  if (!filled) { console.log('  [setup_about] Bio textarea not found'); return; }
+  if (!filled) {
+    console.log('  [setup_about] Bio textarea not found');
+    return;
+  }
 
   await humanWait(page, 500, 1000);
   await savePanelForm(page);
@@ -417,18 +547,26 @@ async function setWork(page, workEntries) {
 
   // Sidebar link text is "Work experience"
   const navigated = await clickSubsection(page, 'directory_work', 'Work experience');
-  if (!navigated) { console.log('  [setup_about] Work section not found — skipping'); return; }
+  if (!navigated) {
+    console.log('  [setup_about] Work section not found — skipping');
+    return;
+  }
 
   // Wait for the "Work experience" panel button to appear — confirms section is fully rendered
   try {
-    await page.waitForSelector('xpath=//div[@role="button"][.//span[text()="Work experience"]]', { timeout: 8000 });
+    await page.waitForSelector('xpath=//div[@role="button"][.//span[text()="Work experience"]]', {
+      timeout: 8000,
+    });
   } catch {
     console.log('  [setup_about] "Work experience" button not found — skipping work section');
     return;
   }
 
   // Now check if Edit Workplace exists — if so, entries already added, skip
-  const alreadyHasWork = await page.$('[aria-label="Edit Workplace"]').then(el => !!el).catch(() => false);
+  const alreadyHasWork = await page
+    .$('[aria-label="Edit Workplace"]')
+    .then((el) => !!el)
+    .catch(() => false);
   if (alreadyHasWork) {
     console.log('  [setup_about] Work data already exists — skipping');
     return;
@@ -439,7 +577,10 @@ async function setWork(page, workEntries) {
 
     // Open the work form — same inline panel pattern as Intro / Personal Details
     const clicked = await clickPanelButton(page, 'Work experience');
-    if (!clicked) { console.log('  [setup_about] "Work experience" panel button not found — skipping entry'); continue; }
+    if (!clicked) {
+      console.log('  [setup_about] "Work experience" panel button not found — skipping entry');
+      continue;
+    }
 
     try {
       // Company — type + ArrowDown + Enter to pick from suggestions
@@ -509,14 +650,18 @@ async function setEducation(page, education) {
   console.log('  [setup_about] Adding education...');
 
   const navigated = await clickSubsection(page, 'directory_education', 'Education');
-  if (!navigated) { console.log('  [setup_about] Education section not found — skipping'); return; }
+  if (!navigated) {
+    console.log('  [setup_about] Education section not found — skipping');
+    return;
+  }
 
   // ---- College ----
   if (education.college && education.college.name) {
     const col = education.college;
 
     await humanWait(page, 1000, 2000);
-    const alreadyHasCollege = await page.waitForSelector('[aria-label="Edit college"]', { timeout: 4000 })
+    const alreadyHasCollege = await page
+      .waitForSelector('[aria-label="Edit college"]', { timeout: 4000 })
       .then(() => true)
       .catch(() => false);
     if (alreadyHasCollege) {
@@ -558,7 +703,9 @@ async function setEducation(page, education) {
             }
           }
 
-          const saveBtn = await page.waitForSelector('xpath=//span[text()="Save"]', { timeout: 5000 });
+          const saveBtn = await page.waitForSelector('xpath=//span[text()="Save"]', {
+            timeout: 5000,
+          });
           await saveBtn.scrollIntoViewIfNeeded();
           await humanWait(page, 300, 500);
           await humanClick(page, await saveBtn.boundingBox());
@@ -575,7 +722,8 @@ async function setEducation(page, education) {
     const hs = education.highSchool;
 
     await humanWait(page, 1000, 2000);
-    const alreadyHasHs = await page.waitForSelector('[aria-label="Edit school"]', { timeout: 4000 })
+    const alreadyHasHs = await page
+      .waitForSelector('[aria-label="Edit school"]', { timeout: 4000 })
       .then(() => true)
       .catch(() => false);
     if (alreadyHasHs) {
@@ -617,7 +765,9 @@ async function setEducation(page, education) {
             }
           }
 
-          const saveBtn = await page.waitForSelector('xpath=//span[text()="Save"]', { timeout: 5000 });
+          const saveBtn = await page.waitForSelector('xpath=//span[text()="Save"]', {
+            timeout: 5000,
+          });
           await saveBtn.scrollIntoViewIfNeeded();
           await humanWait(page, 300, 500);
           await humanClick(page, await saveBtn.boundingBox());
@@ -632,8 +782,8 @@ async function setEducation(page, education) {
 
 // City, hometown, relationship — all live in Personal Details
 async function setPersonalDetails(page, city, hometown, personal) {
-  const needsCity      = !!city;
-  const needsHometown  = !!hometown;
+  const needsCity = !!city;
+  const needsHometown = !!hometown;
   const needsRelStatus = !!(personal && personal.relationshipStatus);
 
   if (!needsCity && !needsHometown && !needsRelStatus) return;
@@ -641,7 +791,10 @@ async function setPersonalDetails(page, city, hometown, personal) {
   console.log('  [setup_about] Setting personal details...');
 
   const navigated = await clickSubsection(page, 'directory_personal_details', 'Personal details');
-  if (!navigated) { console.log('  [setup_about] Personal Details section not found — skipping'); return; }
+  if (!navigated) {
+    console.log('  [setup_about] Personal Details section not found — skipping');
+    return;
+  }
 
   // ---- Current city ----
   if (needsCity) {
@@ -650,7 +803,9 @@ async function setPersonalDetails(page, city, hometown, personal) {
       try {
         await typeAndSelect(page, '[aria-label="Current city"]', city);
 
-        const saveBtn = await page.waitForSelector('[aria-label="Current city save"]', { timeout: 4000 });
+        const saveBtn = await page.waitForSelector('[aria-label="Current city save"]', {
+          timeout: 4000,
+        });
         await saveBtn.scrollIntoViewIfNeeded();
         await humanWait(page, 300, 500);
         await humanClick(page, await saveBtn.boundingBox());
@@ -668,7 +823,9 @@ async function setPersonalDetails(page, city, hometown, personal) {
       try {
         await typeAndSelect(page, '[aria-label="Hometown"]', hometown, 6000);
 
-        const saveBtn = await page.waitForSelector('[aria-label="Hometown save"]', { timeout: 4000 });
+        const saveBtn = await page.waitForSelector('[aria-label="Hometown save"]', {
+          timeout: 4000,
+        });
         await saveBtn.scrollIntoViewIfNeeded();
         await humanWait(page, 300, 500);
         await humanClick(page, await saveBtn.boundingBox());
@@ -685,23 +842,27 @@ async function setPersonalDetails(page, city, hometown, personal) {
     if (opened) {
       try {
         const STATUS_DISPLAY = {
-          'single':                    'Single',
-          'in a relationship':         'In a relationship',
-          'engaged':                   'Engaged',
-          'married':                   'Married',
-          'in a civil union':          'In a civil union',
-          'domestic partnership':      'In a domestic partnership',
+          single: 'Single',
+          'in a relationship': 'In a relationship',
+          engaged: 'Engaged',
+          married: 'Married',
+          'in a civil union': 'In a civil union',
+          'domestic partnership': 'In a domestic partnership',
           'in a domestic partnership': 'In a domestic partnership',
-          'open relationship':         'In an open relationship',
-          'in an open relationship':   'In an open relationship',
-          "it's complicated":          "It's complicated",
-          'separated':                 'Separated',
-          'divorced':                  'Divorced',
-          'widowed':                   'Widowed',
+          'open relationship': 'In an open relationship',
+          'in an open relationship': 'In an open relationship',
+          "it's complicated": "It's complicated",
+          separated: 'Separated',
+          divorced: 'Divorced',
+          widowed: 'Widowed',
         };
-        const displayText = STATUS_DISPLAY[personal.relationshipStatus.toLowerCase()] || personal.relationshipStatus;
+        const displayText =
+          STATUS_DISPLAY[personal.relationshipStatus.toLowerCase()] || personal.relationshipStatus;
 
-        const dropdown = await page.waitForSelector('[aria-label="Select your relationship status"]', { timeout: 5000 });
+        const dropdown = await page.waitForSelector(
+          '[aria-label="Select your relationship status"]',
+          { timeout: 5000 }
+        );
         await dropdown.scrollIntoViewIfNeeded();
         await humanWait(page, 400, 700);
         await humanClick(page, await dropdown.boundingBox());
@@ -716,7 +877,10 @@ async function setPersonalDetails(page, city, hometown, personal) {
 
         if (personal.relationshipStatusSince) {
           try {
-            const yearDropdown = await page.waitForSelector('[aria-label="Edit ending date  year. Current selection is none"]', { timeout: 4000 });
+            const yearDropdown = await page.waitForSelector(
+              '[aria-label="Edit ending date  year. Current selection is none"]',
+              { timeout: 4000 }
+            );
             await yearDropdown.scrollIntoViewIfNeeded();
             await humanWait(page, 400, 700);
             await humanClick(page, await yearDropdown.boundingBox());
@@ -733,7 +897,9 @@ async function setPersonalDetails(page, city, hometown, personal) {
           }
         }
 
-        const saveBtn = await page.waitForSelector('xpath=//span[text()="Save"]', { timeout: 4000 });
+        const saveBtn = await page.waitForSelector('xpath=//span[text()="Save"]', {
+          timeout: 4000,
+        });
         await saveBtn.scrollIntoViewIfNeeded();
         await humanWait(page, 300, 500);
         await humanClick(page, await saveBtn.boundingBox());
@@ -784,12 +950,12 @@ async function addSearchItems(page, items, label) {
   for (const item of items) {
     try {
       console.log(`  [setup_about] Adding ${label}: ${item}`);
-      const input = await page.waitForSelector('input[aria-label="Search"][role="combobox"]', { timeout: 5000 });
+      const input = await page.waitForSelector('input[aria-label="Search"][role="combobox"]', {
+        timeout: 5000,
+      });
       await input.scrollIntoViewIfNeeded();
       await humanWait(page, 300, 500);
       await humanClick(page, await input.boundingBox());
-      await page.keyboard.press('Control+a');
-      await page.keyboard.press('Delete');
       await humanWait(page, 200, 400);
       await humanType(page, item);
       await humanWait(page, 1500, 2200);
@@ -797,6 +963,16 @@ async function addSearchItems(page, items, label) {
       await humanWait(page, 300, 500);
       await page.keyboard.press('Enter');
       await humanWait(page, 1000, 2000);
+
+      // Clear any residual text/chip in the input by mashing Backspace for 5s.
+      // Ctrl+A/Delete was not removing FB's combobox chip reliably, so we
+      // fall back to per-key backspace which the field always honors.
+      const backspaceDeadline = Date.now() + 5000;
+      while (Date.now() < backspaceDeadline) {
+        await page.keyboard.press('Backspace');
+        await page.waitForTimeout(80 + Math.floor(Math.random() * 60));
+      }
+      await humanWait(page, 300, 600);
     } catch (e) {
       console.log(`  [setup_about] ${label} error (${item}): ${e.message}`);
     }
@@ -829,7 +1005,10 @@ async function setHobbies(page, hobbies) {
   console.log(`  [setup_about] Setting ${hobbies.length} hobbie(s)...`);
 
   const navigated = await clickSubsection(page, 'directory_activites', 'Hobbies');
-  if (!navigated) { console.log('  [setup_about] Hobbies section not found — skipping'); return; }
+  if (!navigated) {
+    console.log('  [setup_about] Hobbies section not found — skipping');
+    return;
+  }
 
   await fillPanelWithItems(page, 'Hobbies', hobbies);
 }
@@ -838,20 +1017,23 @@ async function setInterests(page, interests) {
   if (!interests) return;
 
   const categories = [
-    { key: 'music',       panelText: 'Music'                        },
-    { key: 'tvShows',     panelText: 'TV shows'                     },
-    { key: 'movies',      panelText: 'Movies'                       },
-    { key: 'games',       panelText: 'Games'                        },
-    { key: 'sportsTeams', panelText: 'Sports teams and athletes'    },
+    { key: 'music', panelText: 'Music' },
+    { key: 'tvShows', panelText: 'TV shows' },
+    { key: 'movies', panelText: 'Movies' },
+    { key: 'games', panelText: 'Games' },
+    { key: 'sportsTeams', panelText: 'Sports teams and athletes' },
   ];
 
-  const hasAny = categories.some(c => interests[c.key]?.length > 0);
+  const hasAny = categories.some((c) => interests[c.key]?.length > 0);
   if (!hasAny) return;
 
   console.log('  [setup_about] Setting interests...');
 
   const navigated = await clickSubsection(page, 'directory_interests', 'Interests');
-  if (!navigated) { console.log('  [setup_about] Interests section not found — skipping'); return; }
+  if (!navigated) {
+    console.log('  [setup_about] Interests section not found — skipping');
+    return;
+  }
 
   for (const { key, panelText } of categories) {
     const items = interests[key];
@@ -865,13 +1047,16 @@ async function setTravel(page, travel) {
   if (!travel || travel.length === 0) return;
 
   // Normalize: accept both string "Place" and object { place: "Place", date: "..." }
-  const places = travel.map(t => (typeof t === 'string' ? t : t.place)).filter(Boolean);
+  const places = travel.map((t) => (typeof t === 'string' ? t : t.place)).filter(Boolean);
   if (places.length === 0) return;
 
   console.log(`  [setup_about] Setting ${places.length} travel place(s)...`);
 
   const navigated = await clickSubsection(page, 'directory_travel', 'Places');
-  if (!navigated) { console.log('  [setup_about] Travel section not found — skipping'); return; }
+  if (!navigated) {
+    console.log('  [setup_about] Travel section not found — skipping');
+    return;
+  }
 
   const opened = await clickPanelButton(page, 'Places');
   if (!opened) return;
@@ -930,7 +1115,10 @@ async function setNamePronunciation(page) {
   console.log('  [setup_about] Setting name pronunciation...');
 
   const navigated = await clickSubsection(page, 'directory_names', 'Names');
-  if (!navigated) { console.log('  [setup_about] Names section not found — skipping'); return; }
+  if (!navigated) {
+    console.log('  [setup_about] Names section not found — skipping');
+    return;
+  }
 
   const opened = await clickPanelButton(page, 'Name pronunciation');
   if (!opened) return;
@@ -971,10 +1159,42 @@ async function setNamePronunciation(page) {
 // ========================= MAIN HANDLER =========================
 
 module.exports = async function setupAbout(page, params) {
-  const { bio, city, hometown, personal, work, education, hobbies, interests, travel, userId = '' } = params;
+  const {
+    bio,
+    city,
+    hometown,
+    personal,
+    work,
+    education,
+    hobbies,
+    interests,
+    travel,
+    userId = '',
+    profileUrl = '',
+  } = params;
 
   console.log('  [setup_about] Navigating to own profile...');
   await goToOwnProfile(page);
+
+  // Capture canonical profile URL right after the /me redirect lands, while
+  // we're still on the profile root (before clickAboutTab navigates to /about).
+  // Save only when the user record's profileUrl is currently empty.
+  let captured = '';
+  if (!profileUrl) {
+    try {
+      await page.waitForURL(
+        (url) => {
+          const s = url.toString();
+          return s.includes('facebook.com') && !/\/me(?:\/|\?|$)/.test(s);
+        },
+        { timeout: 10000 }
+      );
+    } catch (_) {
+      // Redirect didn't settle in 10s — fall through and capture whatever we have.
+    }
+    captured = normalizeProfileUrl(page.url());
+  }
+
   await clickAboutTab(page);
 
   const sections = [
@@ -998,5 +1218,10 @@ module.exports = async function setupAbout(page, params) {
   }
 
   console.log('  [setup_about] Profile about setup complete');
+
+  if (!profileUrl && captured && captured.includes('facebook.com')) {
+    await persistProfileUrl(userId, captured);
+  }
+
   await markProfileSetup(userId);
 };

@@ -14,11 +14,11 @@ const TASKS_PATH = path.join(__dirname, 'tasks.json');
 
 const rl = readline.createInterface({
   input: process.stdin,
-  output: process.stdout
+  output: process.stdout,
 });
 
 function ask(question) {
-  return new Promise(resolve => rl.question(question, resolve));
+  return new Promise((resolve) => rl.question(question, resolve));
 }
 
 function printTask(task) {
@@ -63,7 +63,7 @@ async function main() {
   console.log('Bye.');
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error(err.message);
   process.exit(1);
 });

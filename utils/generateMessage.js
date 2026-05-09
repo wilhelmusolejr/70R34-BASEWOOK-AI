@@ -1,49 +1,59 @@
 /**
- * generateMessage — GitHub Models API integration for generating Facebook share messages.
- * Returns plain text ready to type into the share dialog.
- * Returns empty string on any failure so the share proceeds silently.
+ * generateMessage — Gemini API integration for Facebook share/comment messages.
+ *
+ * System instructions live in ./system_prompt.txt at the repo root and are read
+ * once at module load. Variable inputs (post context + user identity) are sent
+ * in the user turn so the static system prompt remains cacheable.
  *
  * Required env vars (set in .env):
- *   GITHUB_MODELS_TOKEN       - GitHub personal access token with Models access
- *   GITHUB_MODELS_MODEL       - model name (default: openai/gpt-4.1)
- *   GITHUB_MODELS_BASE_URL    - API endpoint
- *   GITHUB_MODELS_API_VERSION - API version header
+ *   GEMINI_API_KEY  - API key from https://aistudio.google.com/apikey
+ *   GEMINI_MODEL    - model id (default: gemini-flash-lite-latest)
+ *
+ * Returns plain string on success, '' on failure or when the model says SKIP.
  */
 
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 
-async function requestGitHubModels(messages, options = {}) {
-  const token = String(process.env.GITHUB_MODELS_TOKEN || '').trim();
-  const model = String(process.env.GITHUB_MODELS_MODEL || 'openai/gpt-4.1').trim();
-  const endpoint = String(process.env.GITHUB_MODELS_BASE_URL || 'https://models.github.ai/inference/chat/completions').trim();
-  const apiVersion = String(process.env.GITHUB_MODELS_API_VERSION || '2026-03-10').trim();
+const SYSTEM_PROMPT_PATH = path.join(__dirname, '..', 'system_prompt.txt');
 
-  if (!token) throw new Error('Missing GITHUB_MODELS_TOKEN in environment.');
+// Read once at module load. Split off the INPUT FORMAT block so the user-turn
+// owns the variable data — the system instruction stays static.
+const RAW_PROMPT = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf8');
+const SYSTEM_INSTRUCTION = RAW_PROMPT.split(/^INPUT FORMAT:/m)[0].trim();
 
-  const response = await fetch(endpoint, {
+async function requestGemini(systemInstruction, userText, options = {}) {
+  const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
+  const model = String(process.env.GEMINI_MODEL || 'gemini-flash-lite-latest').trim();
+
+  if (!apiKey) throw new Error('Missing GEMINI_API_KEY in environment.');
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+
+  const response = await fetch(url, {
     method: 'POST',
     headers: {
-      'Accept': 'application/vnd.github+json',
-      'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
-      'X-GitHub-Api-Version': apiVersion
+      'x-goog-api-key': apiKey,
     },
     body: JSON.stringify({
-      model,
-      temperature: options.temperature ?? 0.8,
-      max_tokens: options.maxTokens ?? 100,
-      messages
-    })
+      systemInstruction: { parts: [{ text: systemInstruction }] },
+      contents: [{ role: 'user', parts: [{ text: userText }] }],
+      generationConfig: {
+        temperature: options.temperature ?? 0.9,
+        maxOutputTokens: options.maxTokens ?? 200,
+      },
+    }),
   });
 
   if (!response.ok) {
-    let errorMessage = `GitHub Models request failed (HTTP ${response.status}).`;
+    let detail = `HTTP ${response.status}`;
     try {
       const body = await response.json();
-      const detail = body?.message || body?.error?.message || JSON.stringify(body);
-      errorMessage = `HTTP ${response.status}: ${detail}`;
+      detail = body?.error?.message || JSON.stringify(body);
     } catch {}
-    throw new Error(errorMessage);
+    throw new Error(`Gemini request failed: ${detail}`);
   }
 
   return await response.json();
@@ -51,45 +61,43 @@ async function requestGitHubModels(messages, options = {}) {
 
 async function generateMessage(userIdentity, postContext) {
   try {
-    const normalizedContext = String(postContext || '').replace(/\s+/g, ' ').trim();
+    const normalizedContext = String(postContext || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const normalizedIdentity = String(userIdentity || '').trim();
 
-    const systemPrompt = `
-      USER PERSONA: ${userIdentity}
-
-      TASK:
-      1. Analyze the "Post Context" to determine the appropriate mood (e.g., excited, cynical, helpful, amused, or shocked).
-      2. Write a Facebook comment or opinion in the "USER PERSONA" typing style, as if reacting to the post.
-
-      CONSTRAINTS:
-      - LANGUAGE: Always write in English regardless of the persona's location.
-      - VARIETY: Never start with "Check this out", "Pretty cool", "Wow", or "Interesting."
-      - TYPING STYLE: Match how a real person types in that language. Use casual, natural phrasing — not textbook-formal. Include local slang or expressions if it fits the persona.
-      - DYNAMIC RESPONSE: If the post is news, react to the news. If it's a product, react to the utility. If it's a joke, react to the humor. If it's an opinion, agree or push back.
-      - LENGTH: Minimum 5 words. Maximum 20 words.
-      - OUTPUT: Plain text only. No quotes, no hashtags, no labels.
-      - SKIP: Only return the word SKIP (nothing else) if the post context is completely empty, is random characters/codes, or contains no readable human language. If there is any readable text or image description, always generate a message.
-      - NO HYPHENS: Do not use em dashes (—), en dashes (–), or long hyphens (-) in your response. Use commas, periods, or just rewrite the sentence instead.
-    `.trim();
+    const userText = [
+      'POST CONTEXT:',
+      normalizedContext || '(none)',
+      '',
+      'USER IDENTITY:',
+      normalizedIdentity || '(none)',
+      '',
+      'OUTPUT:',
+      'Generate ONLY the Facebook response text.',
+    ].join('\n');
 
     console.log(`  [generateMessage] context: "${normalizedContext}"`);
 
-    const payload = await requestGitHubModels([
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Post Context: ${normalizedContext}\n\nGenerate the share message:` }
-    ]);
+    const payload = await requestGemini(SYSTEM_INSTRUCTION, userText);
 
-    const raw = payload.choices[0]?.message?.content?.trim().replace(/^["']|["']$/g, '') ?? '';
-    if (!raw || raw === 'SKIP') {
+    const raw = (payload?.candidates?.[0]?.content?.parts?.[0]?.text || '')
+      .trim()
+      .replace(/^["']|["']$/g, '');
+
+    if (!raw || raw.toUpperCase() === 'SKIP') {
       console.log(`  [generateMessage] not enough context, sharing without message`);
       return '';
     }
 
     // Sanitize: replace em dash, en dash, and standalone hyphens with a space
-    const message = raw.replace(/[—–]|(?<= )-(?= )/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    const message = raw
+      .replace(/[—–]|(?<= )-(?= )/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
 
     console.log(`  [generateMessage] generated: "${message}"`);
     return message;
-
   } catch (err) {
     console.warn(`  [generateMessage] API error: ${err.message}`);
     return '';

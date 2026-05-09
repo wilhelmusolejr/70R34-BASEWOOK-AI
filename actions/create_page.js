@@ -44,14 +44,20 @@ const RETRY_WAIT_MS = 60000;
  * step-level retry does NOT restart the whole create_page (which would
  * create a duplicate Page on FB).
  */
-async function retryField(label, fn, { attempts = POST_FIELD_ATTEMPTS, waitMs = RETRY_WAIT_MS } = {}) {
+async function retryField(
+  label,
+  fn,
+  { attempts = POST_FIELD_ATTEMPTS, waitMs = RETRY_WAIT_MS } = {}
+) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastError = err;
-      console.warn(`  [create_page] ${label} failed (attempt ${attempt}/${attempts}): ${err.message}`);
+      console.warn(
+        `  [create_page] ${label} failed (attempt ${attempt}/${attempts}): ${err.message}`
+      );
       if (attempt < attempts) {
         console.warn(`  [create_page] Waiting ${waitMs / 1000}s before retrying ${label}...`);
         await new Promise((resolve) => setTimeout(resolve, waitMs));
@@ -129,7 +135,8 @@ module.exports = async function create_page(page, params) {
   if (!pageName) throw new Error('create_page: pageName is required');
 
   const categoryText = getCategoryKeyword(pageName, categoryKeyword);
-  if (!categoryText) throw new Error('create_page: could not derive category keyword from pageName');
+  if (!categoryText)
+    throw new Error('create_page: could not derive category keyword from pageName');
   const parsedCity = parseCityState(city);
   const address = buildPageAddress({ city, state, zipCode });
   const emailValue = String(email || '').trim();
@@ -192,7 +199,11 @@ module.exports = async function create_page(page, params) {
       const publicPageVisible = await publicPageOption.isVisible().catch(() => false);
 
       if (publicPageVisible) {
-        await clickLocator(page, publicPageOption, 'create_page: Public Page option has no bounding box');
+        await clickLocator(
+          page,
+          publicPageOption,
+          'create_page: Public Page option has no bounding box'
+        );
       } else {
         await clickLocator(
           page,
@@ -232,7 +243,9 @@ module.exports = async function create_page(page, params) {
       await stepWait(page);
 
       if (bio) {
-        const bioInput = page.locator(`xpath=//span[contains(text(), "Bio")]/following::textarea[1]`).first();
+        const bioInput = page
+          .locator(`xpath=//span[contains(text(), "Bio")]/following::textarea[1]`)
+          .first();
         await bioInput.waitFor({ state: 'visible', timeout: 15000 });
         console.log('  [create_page] Filling bio...');
         await clickAndReplace(page, bioInput, bio);
@@ -255,9 +268,13 @@ module.exports = async function create_page(page, params) {
         break;
       } catch (err) {
         preLastError = err;
-        console.warn(`  [create_page] Pre-create phase failed (attempt ${attempt}/${PRE_CREATE_ATTEMPTS}): ${err.message}`);
+        console.warn(
+          `  [create_page] Pre-create phase failed (attempt ${attempt}/${PRE_CREATE_ATTEMPTS}): ${err.message}`
+        );
         if (attempt < PRE_CREATE_ATTEMPTS) {
-          console.warn(`  [create_page] Waiting ${RETRY_WAIT_MS / 1000}s before restarting pre-create phase...`);
+          console.warn(
+            `  [create_page] Waiting ${RETRY_WAIT_MS / 1000}s before restarting pre-create phase...`
+          );
           await new Promise((resolve) => setTimeout(resolve, RETRY_WAIT_MS));
           await resetModals(page);
         }
@@ -422,7 +439,9 @@ module.exports = async function create_page(page, params) {
       console.log('  [create_page] Page creation confirmed — URL changed to page profile.');
       pageCreated = true;
     } catch {
-      console.warn('  [create_page] URL did not change to profile.php within 30s — page may still be loading.');
+      console.warn(
+        '  [create_page] URL did not change to profile.php within 30s — page may still be loading.'
+      );
     }
 
     const urlAfterDone = page.url();

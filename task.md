@@ -27,6 +27,7 @@ to revisit when they actually hurt:
 ## Profile pipeline: which userIds go where?
 
 **Manual workflow today:**
+
 1. Create Hidemium browser profile (`node create-profile.js <userId>`)
 2. Open that profile, manually log into external sites / BASEWOOK
 3. Run automation on it (`node run-task.js`, tasks.json has `profiles: [...]`)
@@ -70,7 +71,7 @@ Use this file as the staging area for page-creation data you want me to turn int
 - `pageName`:
 - `bio`:
 - `categoryKeyword`:
-If left blank, the automation will use the first word of `pageName`.
+  If left blank, the automation will use the first word of `pageName`.
 
 ## Action Contract
 
@@ -119,4 +120,7 @@ Behavior:
   ]
 }
 ```
+
+```
+
 ```

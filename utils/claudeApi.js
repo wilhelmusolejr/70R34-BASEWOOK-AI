@@ -21,7 +21,9 @@
 async function extractPostContext(page, containerElement = null) {
   if (containerElement) {
     // Search within the specific post container using .// (relative to element, not document root)
-    const textEl = await containerElement.$('xpath=.//div[@data-ad-rendering-role="story_message"]//div[@dir="auto"]');
+    const textEl = await containerElement.$(
+      'xpath=.//div[@data-ad-rendering-role="story_message"]//div[@dir="auto"]'
+    );
     const postText = textEl ? await textEl.innerText().catch(() => '') : '';
 
     const imgEl = await containerElement.$('xpath=.//img[@data-imgperflogname="feedImage"]');
@@ -35,7 +37,9 @@ async function extractPostContext(page, containerElement = null) {
   }
 
   // Full page search (for share_post with specific URL)
-  const textEl = await page.$('xpath=//div[@data-ad-rendering-role="story_message"]//div[@dir="auto"]');
+  const textEl = await page.$(
+    'xpath=//div[@data-ad-rendering-role="story_message"]//div[@dir="auto"]'
+  );
   const postText = textEl ? await textEl.innerText().catch(() => '') : '';
 
   const imgEl = await page.$('xpath=//img[@data-imgperflogname="feedImage"]');

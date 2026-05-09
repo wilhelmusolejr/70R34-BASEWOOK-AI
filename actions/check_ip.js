@@ -35,20 +35,28 @@ module.exports = async function check_ip(page, params) {
   console.log('  [check_ip] Fetching IP info via browser network...');
   const info = await fetchIpInfoFromBrowser(page);
 
-  console.log(`  [check_ip] IP: ${info.ip} | ${info.city || ''}, ${info.region || ''} ${info.country || ''} | ${info.org || ''}`);
+  console.log(
+    `  [check_ip] IP: ${info.ip} | ${info.city || ''}, ${info.region || ''} ${info.country || ''} | ${info.org || ''}`
+  );
 
   const target = resolveLogEndpoint(userId, endpoint);
   if (!target) {
-    console.warn('  [check_ip] No log endpoint configured (IP_LOG_ENDPOINT / USER_API_BASE_URL + userId) — skipping POST.');
+    console.warn(
+      '  [check_ip] No log endpoint configured (IP_LOG_ENDPOINT / USER_API_BASE_URL + userId) — skipping POST.'
+    );
     return info;
   }
 
   try {
-    await axios.post(target, {
-      userId,
-      recordedAt: new Date().toISOString(),
-      ipInfo: info,
-    }, { timeout: 15000 });
+    await axios.post(
+      target,
+      {
+        userId,
+        recordedAt: new Date().toISOString(),
+        ipInfo: info,
+      },
+      { timeout: 15000 }
+    );
     console.log(`  [check_ip] Logged to ${target}`);
   } catch (err) {
     console.warn(`  [check_ip] Failed to log IP to ${target}: ${err.message}`);

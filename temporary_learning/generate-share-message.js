@@ -17,34 +17,27 @@
 //   A plain string - the share message only, ready to be typed into the
 //   Facebook share dialog. Empty string on failure (share proceeds silently).
 
-require("dotenv").config();
+require('dotenv').config();
 
 async function requestGitHubModels(messages, options = {}) {
-  const token = String(
-    process.env.GITHUB_MODELS_TOKEN || process.env.GITHUB_TOKEN || "",
-  ).trim();
-  const model = String(
-    process.env.GITHUB_MODELS_MODEL || "openai/gpt-4.1",
-  ).trim();
+  const token = String(process.env.GITHUB_MODELS_TOKEN || process.env.GITHUB_TOKEN || '').trim();
+  const model = String(process.env.GITHUB_MODELS_MODEL || 'openai/gpt-4.1').trim();
   const endpoint = String(
-    process.env.GITHUB_MODELS_BASE_URL ||
-      "https://models.github.ai/inference/chat/completions",
+    process.env.GITHUB_MODELS_BASE_URL || 'https://models.github.ai/inference/chat/completions'
   ).trim();
-  const apiVersion = String(
-    process.env.GITHUB_MODELS_API_VERSION || "2026-03-10",
-  ).trim();
+  const apiVersion = String(process.env.GITHUB_MODELS_API_VERSION || '2026-03-10').trim();
 
   if (!token) {
-    throw new Error("Missing GITHUB_MODELS_TOKEN in environment.");
+    throw new Error('Missing GITHUB_MODELS_TOKEN in environment.');
   }
 
   const response = await fetch(endpoint, {
-    method: "POST",
+    method: 'POST',
     headers: {
-      Accept: "application/vnd.github+json",
+      Accept: 'application/vnd.github+json',
       Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      "X-GitHub-Api-Version": apiVersion,
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': apiVersion,
     },
     body: JSON.stringify({
       model,
@@ -55,7 +48,7 @@ async function requestGitHubModels(messages, options = {}) {
   });
 
   if (!response.ok) {
-    let errorMessage = "GitHub Models request failed.";
+    let errorMessage = 'GitHub Models request failed.';
     try {
       const body = await response.json();
       errorMessage = body?.message || body?.error?.message || errorMessage;
@@ -73,8 +66,8 @@ async function requestGitHubModels(messages, options = {}) {
 
 async function generateShareMessage(userIdentity, postContext) {
   try {
-    const normalizedPostContext = String(postContext || "")
-      .replace(/\s+/g, " ")
+    const normalizedPostContext = String(postContext || '')
+      .replace(/\s+/g, ' ')
       .trim();
     const systemPrompt = `
       USER PERSONA: ${userIdentity}
@@ -91,28 +84,23 @@ async function generateShareMessage(userIdentity, postContext) {
       - OUTPUT: Plain text only. No quotes, no hashtags, no "Mood: [Mood]", no labels.
     `.trim();
 
-    console.log(
-      `[generate-share-message] Post context: "${normalizedPostContext}"`,
-    );
+    console.log(`[generate-share-message] Post context: "${normalizedPostContext}"`);
 
     const { payload } = await requestGitHubModels([
-      { role: "system", content: systemPrompt },
+      { role: 'system', content: systemPrompt },
       {
-        role: "user",
+        role: 'user',
         content: `Post Context: ${normalizedPostContext}\n\nGenerate the share message:`,
       },
     ]);
 
     // Clean up any stray quotes the AI might include
-    const message =
-      payload.choices[0]?.message?.content
-        ?.trim()
-        .replace(/^["']|["']$/g, "") ?? "";
+    const message = payload.choices[0]?.message?.content?.trim().replace(/^["']|["']$/g, '') ?? '';
     console.log(`[generate-share-message] Generated: "${message}"`);
     return message;
   } catch (err) {
     console.warn(`[generate-share-message] API error: ${err.message}`);
-    return "";
+    return '';
   }
 }
 module.exports = { generateShareMessage };

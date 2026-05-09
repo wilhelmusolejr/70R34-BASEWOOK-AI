@@ -2,31 +2,61 @@ const ADDRESS_SEEDS = {
   Texas: {
     Dallas: {
       zipCodes: ['75201', '75204', '75206', '75214'],
-      streets: ['2418 Ross Avenue', '3621 Greenville Avenue', '1847 Elm Street', '2710 Swiss Avenue'],
+      streets: [
+        '2418 Ross Avenue',
+        '3621 Greenville Avenue',
+        '1847 Elm Street',
+        '2710 Swiss Avenue',
+      ],
     },
     Frisco: {
       zipCodes: ['75033', '75034', '75035', '75036'],
-      streets: ['9550 Preston Road', '2211 Main Street', '4807 Parkwood Boulevard', '6725 Lebanon Road'],
+      streets: [
+        '9550 Preston Road',
+        '2211 Main Street',
+        '4807 Parkwood Boulevard',
+        '6725 Lebanon Road',
+      ],
     },
     Houston: {
       zipCodes: ['77002', '77007', '77008', '77019'],
-      streets: ['1710 Washington Avenue', '2425 West Alabama Street', '903 Heights Boulevard', '1118 Taft Street'],
+      streets: [
+        '1710 Washington Avenue',
+        '2425 West Alabama Street',
+        '903 Heights Boulevard',
+        '1118 Taft Street',
+      ],
     },
   },
   Alabama: {
     Birmingham: {
       zipCodes: ['35203', '35205', '35209', '35213'],
-      streets: ['2016 2nd Avenue North', '1431 29th Street South', '825 Green Springs Highway', '3900 Clairmont Avenue'],
+      streets: [
+        '2016 2nd Avenue North',
+        '1431 29th Street South',
+        '825 Green Springs Highway',
+        '3900 Clairmont Avenue',
+      ],
     },
     Huntsville: {
       zipCodes: ['35801', '35802', '35805', '35806'],
-      streets: ['2414 Memorial Parkway SW', '905 Bob Wallace Avenue', '1312 Meridian Street North', '4800 Whitesburg Drive'],
+      streets: [
+        '2414 Memorial Parkway SW',
+        '905 Bob Wallace Avenue',
+        '1312 Meridian Street North',
+        '4800 Whitesburg Drive',
+      ],
     },
   },
   Nevada: {
     'Las Vegas': {
       zipCodes: ['89101', '89104', '89109', '89117'],
-      streets: ['1821 Fremont Street', '3300 Spring Mountain Road', '4120 South Decatur Boulevard', '2755 West Charleston Boulevard'],
+      streets: [
+        '1821 Fremont Street',
+        '3300 Spring Mountain Road',
+        '4120 South Decatur Boulevard',
+        '2755 West Charleston Boulevard',
+      ],
     },
   },
   California: {

@@ -11,18 +11,21 @@
  */
 
 const { humanWait } = require('../utils/humanBehavior');
-const { fetchActiveProfileUrls } = require('../utils/userApi');
+const { fetchActiveProfiles } = require('../utils/userApi');
 
 const STATIC_POOLS = {
   friends: require('../config/friend_targets.json'),
-  sharers: require('../config/share_sources.json')
+  sharers: require('../config/share_sources.json'),
 };
 
 const USERS_POOL_LIMIT = 5;
 
 async function resolvePool(pool) {
   if (STATIC_POOLS[pool]) return STATIC_POOLS[pool];
-  if (pool === 'users') return await fetchActiveProfileUrls(USERS_POOL_LIMIT);
+  if (pool === 'users') {
+    const profiles = await fetchActiveProfiles(USERS_POOL_LIMIT);
+    return profiles.map((p) => p.profileUrl).filter(Boolean);
+  }
   throw new Error(`visit_profile: unknown pool "${pool}" (valid: friends, sharers, users)`);
 }
 

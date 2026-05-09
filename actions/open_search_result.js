@@ -33,7 +33,8 @@ module.exports = async function open_search_result(page, params) {
     candidates.push({ handle: a, href });
   }
 
-  if (!candidates.length) throw new Error('open_search_result: no usable profile links after dedupe');
+  if (!candidates.length)
+    throw new Error('open_search_result: no usable profile links after dedupe');
 
   let chosen;
   if (pick === 'first' || pick === 0) {
@@ -44,7 +45,9 @@ module.exports = async function open_search_result(page, params) {
     chosen = candidates[Math.floor(Math.random() * candidates.length)];
   }
 
-  console.log(`  [open_search_result] Picked ${candidates.indexOf(chosen) + 1}/${candidates.length}: ${chosen.href}`);
+  console.log(
+    `  [open_search_result] Picked ${candidates.indexOf(chosen) + 1}/${candidates.length}: ${chosen.href}`
+  );
 
   const viewport = page.viewportSize();
   const vh = (viewport && viewport.height) || 900;

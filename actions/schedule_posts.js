@@ -14,7 +14,20 @@ const { stepWait, clickLocator } = require('../utils/pageSetupHelpers');
 function getScheduleDate(dayOffset) {
   const d = new Date();
   d.setDate(d.getDate() + dayOffset);
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
   return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
 }
 
@@ -59,7 +72,9 @@ module.exports = async function schedule_posts(page, params) {
 
   async function schedulePost(content, dayOffset) {
     const scheduleDate = getScheduleDate(dayOffset);
-    console.log(`  [schedule_posts] Scheduling post (day +${dayOffset}, date: ${scheduleDate}): "${content.slice(0, 40)}..."`);
+    console.log(
+      `  [schedule_posts] Scheduling post (day +${dayOffset}, date: ${scheduleDate}): "${content.slice(0, 40)}..."`
+    );
 
     const whatInput = page.locator('div[role="button"]:has-text("What\'s on your mind?")').first();
     await whatInput.waitFor({ state: 'visible', timeout: 15000 });
@@ -68,7 +83,10 @@ module.exports = async function schedule_posts(page, params) {
 
     await dismissNotNow();
 
-    await page.locator('div[role="dialog"][aria-label="Create post"]').first().waitFor({ state: 'visible', timeout: 15000 });
+    await page
+      .locator('div[role="dialog"][aria-label="Create post"]')
+      .first()
+      .waitFor({ state: 'visible', timeout: 15000 });
     await stepWait(page);
 
     const textbox = page.locator('div[role="textbox"][data-lexical-editor="true"]').first();
@@ -90,7 +108,11 @@ module.exports = async function schedule_posts(page, params) {
     await humanClick(page, await createPostHeading2.boundingBox());
     await stepWait(page);
 
-    await clickLocator(page, page.locator('[aria-label="Next"]'), 'schedule_posts: Post Next button not found');
+    await clickLocator(
+      page,
+      page.locator('[aria-label="Next"]'),
+      'schedule_posts: Post Next button not found'
+    );
     await stepWait(page);
 
     const schedOpt = page.locator('xpath=//span[contains(text(), "Scheduling options")]').first();
@@ -98,10 +120,14 @@ module.exports = async function schedule_posts(page, params) {
     await humanClick(page, await schedOpt.boundingBox());
     await stepWait(page);
 
-    await page.locator('div[role="button"]:has-text("Schedule for later")').waitFor({ state: 'visible', timeout: 10000 });
+    await page
+      .locator('div[role="button"]:has-text("Schedule for later")')
+      .waitFor({ state: 'visible', timeout: 10000 });
     await stepWait(page);
 
-    const dateInput = page.locator('div:has(span[aria-label="Open Date Picker"]) input[type="text"]').first();
+    const dateInput = page
+      .locator('div:has(span[aria-label="Open Date Picker"]) input[type="text"]')
+      .first();
     await dateInput.waitFor({ state: 'visible', timeout: 10000 });
     await dateInput.scrollIntoViewIfNeeded();
     await humanClick(page, await dateInput.boundingBox());
@@ -125,7 +151,9 @@ module.exports = async function schedule_posts(page, params) {
     await stepWait(page);
 
     try {
-      const confirmBtn = page.locator('div[role="button"]:has-text("Publish Original Post")').first();
+      const confirmBtn = page
+        .locator('div[role="button"]:has-text("Publish Original Post")')
+        .first();
       await confirmBtn.waitFor({ state: 'visible', timeout: 5000 });
       console.log('  [schedule_posts] Post-schedule confirmation modal detected — clicking...');
       await humanClick(page, await confirmBtn.boundingBox());
@@ -145,13 +173,17 @@ module.exports = async function schedule_posts(page, params) {
         await schedulePost(content, dayOffset);
         return;
       } catch (err) {
-        console.warn(`  [schedule_posts] Post ${dayOffset} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${err.message}`);
+        console.warn(
+          `  [schedule_posts] Post ${dayOffset} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${err.message}`
+        );
         if (attempt < MAX_ATTEMPTS) {
           console.log('  [schedule_posts] Reloading page before retry...');
           await page.reload({ waitUntil: 'domcontentloaded' });
           await humanWait(page, 3000, 5000);
         } else {
-          console.warn(`  [schedule_posts] Post ${dayOffset} failed after ${MAX_ATTEMPTS} attempts — skipping.`);
+          console.warn(
+            `  [schedule_posts] Post ${dayOffset} failed after ${MAX_ATTEMPTS} attempts — skipping.`
+          );
         }
       }
     }

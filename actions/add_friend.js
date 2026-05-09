@@ -8,10 +8,12 @@
 const { humanWait, humanClick, scrollToCenter } = require('../utils/humanBehavior');
 
 module.exports = async function add_friend(page, params) {
-  const combined = page.locator(
-    'div[role="button"][aria-label^="Add Friend"], ' +
-    'div[role="button"][aria-label="Add friend"]'
-  ).first();
+  const combined = page
+    .locator(
+      'div[role="button"][aria-label^="Add Friend"], ' +
+        'div[role="button"][aria-label="Add friend"]'
+    )
+    .first();
 
   await combined.waitFor({ state: 'visible', timeout: 10000 });
 

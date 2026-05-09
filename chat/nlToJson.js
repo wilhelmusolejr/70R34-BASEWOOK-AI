@@ -18,23 +18,27 @@ function getClient() {
 }
 
 function buildSchemaReference() {
-  return Object.entries(actionSchemas).map(([type, schema]) => {
-    const params = Object.entries(schema.params || {}).map(([name, p]) => {
-      const parts = [`${name} (${p.type})`];
-      if (p.required) parts.push('required');
-      if (p.default !== undefined) parts.push(`default: ${JSON.stringify(p.default)}`);
-      if (p.enum) parts.push(`options: ${p.enum.join('|')}`);
-      if (p.description) parts.push(p.description);
-      return `    - ${parts.join(' — ')}`;
-    }).join('\n');
+  return Object.entries(actionSchemas)
+    .map(([type, schema]) => {
+      const params = Object.entries(schema.params || {})
+        .map(([name, p]) => {
+          const parts = [`${name} (${p.type})`];
+          if (p.required) parts.push('required');
+          if (p.default !== undefined) parts.push(`default: ${JSON.stringify(p.default)}`);
+          if (p.enum) parts.push(`options: ${p.enum.join('|')}`);
+          if (p.description) parts.push(p.description);
+          return `    - ${parts.join(' — ')}`;
+        })
+        .join('\n');
 
-    return [
-      `ACTION: ${type}`,
-      `  Description: ${schema.description}`,
-      `  Can have child steps: ${schema.hasChildren}`,
-      params ? `  Params:\n${params}` : `  Params: none`
-    ].join('\n');
-  }).join('\n\n');
+      return [
+        `ACTION: ${type}`,
+        `  Description: ${schema.description}`,
+        `  Can have child steps: ${schema.hasChildren}`,
+        params ? `  Params:\n${params}` : `  Params: none`,
+      ].join('\n');
+    })
+    .join('\n\n');
 }
 
 const SYSTEM_PROMPT = `
@@ -84,9 +88,7 @@ async function nlToJson(userMessage) {
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 1024,
     system: SYSTEM_PROMPT,
-    messages: [
-      { role: 'user', content: userMessage }
-    ]
+    messages: [{ role: 'user', content: userMessage }],
   });
 
   const raw = response.content[0]?.text?.trim() ?? '';

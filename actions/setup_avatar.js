@@ -19,17 +19,19 @@ function downloadToTemp(url) {
     const file = fs.createWriteStream(tmpPath);
     const client = url.startsWith('https') ? https : http;
 
-    client.get(url, (res) => {
-      if (res.statusCode !== 200) {
-        reject(new Error(`Download failed: HTTP ${res.statusCode}`));
-        return;
-      }
-      res.pipe(file);
-      file.on('finish', () => file.close(() => resolve(tmpPath)));
-    }).on('error', (err) => {
-      fs.unlink(tmpPath, () => {});
-      reject(err);
-    });
+    client
+      .get(url, (res) => {
+        if (res.statusCode !== 200) {
+          reject(new Error(`Download failed: HTTP ${res.statusCode}`));
+          return;
+        }
+        res.pipe(file);
+        file.on('finish', () => file.close(() => resolve(tmpPath)));
+      })
+      .on('error', (err) => {
+        fs.unlink(tmpPath, () => {});
+        reject(err);
+      });
   });
 }
 
@@ -61,8 +63,7 @@ module.exports = async function setup_avatar(page, params) {
   if (!photoUrl) throw new Error('setup_avatar: photoUrl is required');
 
   // Explicit description wins; otherwise AI-generate from persona, Bible-verse fallback.
-  const description = params.description?.trim()
-    || await generateAvatarDescription(userIdentity);
+  const description = params.description?.trim() || (await generateAvatarDescription(userIdentity));
 
   console.log('Downloading avatar image...');
   const tmpPath = await downloadToTemp(photoUrl);
@@ -89,18 +90,17 @@ module.exports = async function setup_avatar(page, params) {
 
     // 4. Click "Upload photo" — intercept the OS file chooser it triggers
     const uploadBtn = await page.waitForSelector('[aria-label="Upload photo"]', { timeout: 8000 });
-    const [fileChooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      uploadBtn.click()
-    ]);
+    const [fileChooser] = await Promise.all([page.waitForEvent('filechooser'), uploadBtn.click()]);
     await fileChooser.setFiles(tmpPath);
     console.log('File input set, waiting for upload...');
 
     // 6. Wait for upload to complete — try reposition text first, fall back to Save button appearing
-    const uploadReady = await page.waitForSelector(
-      'xpath=//span[text()="Drag or use arrow keys to reposition image"]',
-      { timeout: 30000 }
-    ).then(() => 'reposition').catch(() => null);
+    const uploadReady = await page
+      .waitForSelector('xpath=//span[text()="Drag or use arrow keys to reposition image"]', {
+        timeout: 30000,
+      })
+      .then(() => 'reposition')
+      .catch(() => null);
 
     if (!uploadReady) {
       console.log('Reposition text not found — waiting for Save button as fallback...');
@@ -127,24 +127,24 @@ module.exports = async function setup_avatar(page, params) {
     // in the viewport (long descriptions push it below the fold), then
     // use direct .click() per CLAUDE.md convention for modal save buttons
     // (humanClick's cursor offset can miss and FB silently ignores it).
-    const saveBtn = await page.waitForSelector(
-      'div[aria-label="Save"][role="button"]',
-      { timeout: 8000 }
-    );
+    const saveBtn = await page.waitForSelector('div[aria-label="Save"][role="button"]', {
+      timeout: 8000,
+    });
     await saveBtn.scrollIntoViewIfNeeded();
     await humanWait(page, 800, 1500);
     await saveBtn.click();
     console.log('Save clicked');
 
     // 9. Wait for modal to close
-    await page.waitForSelector(
-      'xpath=//span[text()="Drag or use arrow keys to reposition image"]',
-      { state: 'detached', timeout: 15000 }
-    ).catch(() => {});
+    await page
+      .waitForSelector('xpath=//span[text()="Drag or use arrow keys to reposition image"]', {
+        state: 'detached',
+        timeout: 15000,
+      })
+      .catch(() => {});
 
     await humanWait(page, 2000, 3500);
     console.log('Avatar upload complete');
-
   } finally {
     fs.unlink(tmpPath, () => {});
   }

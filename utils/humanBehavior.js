@@ -100,9 +100,7 @@ async function humanType(page, text) {
     await page.keyboard.type(char);
 
     // Longer pause after punctuation/space
-    const charDelay = /[.,!?\s]/.test(char)
-      ? humanDelay(100, 250)
-      : humanDelay(40, 120);
+    const charDelay = /[.,!?\s]/.test(char) ? humanDelay(100, 250) : humanDelay(40, 120);
 
     await page.waitForTimeout(charDelay);
   }
@@ -148,5 +146,5 @@ module.exports = {
   humanMouseMove,
   humanClick,
   humanType,
-  scrollToCenter
+  scrollToCenter,
 };

@@ -5,76 +5,17 @@
 
 require('dotenv').config();
 const axios = require('axios');
-const { launchBrowsers, closeBrowsers, testProxy } = require('./utils/browserManager');
+const { launchBrowsers, closeBrowsers } = require('./utils/browserManager');
 const { fetchUser } = require('./utils/userApi');
 const presets = require('./config/presets.json');
 const { buildPageAddress } = require('./utils/pageAddressData');
+const { runInSession, addStripId, buildDisplayName } = require('./utils/sessionLog');
 
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
 const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
 
-/**
- * Before opening the browser, fetch current IP via the user's proxy and
- * append it to user.proxyLog if the IP differs from the last recorded entry.
- * Non-fatal — any failure (fetch, proxy, PATCH) is logged and skipped.
- */
-async function recordProxyLog(userId) {
-  if (!USER_API_BASE_URL) {
-    console.warn(`[${userId}] [proxyLog] USER_API_BASE_URL not set — skipping`);
-    return;
-  }
-
-  let user;
-  try {
-    user = await fetchUser(userId);
-  } catch (err) {
-    console.warn(`[${userId}] [proxyLog] fetchUser failed: ${err.message}`);
-    return;
-  }
-
-  const proxy = user.proxies?.[0]?.proxy;
-  if (!proxy) {
-    console.warn(`[${userId}] [proxyLog] No proxies[0].proxy — skipping`);
-    return;
-  }
-
-  let ipInfo;
-  try {
-    ipInfo = await testProxy(proxy);
-  } catch (err) {
-    console.warn(`[${userId}] [proxyLog] Proxy test failed: ${err.message}`);
-    return;
-  }
-
-  const existingLog = Array.isArray(user.proxyLog) ? user.proxyLog : [];
-  const lastEntry = existingLog[existingLog.length - 1];
-
-  if (lastEntry && lastEntry.ip === ipInfo.ip) {
-    console.log(`[${userId}] [proxyLog] IP unchanged (${ipInfo.ip}) — no new entry`);
-    return;
-  }
-
-  const newEntry = {
-    ip: ipInfo.ip || '',
-    city: ipInfo.city || '',
-    region: ipInfo.region || '',
-    country: ipInfo.country || '',
-    loc: ipInfo.loc || '',
-    org: ipInfo.org || '',
-    postal: ipInfo.postal || '',
-    timezone: ipInfo.timezone || '',
-    checkedAt: new Date().toISOString(),
-  };
-
-  try {
-    await axios.patch(`${USER_API_BASE_URL}/api/profiles/${userId}`, {
-      proxyLog: [...existingLog, newEntry],
-    });
-    console.log(`[${userId}] [proxyLog] New entry: ${newEntry.ip} (${newEntry.city}, ${newEntry.region}, ${newEntry.country})`);
-  } catch (err) {
-    const respBody = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-    console.warn(`[${userId}] [proxyLog] PATCH failed: ${respBody}`);
-  }
+function todayInManila() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
 }
 
 async function persistTrackerLog(userId, note) {
@@ -83,7 +24,7 @@ async function persistTrackerLog(userId, note) {
     console.warn('  [trackerLog] USER_API_BASE_URL not set — skipping tracker log POST.');
     return;
   }
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayInManila();
   const target = `${USER_API_BASE_URL}/api/profiles/${userId}/tracker`;
   try {
     await axios.post(target, { date: today, note }, { timeout: 15000 });
@@ -134,9 +75,7 @@ function buildImageUrl(filename) {
 
 function resolveSetupPageImages(user) {
   const linkedAssets = Array.isArray(user.linkedPage?.assets) ? user.linkedPage.assets : [];
-  const filenames = linkedAssets
-    .map((asset) => getAssetFilename(asset))
-    .filter(Boolean);
+  const filenames = linkedAssets.map((asset) => getAssetFilename(asset)).filter(Boolean);
 
   const byKeyword = (keyword) => filenames.find((f) => f.toLowerCase().includes(keyword));
 
@@ -169,13 +108,15 @@ const handlers = {
   open_search_result: require('./actions/open_search_result'),
   follow: require('./actions/follow'),
   connect: require('./actions/connect'),
+  connect_loop: require('./actions/connect_loop'),
+  accept_loop: require('./actions/accept_loop'),
+  wait: require('./actions/wait'),
 };
-
 
 const STEP_RETRY_ATTEMPTS = 3;
 const RETRY_WAIT_MS = 60000;
 
-async function runWithRetry(fn, profileId, stepType) {
+async function runWithRetry(fn, profileId, stepType, page) {
   let lastError;
 
   for (let attempt = 1; attempt <= STEP_RETRY_ATTEMPTS; attempt++) {
@@ -184,23 +125,44 @@ async function runWithRetry(fn, profileId, stepType) {
     } catch (err) {
       lastError = err;
 
+      // Checkpoint detection — FB has flagged this profile (login challenge,
+      // ID verification, etc.). Retrying won't help and burns cooldown time.
+      // Mark the error so runBrowser can short-circuit the whole task.
+      const url = page ? safePageUrl(page) : '';
+      if (url.includes('checkpoint')) {
+        console.warn(`CHECKPOINT detected on ${stepType} (url=${url}) — aborting profile`);
+        err.checkpoint = true;
+        err.noRetry = true;
+        break;
+      }
+
       // Handlers can set err.noRetry = true to opt out of step-level retry
       // (e.g. create_page, which handles its own retries internally — a
       // whole-handler restart would spawn a duplicate Page on FB).
       if (err && err.noRetry) {
-        console.warn(`[${profileId}] ${stepType} threw noRetry error — skipping runner retry: ${err.message}`);
+        console.warn(`${stepType} threw noRetry error — skipping runner retry: ${err.message}`);
         break;
       }
 
       if (attempt >= STEP_RETRY_ATTEMPTS) break;
 
-      console.warn(`[${profileId}] Error on ${stepType} (attempt ${attempt}/${STEP_RETRY_ATTEMPTS}): ${err.message}`);
-      console.warn(`[${profileId}] Retrying in ${RETRY_WAIT_MS / 1000}s...`);
+      console.warn(
+        `Error on ${stepType} (attempt ${attempt}/${STEP_RETRY_ATTEMPTS}): ${err.message}`
+      );
+      console.warn(`Retrying in ${RETRY_WAIT_MS / 1000}s...`);
       await new Promise((resolve) => setTimeout(resolve, RETRY_WAIT_MS));
     }
   }
 
   throw lastError;
+}
+
+function safePageUrl(page) {
+  try {
+    return page.url();
+  } catch (_) {
+    return '';
+  }
 }
 
 /**
@@ -226,11 +188,16 @@ function injectUserParams(steps, user) {
         hobbies: user.hobbies,
         travel: user.travel,
         userId: user._id || user.id || '',
+        profileUrl: user.profileUrl || '',
       };
-    } else if (step.type === 'setup_about' && !(step.params && step.params.userId)) {
+    } else if (step.type === 'setup_about') {
       s.params = {
         ...(step.params || {}),
-        userId: user._id || user.id || '',
+        userId: (step.params && step.params.userId) || user._id || user.id || '',
+        profileUrl:
+          step.params && typeof step.params.profileUrl === 'string'
+            ? step.params.profileUrl
+            : user.profileUrl || '',
       };
     }
 
@@ -271,7 +238,11 @@ function injectUserParams(steps, user) {
         ...(step.params || {}),
         pageName: step.params?.pageName || user.linkedPage?.pageName || '',
         bio: step.params?.bio ?? user.linkedPage?.bio ?? '',
-        email: step.params?.email || user.emails?.find((item) => item.selected)?.address || user.emails?.[0]?.address || '',
+        email:
+          step.params?.email ||
+          user.emails?.find((item) => item.selected)?.address ||
+          user.emails?.[0]?.address ||
+          '',
         streetAddress: step.params?.streetAddress || pageAddress.streetAddress,
         city: step.params?.city || user.city || '',
         state: step.params?.state || pageAddress.stateName,
@@ -303,6 +274,20 @@ function injectUserParams(steps, user) {
       };
     }
 
+    if (step.type === 'connect_loop' && !(step.params && step.params.userId)) {
+      s.params = {
+        ...(step.params || {}),
+        userId: user._id || user.id || '',
+      };
+    }
+
+    if (step.type === 'accept_loop' && !(step.params && step.params.userId)) {
+      s.params = {
+        ...(step.params || {}),
+        userId: user._id || user.id || '',
+      };
+    }
+
     if (step.type === 'search' && !(step.params && step.params.city)) {
       s.params = {
         ...(step.params || {}),
@@ -310,8 +295,10 @@ function injectUserParams(steps, user) {
       };
     }
 
-    if ((step.type === 'share_posts' || step.type === 'share_post')
-        && !(step.params && step.params.userIdentity)) {
+    if (
+      (step.type === 'share_posts' || step.type === 'share_post') &&
+      !(step.params && step.params.userIdentity)
+    ) {
       s.params = {
         ...(step.params || {}),
         userIdentity: user.identityPrompt || '',
@@ -340,7 +327,7 @@ async function runRandomPreset(page, step, profileId, user) {
   const key = validKeys[Math.floor(Math.random() * validKeys.length)];
   const preset = presets[key];
 
-  console.log(`[${profileId}] random_preset → "${key}" (${preset.description || ''})`);
+  console.log(`random_preset → "${key}" (${preset.description || ''})`);
 
   const presetSteps = user ? injectUserParams(preset.steps, user) : preset.steps;
 
@@ -361,21 +348,17 @@ async function runStep(page, step, profileId, user) {
   const handler = handlers[step.type];
   if (!handler) throw new Error(`Unknown step type: ${step.type}`);
 
-  console.log(`[${profileId}] Starting: ${step.type}`);
+  console.log(`Starting: ${step.type}`);
 
-  await runWithRetry(
-    () => handler(page, step.params || {}),
-    profileId,
-    step.type
-  );
+  await runWithRetry(() => handler(page, step.params || {}), profileId, step.type, page);
 
-  console.log(`[${profileId}] Completed: ${step.type}`);
+  console.log(`Completed: ${step.type}`);
 
   if (step.steps && step.steps.length > 0) {
     for (const childStep of step.steps) {
       const betweenMs = 5000 + Math.random() * 10000;
-      console.log(`[${profileId}] Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
-      await new Promise(r => setTimeout(r, betweenMs));
+      console.log(`Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
+      await new Promise((r) => setTimeout(r, betweenMs));
       await runStep(page, childStep, profileId, user);
     }
   }
@@ -390,9 +373,22 @@ async function runBrowser(session, steps, options = {}) {
   page.setDefaultNavigationTimeout(90000);
   page.setDefaultTimeout(60000);
 
+  // Close any extra tabs the profile launched with (welcome page, last-session
+  // restores, etc.) so the session starts on a single clean tab.
+  try {
+    const ctx = page.context();
+    const others = ctx.pages().filter((p) => p !== page);
+    for (const p of others) await p.close().catch(() => {});
+    if (others.length) {
+      console.log(`Closed ${others.length} extra tab(s) on open`);
+    }
+  } catch (err) {
+    console.warn(`Open-time tab cleanup failed (non-fatal): ${err.message}`);
+  }
+
   if (options.blockMedia !== false) {
     const BLOCKED_TYPES = new Set(['image', 'media', 'font']);
-    console.log(`[${profileId}] Media blocking: ON`);
+    console.log(`Media blocking: ON`);
     await page.route('**/*', (route) => {
       if (BLOCKED_TYPES.has(route.request().resourceType())) {
         route.abort();
@@ -401,12 +397,12 @@ async function runBrowser(session, steps, options = {}) {
       }
     });
   } else {
-    console.log(`[${profileId}] Media blocking: OFF`);
+    console.log(`Media blocking: OFF`);
   }
 
   const currentUrl = page.url();
   if (!currentUrl.includes('facebook.com')) {
-    console.log(`[${profileId}] Not on Facebook — navigating to homepage first...`);
+    console.log(`Not on Facebook — navigating to homepage first...`);
     await page.goto('https://www.facebook.com', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2000 + Math.random() * 1500);
   }
@@ -428,8 +424,8 @@ async function runBrowser(session, steps, options = {}) {
     for (let i = 0; i < injectedSteps.length; i++) {
       if (i > 0) {
         const betweenMs = 5000 + Math.random() * 10000;
-        console.log(`[${profileId}] Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
-        await new Promise(r => setTimeout(r, betweenMs));
+        console.log(`Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
+        await new Promise((r) => setTimeout(r, betweenMs));
       }
       const step = injectedSteps[i];
       try {
@@ -437,6 +433,11 @@ async function runBrowser(session, steps, options = {}) {
         completed.push(describeStepChain(step));
       } catch (err) {
         failure = { step, error: err };
+        if (err && err.checkpoint) {
+          console.warn(
+            `Checkpoint hit during ${step.type} — skipping remaining steps for this profile`
+          );
+        }
         throw err;
       }
     }
@@ -446,9 +447,22 @@ async function runBrowser(session, steps, options = {}) {
     await persistTrackerLog(userId, note);
   }
 
+  // Leave the browser on a single blank tab before close
+  try {
+    const context = page.context();
+    const blank = await context.newPage();
+    await blank.goto('about:blank').catch(() => {});
+    for (const p of context.pages()) {
+      if (p !== blank) await p.close().catch(() => {});
+    }
+    console.log(`Closed all tabs except one blank tab`);
+  } catch (err) {
+    console.warn(`Tab cleanup failed (non-fatal): ${err.message}`);
+  }
+
   const doneMs = 10000 + Math.random() * 5000;
-  console.log(`[${profileId}] Task done — cooling down ${(doneMs / 1000).toFixed(1)}s...`);
-  await new Promise(r => setTimeout(r, doneMs));
+  console.log(`Task done — cooling down ${(doneMs / 1000).toFixed(1)}s...`);
+  await new Promise((r) => setTimeout(r, doneMs));
 
   return { profileId, status: 'success' };
 }
@@ -462,7 +476,9 @@ async function runTask(task) {
   const limit = concurrency && concurrency > 0 ? concurrency : userIds.length;
   const options = { blockMedia: blockMedia !== false };
 
-  console.log(`\n=== Task ${taskId}: ${userIds.length} profile(s), concurrency: ${limit}, blockMedia: ${options.blockMedia} ===\n`);
+  console.log(
+    `\n=== Task ${taskId}: ${userIds.length} profile(s), concurrency: ${limit}, blockMedia: ${options.blockMedia} ===\n`
+  );
 
   const results = new Array(userIds.length);
   const queue = [...userIds.entries()];
@@ -471,24 +487,33 @@ async function runTask(task) {
     while (queue.length > 0) {
       const [index, userId] = queue.shift();
 
-      await recordProxyLog(userId);
-
-      let session;
+      let userPreview = null;
       try {
-        const browserInfos = await launchBrowsers([userId]);
-        session = { ...browserInfos[0], steps };
+        userPreview = await fetchUser(userId);
       } catch (err) {
-        console.error(`[${userId}] Failed to open browser:`, err.message);
-        results[index] = { status: 'rejected', reason: err };
-        continue;
+        console.warn(`[${userId}] Pre-fetch user failed (will fall back to userId): ${err.message}`);
       }
+      const displayName = buildDisplayName(userPreview, userId);
 
-      const { profileId } = session;
-      results[index] = await Promise.allSettled([
-        runBrowser(session, session.steps, options),
-      ]).then((r) => r[0]);
+      await runInSession({ displayName, idsToStrip: [userId] }, async () => {
+        let session;
+        try {
+          const browserInfos = await launchBrowsers([userId]);
+          session = { ...browserInfos[0], steps };
+        } catch (err) {
+          console.error(`Failed to open browser:`, err.message);
+          results[index] = { status: 'rejected', reason: err };
+          return;
+        }
 
-      await closeBrowsers([session]);
+        addStripId(session.profileId);
+
+        results[index] = await Promise.allSettled([
+          runBrowser(session, session.steps, options),
+        ]).then((r) => r[0]);
+
+        await closeBrowsers([session]);
+      });
     }
   }
 

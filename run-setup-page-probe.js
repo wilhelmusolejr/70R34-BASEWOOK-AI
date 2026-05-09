@@ -3,7 +3,13 @@ require('dotenv').config();
 const path = require('path');
 const { fetchUser } = require('./utils/userApi');
 const { openProfile } = require('./utils/browserManager');
-const { humanWait, humanClick, humanType, scrollToCenter, humanDelay } = require('./utils/humanBehavior');
+const {
+  humanWait,
+  humanClick,
+  humanType,
+  scrollToCenter,
+  humanDelay,
+} = require('./utils/humanBehavior');
 const task = require('./tasks.json');
 
 const PROBE_PATH = path.resolve(__dirname, 'temporary_learning', 'setup_page_probe.js');

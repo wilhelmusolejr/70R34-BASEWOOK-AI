@@ -32,7 +32,9 @@ async function main() {
       console.log(`  OK UUID: ${uuid}`);
       console.log(`  OK Name: ${body.name}`);
       if (ipInfo) {
-        console.log(`  OK IP:   ${ipInfo.ip} (${ipInfo.city}, ${ipInfo.region}, ${ipInfo.country})`);
+        console.log(
+          `  OK IP:   ${ipInfo.ip} (${ipInfo.city}, ${ipInfo.region}, ${ipInfo.country})`
+        );
       } else {
         console.log('  OK IP:   none (profile created without proxy)');
       }

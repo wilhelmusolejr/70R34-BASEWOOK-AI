@@ -21,17 +21,19 @@ function downloadToTemp(url, prefix) {
     const file = fs.createWriteStream(tmpPath);
     const client = url.startsWith('https') ? https : http;
 
-    client.get(url, (res) => {
-      if (res.statusCode !== 200) {
-        reject(new Error(`Download failed: HTTP ${res.statusCode}`));
-        return;
-      }
-      res.pipe(file);
-      file.on('finish', () => file.close(() => resolve(tmpPath)));
-    }).on('error', (err) => {
-      fs.unlink(tmpPath, () => {});
-      reject(err);
-    });
+    client
+      .get(url, (res) => {
+        if (res.statusCode !== 200) {
+          reject(new Error(`Download failed: HTTP ${res.statusCode}`));
+          return;
+        }
+        res.pipe(file);
+        file.on('finish', () => file.close(() => resolve(tmpPath)));
+      })
+      .on('error', (err) => {
+        fs.unlink(tmpPath, () => {});
+        reject(err);
+      });
   });
 }
 
@@ -47,7 +49,7 @@ async function getFirstVisibleLocator(locator, errorMessage, timeout = 15000) {
       if (isVisible) return candidate;
     }
 
-    await new Promise(resolve => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
   throw new Error(errorMessage);
@@ -87,13 +89,13 @@ async function clickLocator(page, locator, errorMessage) {
 }
 
 async function uploadImageFromButton(page, buttonLocator, tempPath, label) {
-  const button = await getFirstVisibleLocator(buttonLocator, `${label} button has no visible match`);
+  const button = await getFirstVisibleLocator(
+    buttonLocator,
+    `${label} button has no visible match`
+  );
   await button.scrollIntoViewIfNeeded();
 
-  const [fileChooser] = await Promise.all([
-    page.waitForEvent('filechooser'),
-    button.click(),
-  ]);
+  const [fileChooser] = await Promise.all([page.waitForEvent('filechooser'), button.click()]);
   await fileChooser.setFiles(tempPath);
 }
 

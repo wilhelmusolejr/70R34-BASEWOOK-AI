@@ -45,7 +45,7 @@ app.post('/execute', async (req, res) => {
     console.error('Task execution failed:', err);
     res.status(500).json({
       taskId: task.taskId,
-      error: err.message
+      error: err.message,
     });
   }
 });

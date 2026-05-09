@@ -17,13 +17,13 @@ module.exports = async function switch_profile(page, params) {
   await humanClick(page, await profileBtn.boundingBox());
   await stepWait(page);
 
-  let switchBtn = userName
-    ? page.locator(`[aria-label="Switch to ${userName}"]`).first()
-    : null;
+  let switchBtn = userName ? page.locator(`[aria-label="Switch to ${userName}"]`).first() : null;
   const switchVisible = switchBtn ? await switchBtn.isVisible().catch(() => false) : false;
 
   if (!switchVisible) {
-    console.log(`  [switch_profile] "Switch to ${userName}" not found — trying Quick switch profiles...`);
+    console.log(
+      `  [switch_profile] "Switch to ${userName}" not found — trying Quick switch profiles...`
+    );
     switchBtn = page.locator('[aria-label="Quick switch profiles"]').first();
   }
 

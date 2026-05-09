@@ -25,5 +25,18 @@
         "steps": [{ "type": "add_friend" }]
       }
     ]
+  },
+  "search_connect": {
+    "description": "Search People, click connect (Add friend/Follow/Like) on a result card, then scroll",
+    "steps": [
+      {
+        "type": "search",
+        "params": { "mode": "name", "filter": "People" },
+        "steps": [
+          { "type": "connect" },
+          { "type": "scroll", "params": { "duration": 10 } }
+        ]
+      }
+    ]
   }
 }

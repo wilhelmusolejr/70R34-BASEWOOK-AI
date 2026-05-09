@@ -1,6 +1,5 @@
 /**
- * setup_cover — Upload a cover photo from a URL.
- * Self-navigates to /me and goes through the cover photo upload flow.
+ * setup_cover — Upload a cover photo from a URL (robust version)
  */
 
 const https = require('https');
@@ -8,7 +7,7 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { humanWait, humanClick } = require('../utils/humanBehavior');
+const { humanWait } = require('../utils/humanBehavior');
 
 function downloadToTemp(url) {
   return new Promise((resolve, reject) => {
@@ -17,17 +16,19 @@ function downloadToTemp(url) {
     const file = fs.createWriteStream(tmpPath);
     const client = url.startsWith('https') ? https : http;
 
-    client.get(url, (res) => {
-      if (res.statusCode !== 200) {
-        reject(new Error(`Download failed: HTTP ${res.statusCode}`));
-        return;
-      }
-      res.pipe(file);
-      file.on('finish', () => file.close(() => resolve(tmpPath)));
-    }).on('error', (err) => {
-      fs.unlink(tmpPath, () => {});
-      reject(err);
-    });
+    client
+      .get(url, (res) => {
+        if (res.statusCode !== 200) {
+          reject(new Error(`Download failed: HTTP ${res.statusCode}`));
+          return;
+        }
+        res.pipe(file);
+        file.on('finish', () => file.close(() => resolve(tmpPath)));
+      })
+      .on('error', (err) => {
+        fs.unlink(tmpPath, () => {});
+        reject(err);
+      });
   });
 }
 
@@ -40,62 +41,103 @@ module.exports = async function setup_cover(page, params) {
   console.log(`Image saved to ${tmpPath}`);
 
   try {
-    // 1. Locate trigger — try current page first, navigate to /me only if missing
-    const SELECTOR = '[aria-label="Add cover photo"]';
-    let coverBtn;
-    try {
-      coverBtn = await page.waitForSelector(SELECTOR, { timeout: 3000 });
-      console.log('Already on own profile — reusing current page.');
-    } catch (_) {
-      console.log('Navigating to own profile...');
-      await page.goto('https://www.facebook.com/me', { waitUntil: 'domcontentloaded' });
-      await humanWait(page, 2000, 3500);
-      coverBtn = await page.waitForSelector(SELECTOR, { timeout: 10000 });
+    // =========================================================
+    // 1. Go to profile
+    // =========================================================
+    console.log('Navigating to own profile...');
+    await page.goto('https://www.facebook.com/me', {
+      waitUntil: 'domcontentloaded',
+    });
+
+    await humanWait(page, 2500, 4000);
+
+    // =========================================================
+    // 2. Click "Add/Edit cover photo"
+    // =========================================================
+    const coverBtn = page
+      .locator('[aria-label*="cover photo"]')
+      .filter({ has: page.locator(':visible') })
+      .first();
+
+    console.log('Waiting for cover button...');
+    await coverBtn.waitFor({ state: 'visible', timeout: 15000 });
+
+    await humanWait(page, 800, 1500);
+    await coverBtn.click();
+
+    // =========================================================
+    // 3. Click "Upload photo"
+    // =========================================================
+    const uploadBtn = page.locator('//div[@role="menuitem"][.//span[text()="Upload photo"]]');
+
+    console.log('Waiting for upload option...');
+    await uploadBtn.waitFor({ state: 'visible', timeout: 10000 });
+
+    const [fileChooser] = await Promise.all([page.waitForEvent('filechooser'), uploadBtn.click()]);
+
+    await fileChooser.setFiles(tmpPath);
+    console.log('File selected');
+
+    // =========================================================
+    // 4. Wait for Save button to be usable
+    // =========================================================
+    console.log('Waiting for Save changes button...');
+
+    await page.waitForFunction(
+      () => {
+        const btns = Array.from(document.querySelectorAll('[aria-label="Save changes"]'));
+        return btns.some(
+          (btn) =>
+            btn.offsetParent !== null && // visible
+            btn.getAttribute('aria-disabled') !== 'true'
+        );
+      },
+      { timeout: 45000 }
+    );
+
+    // =========================================================
+    // 5. Click correct Save button (VERY IMPORTANT LOGIC)
+    // =========================================================
+    const saveButtons = page.locator('[aria-label="Save changes"]');
+    const count = await saveButtons.count();
+
+    console.log(`Found ${count} Save buttons`);
+
+    let clicked = false;
+
+    for (let i = count - 1; i >= 0; i--) {
+      const btn = saveButtons.nth(i);
+
+      if ((await btn.isVisible()) && (await btn.isEnabled())) {
+        console.log(`Clicking Save button #${i}`);
+        await humanWait(page, 1500, 2500);
+        await btn.click();
+        clicked = true;
+        break;
+      }
     }
 
-    // 2. Click "Add cover photo" button
-    await coverBtn.scrollIntoViewIfNeeded();
-    await humanWait(page, 500, 1000);
-    await coverBtn.click();
-    await humanWait(page, 1500, 2500);
+    if (!clicked) {
+      throw new Error('No clickable Save changes button found');
+    }
 
-    // 3. Click "Upload photo" menuitem
-    const uploadMenuItem = await page.waitForSelector(
-      'xpath=//div[@role="menuitem"][.//span[text()="Upload photo"]]',
-      { timeout: 8000 }
-    );
-    const [fileChooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      uploadMenuItem.click()
-    ]);
-    await fileChooser.setFiles(tmpPath);
-    console.log('File input set, waiting for save button...');
+    // =========================================================
+    // 6. Wait for save to complete
+    // =========================================================
+    console.log('Waiting for save to complete...');
 
-    // 4. Poll until a "Save changes" button exists and is not aria-disabled
-    // (FB renders 2 matching elements — querySelector handles this cleanly)
-    console.log('Waiting for Save changes to become enabled...');
-    await page.waitForFunction(() => {
-      const btns = Array.from(document.querySelectorAll('[aria-label="Save changes"]'));
-      return btns.some(btn => btn.getAttribute('aria-disabled') !== 'true');
-    }, { timeout: 45000 });
+    await page
+      .waitForFunction(
+        () => {
+          return !document.querySelector('[aria-label="Save changes"]');
+        },
+        { timeout: 20000 }
+      )
+      .catch(() => {});
 
-    const saveBtn = await page.evaluateHandle(() =>
-      Array.from(document.querySelectorAll('[aria-label="Save changes"]'))
-        .find(btn => btn.getAttribute('aria-disabled') !== 'true')
-    );
-    await humanWait(page, 1500, 2500);
-    await saveBtn.click();
-    console.log('Save changes clicked');
+    await humanWait(page, 3000, 5000);
 
-    // 5. Wait for save to complete
-    await page.waitForFunction(() =>
-      !document.querySelector('[aria-label="Save changes"]'),
-      { timeout: 15000 }
-    ).catch(() => {});
-
-    await humanWait(page, 2000, 3500);
-    console.log('Cover photo upload complete');
-
+    console.log('✅ Cover photo upload complete');
   } finally {
     fs.unlink(tmpPath, () => {});
   }

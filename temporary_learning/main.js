@@ -6,9 +6,9 @@
 // Each profile runs: random filler → main task → random filler
 // Profiles start with staggered delays so they don't all hit Facebook at the same instant.
 
-const fs = require("fs");
-const path = require("path");
-const { openProfile, closeProfile } = require("./hidemium");
+const fs = require('fs');
+const path = require('path');
+const { openProfile, closeProfile } = require('./hidemium');
 const {
   createRunSessionId,
   captureIssueScreenshot,
@@ -16,7 +16,7 @@ const {
   runWithErrorScreenshot,
   setPageContext,
   withLogContext,
-} = require("./utils/runtime-monitor");
+} = require('./utils/runtime-monitor');
 
 // ---------- step registry ----------
 
@@ -24,41 +24,41 @@ const {
 // These are explicitly registered so we can validate --task and pass the right data.
 const MAIN_TASKS = {
   homepage_interaction: {
-    module: require("./steps/homepage-interaction"),
-    label: "Homepage Interaction",
+    module: require('./steps/homepage-interaction'),
+    label: 'Homepage Interaction',
   },
   profile_interaction: {
-    module: require("./steps/profile-interaction"),
-    label: "Profile Interaction",
+    module: require('./steps/profile-interaction'),
+    label: 'Profile Interaction',
   },
   profile_setup: {
-    module: require("./steps/profile-setup"),
-    label: "Profile Setup",
+    module: require('./steps/profile-setup'),
+    label: 'Profile Setup',
   },
   search_interaction: {
-    module: require("./steps/search-interaction"),
-    label: "Search Interaction",
+    module: require('./steps/search-interaction'),
+    label: 'Search Interaction',
   },
 };
 
 // FILLER_STEPS: auto-discovered from steps/ — any .js added there becomes a filler candidate.
 // test-script.js is always excluded; the chosen main task file is excluded at runtime.
-const EXCLUDED_FROM_FILLERS = new Set(["test-script.js"]);
+const EXCLUDED_FROM_FILLERS = new Set(['test-script.js']);
 const FILLER_WEIGHTS = {
-  "search-interaction.js": 3,
-  "profile-interaction.js": 1,
+  'search-interaction.js': 3,
+  'profile-interaction.js': 1,
 };
 
 const ALL_FILLER_STEPS = fs
-  .readdirSync(path.join(__dirname, "steps"))
-  .filter((f) => f.endsWith(".js") && !EXCLUDED_FROM_FILLERS.has(f))
+  .readdirSync(path.join(__dirname, 'steps'))
+  .filter((f) => f.endsWith('.js') && !EXCLUDED_FROM_FILLERS.has(f))
   .map((f) => ({
-    label: f.replace(".js", ""),
+    label: f.replace('.js', ''),
     file: f,
-    fn: require(path.join(__dirname, "steps", f)),
+    fn: require(path.join(__dirname, 'steps', f)),
   }));
 
-console.log(`[multi] Filler pool: ${ALL_FILLER_STEPS.map((s) => s.label).join(", ")}\n`);
+console.log(`[multi] Filler pool: ${ALL_FILLER_STEPS.map((s) => s.label).join(', ')}\n`);
 
 // ---------- helpers ----------
 
@@ -74,10 +74,7 @@ function sleep(ms) {
 function pickRandomFillers(mainTaskFile, count) {
   const available = ALL_FILLER_STEPS.filter((s) => s.file !== mainTaskFile);
   const weighted = available.flatMap((step) =>
-    Array.from(
-      { length: FILLER_WEIGHTS[step.file] || 1 },
-      () => step,
-    ),
+    Array.from({ length: FILLER_WEIGHTS[step.file] || 1 }, () => step)
   );
   const shuffled = [...weighted].sort(() => Math.random() - 0.5);
   const picked = [];
@@ -103,8 +100,8 @@ function parseArgs() {
   const args = process.argv.slice(2);
   const parsed = {};
   for (let i = 0; i < args.length; i += 1) {
-    if (args[i].startsWith("--")) {
-      parsed[args[i].replace("--", "")] = args[i + 1] || true;
+    if (args[i].startsWith('--')) {
+      parsed[args[i].replace('--', '')] = args[i + 1] || true;
       i += 1;
     }
   }
@@ -135,7 +132,7 @@ async function runOneProfile(profileUuid, mainTaskKey, taskData, profileIndex) {
         console.log(`${tag} Session started: ${runSessionId}`);
         session = await openProfile(profileUuid);
         page =
-          session.context.pages().find((p) => p.url() !== "about:blank") ||
+          session.context.pages().find((p) => p.url() !== 'about:blank') ||
           session.context.pages()[0] ||
           (await session.context.newPage());
 
@@ -147,17 +144,17 @@ async function runOneProfile(profileUuid, mainTaskKey, taskData, profileIndex) {
         });
         instrumentPage(page);
 
-        console.log(`${tag} Attached to: ${page.url() || "about:blank"}`);
+        console.log(`${tag} Attached to: ${page.url() || 'about:blank'}`);
 
         // derive the filename used to exclude this task from fillers
-        const mainTaskFile = mainTaskKey.replace(/_/g, "-") + ".js";
+        const mainTaskFile = mainTaskKey.replace(/_/g, '-') + '.js';
 
         if (!taskData.isTestMode) {
           const beforeSteps = pickRandomFillers(mainTaskFile, randomInt(1, 2));
           for (const step of beforeSteps) {
             console.log(`${tag} Filler: ${step.label}`);
             await runWithErrorScreenshot(page, `filler-before-${step.label}`, () =>
-              step.fn(page, null),
+              step.fn(page, null)
             );
             await sleep(randomInt(3000, 8000));
           }
@@ -167,7 +164,7 @@ async function runOneProfile(profileUuid, mainTaskKey, taskData, profileIndex) {
 
         console.log(`${tag} Main task: ${mainTask.label}`);
         await runWithErrorScreenshot(page, `main-task-${mainTaskKey}`, () =>
-          mainTask.module(page, taskData),
+          mainTask.module(page, taskData)
         );
         await sleep(randomInt(3000, 8000));
 
@@ -176,7 +173,7 @@ async function runOneProfile(profileUuid, mainTaskKey, taskData, profileIndex) {
           for (const step of afterSteps) {
             console.log(`${tag} Filler: ${step.label}`);
             await runWithErrorScreenshot(page, `filler-after-${step.label}`, () =>
-              step.fn(page, null),
+              step.fn(page, null)
             );
             await sleep(randomInt(3000, 8000));
           }
@@ -186,13 +183,13 @@ async function runOneProfile(profileUuid, mainTaskKey, taskData, profileIndex) {
 
         console.log(`${tag} Done.`);
       } catch (err) {
-        await captureIssueScreenshot(page, "run-one-profile-error", err);
+        await captureIssueScreenshot(page, 'run-one-profile-error', err);
         console.error(`${tag} Error: ${err.message}`);
       } finally {
         await closeProfile(profileUuid, session && session.browser);
         console.log(`${tag} Profile closed.`);
       }
-    },
+    }
   );
 }
 
@@ -201,23 +198,22 @@ async function runOneProfile(profileUuid, mainTaskKey, taskData, profileIndex) {
 async function main() {
   const args = parseArgs();
 
-  const uuids = (args.uuids || "").split(",").filter(Boolean);
-  const mainTaskKey = args.task || "homepage_interaction";
-  const maxConcurrent = parseInt(args.concurrency || "5", 10);
+  const uuids = (args.uuids || '').split(',').filter(Boolean);
+  const mainTaskKey = args.task || 'homepage_interaction';
+  const maxConcurrent = parseInt(args.concurrency || '5', 10);
   const isTestMode =
-    String(args["test-mode"] || process.env.TEST_MODE || "").toLowerCase() ===
-    "true";
+    String(args['test-mode'] || process.env.TEST_MODE || '').toLowerCase() === 'true';
 
   if (uuids.length === 0) {
     console.error(
-      "Usage: node multi-profile.js --uuids uuid1,uuid2,... --task <task> [--url <url>]",
+      'Usage: node multi-profile.js --uuids uuid1,uuid2,... --task <task> [--url <url>]'
     );
     process.exit(1);
   }
 
   if (!MAIN_TASKS[mainTaskKey]) {
     console.error(
-      `Unknown task: "${mainTaskKey}". Available: ${Object.keys(MAIN_TASKS).join(", ")}`,
+      `Unknown task: "${mainTaskKey}". Available: ${Object.keys(MAIN_TASKS).join(', ')}`
     );
     process.exit(1);
   }
@@ -231,7 +227,7 @@ async function main() {
   console.log(`[multi] Profiles: ${uuids.length}`);
   console.log(`[multi] Task: ${mainTaskKey}`);
   console.log(`[multi] Max concurrent: ${maxConcurrent}`);
-  console.log(`[multi] Test mode: ${isTestMode ? "enabled" : "disabled"}`);
+  console.log(`[multi] Test mode: ${isTestMode ? 'enabled' : 'disabled'}`);
   if (taskData.url) console.log(`[multi] URL: ${taskData.url}`);
 
   // staggered parallel execution with concurrency limit
@@ -250,7 +246,7 @@ async function main() {
     if (currentIndex > 0) {
       const staggerMs = randomInt(5000, 15000);
       console.log(
-        `[multi] Staggering profile ${currentIndex + 1} by ${(staggerMs / 1000).toFixed(1)}s...`,
+        `[multi] Staggering profile ${currentIndex + 1} by ${(staggerMs / 1000).toFixed(1)}s...`
       );
       await sleep(staggerMs);
     }
@@ -275,10 +271,10 @@ async function main() {
     await Promise.race(running);
   }
 
-  console.log("\n[multi] All profiles complete.");
+  console.log('\n[multi] All profiles complete.');
 }
 
 main().catch((err) => {
-  console.error("Fatal:", err);
+  console.error('Fatal:', err);
   process.exitCode = 1;
 });

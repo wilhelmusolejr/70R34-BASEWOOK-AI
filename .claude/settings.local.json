@@ -21,7 +21,12 @@
       "Bash(git check-ignore *)",
       "WebSearch",
       "WebFetch(domain:docs.hidemium.io)",
-      "WebFetch(domain:documenter.getpostman.com)"
+      "WebFetch(domain:documenter.getpostman.com)",
+      "WebFetch(domain:multilogin.com)",
+      "WebFetch(domain:help.multilogin.com)",
+      "WebFetch(domain:docs.multilogin.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(Select-String -Pattern \"partial_update|profile/{id}|profile/p/|WINNER|All profile-update\" -Context 0,5)"
     ]
   }
 }

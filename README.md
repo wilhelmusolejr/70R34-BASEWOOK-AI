@@ -43,13 +43,13 @@ HTTP POST /execute  →  runner.js (recursive step walker)
 
 ## Prerequisites
 
-| Requirement | Notes |
-|---|---|
-| **Node.js 18+** | [nodejs.org](https://nodejs.org) |
-| **Hidemium** | Must be installed and running on the same machine. [hidemium.io](https://hidemium.io) |
-| **Hidemium profiles** | Profiles must exist and be **logged into BASEWOOK** before running tasks |
-| **Hidemium API token** | Settings → Generate token inside Hidemium |
-| **GitHub Models token** *(optional)* | Only needed for AI-generated share messages |
+| Requirement                          | Notes                                                                                 |
+| ------------------------------------ | ------------------------------------------------------------------------------------- |
+| **Node.js 18+**                      | [nodejs.org](https://nodejs.org)                                                      |
+| **Hidemium**                         | Must be installed and running on the same machine. [hidemium.io](https://hidemium.io) |
+| **Hidemium profiles**                | Profiles must exist and be **logged into BASEWOOK** before running tasks              |
+| **Hidemium API token**               | Settings → Generate token inside Hidemium                                             |
+| **GitHub Models token** _(optional)_ | Only needed for AI-generated share messages                                           |
 
 ---
 
@@ -73,7 +73,7 @@ npm install
 Open `utils/browserManager.js` and replace the token on line 11:
 
 ```js
-const API_TOKEN = "YOUR_HIDEMIUM_TOKEN_HERE";
+const API_TOKEN = 'YOUR_HIDEMIUM_TOKEN_HERE';
 ```
 
 ### 4. Add your Hidemium profile IDs
@@ -90,7 +90,7 @@ Edit `config/profiles.json`. Add one entry per BASEWOOK account:
 > **How to find the UUID:** Open Hidemium → right-click a profile → Copy UUID.
 > The CDP port is assigned dynamically by Hidemium when a profile opens — you do not need to specify it here.
 
-### 5. Create the `.env` file *(optional — only for AI share messages)*
+### 5. Create the `.env` file _(optional — only for AI share messages)_
 
 ```bash
 cp .env.example .env   # or create manually
@@ -187,8 +187,8 @@ No server needed. Output goes directly to the terminal.
 ```json
 {
   "type": "action_name",
-  "params": { },
-  "steps": [ ]
+  "params": {},
+  "steps": []
 }
 ```
 
@@ -198,10 +198,10 @@ No server needed. Output goes directly to the terminal.
 
 ### Two kinds of actions
 
-| Kind | What it does | Examples |
-|---|---|---|
-| **Navigator** | Changes what page the browser shows | `visit_profile`, `homepage_interaction` |
-| **Leaf** | Acts on whatever page is currently open | `add_friend`, `like_posts`, `scroll` |
+| Kind          | What it does                            | Examples                                |
+| ------------- | --------------------------------------- | --------------------------------------- |
+| **Navigator** | Changes what page the browser shows     | `visit_profile`, `homepage_interaction` |
+| **Leaf**      | Acts on whatever page is currently open | `add_friend`, `like_posts`, `scroll`    |
 
 ### Workflow example — visit profile, add friend, then go home and like posts
 
@@ -213,9 +213,7 @@ No server needed. Output goes directly to the terminal.
     {
       "type": "visit_profile",
       "params": { "url": "https://www.basewook.com/john.smith" },
-      "steps": [
-        { "type": "add_friend" }
-      ]
+      "steps": [{ "type": "add_friend" }]
     },
     {
       "type": "homepage_interaction",
@@ -236,33 +234,33 @@ Each of the 5 browsers runs this entire sequence independently and in parallel.
 
 ### Navigators
 
-| Action | Params | Description |
-|---|---|---|
-| `homepage_interaction` | *(none)* | Navigate to BASEWOOK home feed |
-| `visit_profile` | `url` (string) | Navigate to a profile page |
+| Action                 | Params         | Description                    |
+| ---------------------- | -------------- | ------------------------------ |
+| `homepage_interaction` | _(none)_       | Navigate to BASEWOOK home feed |
+| `visit_profile`        | `url` (string) | Navigate to a profile page     |
 
 ### Feed Actions
 
-| Action | Params | Description |
-|---|---|---|
-| `scroll` | `duration` (seconds, default 30), `direction` (`down`/`up`) | Scroll the current feed |
-| `like_posts` | `count` (default 1) | Like N posts on the current feed |
+| Action        | Params                                                           | Description                                                                                |
+| ------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `scroll`      | `duration` (seconds, default 30), `direction` (`down`/`up`)      | Scroll the current feed                                                                    |
+| `like_posts`  | `count` (default 1)                                              | Like N posts on the current feed                                                           |
 | `share_posts` | `count` (default 1), `userIdentity` (string), `message` (string) | Share N posts. `userIdentity` triggers AI message generation; `message` is static override |
-| `share_post` | `url` (string), `userIdentity` (string), `message` (string) | Share a specific post by URL |
+| `share_post`  | `url` (string), `userIdentity` (string), `message` (string)      | Share a specific post by URL                                                               |
 
 ### Profile Actions
 
-| Action | Params | Description |
-|---|---|---|
-| `add_friend` | *(none)* | Send a friend request on the current profile page |
-| `setup_about` | See CLAUDE.md | Fill all About sections (bio, city, work, education, etc.) |
-| `setup_avatar` | `photoUrl` (string), `description` (string, optional) | Upload a profile picture from URL |
-| `setup_cover` | `photoUrl` (string) | Upload a cover photo from URL |
+| Action         | Params                                                | Description                                                |
+| -------------- | ----------------------------------------------------- | ---------------------------------------------------------- |
+| `add_friend`   | _(none)_                                              | Send a friend request on the current profile page          |
+| `setup_about`  | See CLAUDE.md                                         | Fill all About sections (bio, city, work, education, etc.) |
+| `setup_avatar` | `photoUrl` (string), `description` (string, optional) | Upload a profile picture from URL                          |
+| `setup_cover`  | `photoUrl` (string)                                   | Upload a cover photo from URL                              |
 
 ### Utility
 
-| Action | Params | Description |
-|---|---|---|
+| Action | Params          | Description                |
+| ------ | --------------- | -------------------------- |
 | `wait` | `duration` (ms) | Pause for a fixed duration |
 
 ---
@@ -303,12 +301,12 @@ Each of the 5 browsers runs this entire sequence independently and in parallel.
 
 ## Environment Variables
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `GITHUB_MODELS_TOKEN` | No | — | GitHub PAT for AI share message generation |
-| `GITHUB_MODELS_MODEL` | No | `openai/gpt-4.1` | Model to use for generation |
-| `GITHUB_MODELS_BASE_URL` | No | `https://models.github.ai/inference/chat/completions` | API endpoint |
-| `GITHUB_MODELS_API_VERSION` | No | `2026-03-10` | API version header |
+| Variable                    | Required | Default                                               | Description                                |
+| --------------------------- | -------- | ----------------------------------------------------- | ------------------------------------------ |
+| `GITHUB_MODELS_TOKEN`       | No       | —                                                     | GitHub PAT for AI share message generation |
+| `GITHUB_MODELS_MODEL`       | No       | `openai/gpt-4.1`                                      | Model to use for generation                |
+| `GITHUB_MODELS_BASE_URL`    | No       | `https://models.github.ai/inference/chat/completions` | API endpoint                               |
+| `GITHUB_MODELS_API_VERSION` | No       | `2026-03-10`                                          | API version header                         |
 
 ---
 
