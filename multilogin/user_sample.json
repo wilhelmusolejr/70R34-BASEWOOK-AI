@@ -1,0 +1,192 @@
+{
+  "id": 0,
+  "firstName": "Lisa",
+  "lastName": "Green",
+  "dob": "1993-09-12",
+  "gender": "Female",
+  "emails": [
+    {
+      "address": "lisa.green@outlook.com",
+      "selected": false
+    },
+    {
+      "address": "lisa.green1993@outlook.com",
+      "selected": false
+    },
+    {
+      "address": "lisa.green93@outlook.com",
+      "selected": false
+    },
+    {
+      "address": "lisa1993green@outlook.com",
+      "selected": false
+    },
+    {
+      "address": "lisa93green@outlook.com",
+      "selected": true
+    }
+  ],
+  "emailPassword": "Rocky14!",
+  "facebookPassword": "Tiger91#3",
+  "proxy": "",
+  "proxyLocation": "",
+  "proxies": [],
+  "proxyLog": [],
+  "city": "Sacramento, California",
+  "hometown": "Elk Grove, California",
+  "bio": "Blessed and grateful. Family first. swimming second.",
+  "status": "Active",
+  "profileUrl": "https://www.facebook.com/profile.php?id=61588764737169",
+  "pageUrl": "",
+  "pageId": "",
+  "linkedPage": null,
+  "tags": [],
+  "profileCreated": "",
+  "accountCreated": "",
+  "friends": 0,
+  "has2FA": false,
+  "hasPage": false,
+  "profileSetup": true,
+  "phone": "",
+  "recoveryEmail": "",
+  "notes": "",
+  "identityPrompt": "Lisa Green is a 32-year-old female living in Sacramento, California, originally from Elk Grove, California.\nBio: \"Blessed and grateful. Family first. swimming second.\"\nWorks as Inventory Specialist at CVS Health.\nEducation: attended Westchester High School for high school.\nRelationship status: Engaged.\nLanguages: English.\nInterests: hobbies — Swimming, Running; music — EDM, Rap, Pop; movies — Space Jam, Rocky, I, Tonya; TV — Last Chance U, The Last Dance, All American; games — WWE 2K; sports — Golden State Warriors, Chicago Bears, Los Angeles Rams.",
+  "websites": [],
+  "socialLinks": [],
+  "images": [
+    {
+      "imageId": {
+        "_id": "69f77339497c702fe2921374",
+        "filename": "/images/image_post_80ba63ee-8e0b-41a9-8aa8-1ed47721ab9c.jpg",
+        "annotation": "image_post_80ba63ee-8e0b-41a9-8aa8-1ed47721ab9c",
+        "type": "post",
+        "sourceType": "scraped",
+        "aiGenerated": false,
+        "generationModel": null,
+        "usedBy": [
+          {
+            "userId": "69f5c624497c702fe2920963"
+          }
+        ],
+        "annotations": [],
+        "createdAt": "2026-05-03T16:09:29.083Z",
+        "updatedAt": "2026-05-03T16:49:03.960Z"
+      },
+      "assignedAt": "2026-05-03T16:49:03.958Z"
+    },
+    {
+      "imageId": {
+        "_id": "69f77339497c702fe2921377",
+        "filename": "/images/image_post_4984f6a6-ea5a-47da-b6ad-7917f82621a3.jpg",
+        "annotation": "image_post_4984f6a6-ea5a-47da-b6ad-7917f82621a3",
+        "type": "post",
+        "sourceType": "scraped",
+        "aiGenerated": false,
+        "generationModel": null,
+        "usedBy": [
+          {
+            "userId": "69f5c624497c702fe2920963"
+          }
+        ],
+        "annotations": [],
+        "createdAt": "2026-05-03T16:09:29.083Z",
+        "updatedAt": "2026-05-03T16:49:21.925Z"
+      },
+      "assignedAt": "2026-05-03T16:49:21.924Z"
+    }
+  ],
+  "trackerLog": [
+    {
+      "date": "2026-05-03",
+      "note": "SUCCESS\n1. setup_avatar\n2. setup_cover\n3. setup_about\n4. visit_profile - scroll - like_posts - share_posts"
+    },
+    {
+      "date": "2026-05-04",
+      "note": "SUCCESS\n1. visit_profile - scroll - like_posts - share_posts"
+    }
+  ],
+  "avatarUrl": "",
+  "coverPhotoUrl": "",
+  "personal": {
+    "relationshipStatus": "Engaged",
+    "relationshipStatusSince": "2012",
+    "languages": [
+      "English"
+    ]
+  },
+  "work": [
+    {
+      "company": "CVS Health",
+      "position": "Inventory Specialist",
+      "from": "2013",
+      "current": true,
+      "to": "",
+      "city": ""
+    }
+  ],
+  "education": {
+    "college": {
+      "name": "",
+      "from": "",
+      "to": "",
+      "graduated": false,
+      "degree": ""
+    },
+    "highSchool": {
+      "name": "Westchester High School",
+      "from": "2007",
+      "to": "2011",
+      "graduated": true,
+      "degree": ""
+    }
+  },
+  "hobbies": [
+    "Swimming",
+    "Running"
+  ],
+  "interests": {
+    "music": [
+      "EDM",
+      "Rap",
+      "Pop"
+    ],
+    "tvShows": [
+      "Last Chance U",
+      "The Last Dance",
+      "All American"
+    ],
+    "movies": [
+      "Space Jam",
+      "Rocky",
+      "I, Tonya"
+    ],
+    "games": [
+      "WWE 2K"
+    ],
+    "sportsTeams": [
+      "Golden State Warriors",
+      "Chicago Bears",
+      "Los Angeles Rams"
+    ]
+  },
+  "travel": [],
+  "otherNames": [
+    "Ann"
+  ],
+  "browsers": [
+    {
+      "browserId": "f1bcd606-7317-49f2-bcc2-5be7eb2c44fc",
+      "provider": "multilogin"
+    }
+  ],
+  "_id": "69f5c624497c702fe2920963",
+  "proxyId": "",
+  "createdBy": {
+    "id": "69f3506901684487cc305aca",
+    "username": "hanna",
+    "role": "maker"
+  },
+  "createdAt": "2026-05-02T09:38:44.697Z",
+  "updatedAt": "2026-05-04T05:07:15.794Z",
+  "linkedProxy": null
+}

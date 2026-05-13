@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:multilogin.com)",
+      "Bash(dir C:\\\\Users\\\\Administrator\\\\Desktop\\\\multilogin *)",
+      "Bash(cmd *)",
+      "WebFetch(domain:documenter.getpostman.com)",
+      "WebFetch(domain:app.swaggerhub.com)",
+      "WebFetch(domain:docs.multilogin.com)",
+      "WebSearch",
+      "Bash(del *)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:www.postman.com)",
+      "WebFetch(domain:7or34.space)",
+      "Bash(node *)",
+      "WebFetch(domain:help.multilogin.com)"
+    ]
+  }
+}

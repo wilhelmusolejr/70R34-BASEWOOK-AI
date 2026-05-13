@@ -1,0 +1,14 @@
+{
+  "name": "multilogin-automation",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "create": "node create_profiles.js",
+    "folders": "node list_folders.js",
+    "cores": "node list_cores.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
