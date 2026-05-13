@@ -1,0 +1,22 @@
+{
+  "taskId": "setup-engage-share-connect",
+  "profiles": ["69fd22161e49eec688fd02ff","69fd432b1e49eec688fd045f","69fd72f01e49eec688fd0551","69fd72f01e49eec688fd0552","69fd72f01e49eec688fd0553","69fd72f01e49eec688fd0554","69fd72f01e49eec688fd0555","6a002c3caaa538982f47769b","6a002c3caaa538982f47769c","6a002c3caaa538982f47769d","6a002c3caaa538982f47769e","6a0146ae9ceed638ddd6a35b","6a0146ae9ceed638ddd6a35c","6a0146ae9ceed638ddd6a35e","6a0146ae9ceed638ddd6a35f","6a0146ae9ceed638ddd6a360","6a0146ae9ceed638ddd6a361","6a0161869ceed638ddd6a840","6a0161869ceed638ddd6a841","6a0161869ceed638ddd6a842","6a0161869ceed638ddd6a844","6a0161869ceed638ddd6a846","6a0161869ceed638ddd6a847"],
+  "concurrency": 3,
+  "blockMedia": true,
+  "steps": [
+    { "type": "facebook_signup" },
+    { "type": "wait", "params": { "duration": 5 } },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "wait", "params": { "min": 8, "max": 15 } },
+        { "type": "like_posts", "params": { "count": 2 } },
+        { "type": "share_posts", "params": { "count": 1 } },
+        { "type": "wait", "params": { "min": 30, "max": 50 } }
+      ]
+    }
+    
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "taskId": "homepage-connect-loop-then-outlook",
+  "profiles": ["69fa99acd7f59db2c21ae86c","69fae84ad7f59db2c21aed26","69fb09bad7f59db2c21aeed5","69fca17c1e49eec688fcfc05","69fca17c1e49eec688fcfc06","69fca17c1e49eec688fcfc07","69fca17c1e49eec688fcfc08","69fca5681e49eec688fcfc6c","69fca5681e49eec688fcfc6d","69fca9971e49eec688fcfd11","69fd12241e49eec688fd02c2","69fd22161e49eec688fd02fd","69fd22161e49eec688fd02fe","69fd22161e49eec688fd02ff","69fd22161e49eec688fd0301","69fd22161e49eec688fd0304","69fd22161e49eec688fd0305","69fd22161e49eec688fd0306","69fd3f371e49eec688fd03fb","69fd3f371e49eec688fd03fd","69fd3f371e49eec688fd03fe","69fd3f371e49eec688fd03ff","69fd432b1e49eec688fd045d","69fd432b1e49eec688fd045e","69fd432b1e49eec688fd045f","69fd56b51e49eec688fd04c7","69fd56b51e49eec688fd04c8","69fd63801e49eec688fd0507","69fd63801e49eec688fd0508"],
+  "concurrency": 3,
+  "blockMedia": true,
+  "steps": [
+    { "type": "facebook_signup" },
+    { "type": "wait", "params": { "duration": 10 } }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "taskId": "new-account-info-accept-connect",
+  "profiles": ["69fae84ad7f59db2c21aed26","69fd72f01e49eec688fd0556","6a01899c9ceed638ddd6abc3","6a01899c9ceed638ddd6abc4","6a01899c9ceed638ddd6abc5","6a01899c9ceed638ddd6abc6","6a01fcb69ceed638ddd6c3e8","6a01fcb69ceed638ddd6c3ea","6a0204629ceed638ddd6c512","6a0204629ceed638ddd6c513","6a0204629ceed638ddd6c514","6a0204629ceed638ddd6c516","6a02943a9ceed638ddd6d90d"],
+  "concurrency": 3,
+  "blockMedia": true,
+  "steps": [
+    { "type": "setup_about" },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "wait", "params": { "min": 8, "max": 15 } },
+        { "type": "like_posts", "params": { "count": 2 } },
+        { "type": "share_posts", "params": { "count": 1 } },
+        { "type": "wait", "params": { "min": 30, "max": 50 } }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 10, "max": 15 } },
+
+    { "type": "accept_loop" },
+
+    { "type": "wait", "params": { "min": 10, "max": 15 } },
+
+    {
+      "type": "connect_loop",
+      "params": { "pool": "users", "count": 5 }
+    }
+  ]
+}
