@@ -10,9 +10,21 @@ const actionSchemas = {
     hasChildren: true,
   },
   scroll: {
-    description: 'Scroll the current page for a duration with human-like behavior',
+    description:
+      'Scroll the current page for a duration with human-like behavior. Provide `duration` for a fixed scroll, or `min`+`max` for a random duration in that range. `duration` wins if both are set. Defaults to 10s.',
     params: {
-      duration: { type: 'number', default: 10, description: 'Seconds to scroll' },
+      duration: {
+        type: 'number',
+        description: 'Fixed seconds to scroll. Wins over min/max when set.',
+      },
+      min: {
+        type: 'number',
+        description: 'Lower bound (seconds) for random scroll. Pair with max.',
+      },
+      max: {
+        type: 'number',
+        description: 'Upper bound (seconds) for random scroll. Pair with min.',
+      },
       direction: {
         type: 'string',
         default: 'down',
@@ -412,6 +424,69 @@ const actionSchemas = {
         default: '',
         description:
           'Override POST endpoint. Defaults to IP_LOG_ENDPOINT env, then USER_API_BASE_URL + /api/profiles/:userId/ip-records.',
+      },
+    },
+    hasChildren: false,
+  },
+  outlook_login: {
+    description:
+      'Leaf: sign into outlook.com using the email + password on the user record. Navigates to outlook.live.com (single tab — Microsoft auth handles the redirect), fills email/password, and walks every post-login prompt (passkey, "Stay signed in?", "Protect your account") until the inbox loads. Credentials auto-injected from user.emails[selected].address and user.emailPassword.',
+    params: {
+      email: {
+        type: 'string',
+        default: '',
+        description:
+          'Outlook/Microsoft account email. Auto-injected from user.emails (selected, or [0]) when omitted.',
+      },
+      password: {
+        type: 'string',
+        default: '',
+        description: 'Outlook/Microsoft account password. Auto-injected from user.emailPassword when omitted.',
+      },
+    },
+    hasChildren: false,
+  },
+  facebook_signup: {
+    description:
+      'Leaf: sign up for a new Facebook account from the logged-out homepage. Navigates to facebook.com if not already there, clicks "Create new account", fills First/Last name, picks Month/Day/Year/Gender, fills email + password, clicks Submit, then waits for the Home button (href="/") to appear (up to 5 min) as the success signal. After login, navigates to /settings/bundled and walks the post-signup Public → Next → Confirm acknowledgment. On success, PATCHes the user record with status="Need Setup" so the next batch picks the profile up for setup_about / setup_avatar / setup_cover. All credentials auto-injected from the user record.',
+    params: {
+      userId: {
+        type: 'string',
+        default: '',
+        description:
+          'User ID for the post-signup status PATCH. Auto-injected from user._id when omitted.',
+      },
+      firstName: {
+        type: 'string',
+        default: '',
+        description: 'First name. Auto-injected from user.firstName when omitted.',
+      },
+      lastName: {
+        type: 'string',
+        default: '',
+        description: 'Last name. Auto-injected from user.lastName when omitted.',
+      },
+      birthdayDate: {
+        type: 'string',
+        default: '',
+        description:
+          'Date of birth. Auto-injected from user.birthdayDate (fallback: user.dob) when omitted.',
+      },
+      gender: {
+        type: 'string',
+        default: '',
+        description: 'Gender. Auto-injected from user.gender when omitted.',
+      },
+      email: {
+        type: 'string',
+        default: '',
+        description:
+          'Email address. Auto-injected from user.emails (selected, or [0]) when omitted.',
+      },
+      password: {
+        type: 'string',
+        default: '',
+        description: 'Facebook password. Auto-injected from user.facebookPassword when omitted.',
       },
     },
     hasChildren: false,

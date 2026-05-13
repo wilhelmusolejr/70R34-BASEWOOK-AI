@@ -110,6 +110,8 @@ const handlers = {
   connect: require('./actions/connect'),
   connect_loop: require('./actions/connect_loop'),
   accept_loop: require('./actions/accept_loop'),
+  outlook_login: require('./actions/outlook_login'),
+  facebook_signup: require('./actions/facebook_signup'),
   wait: require('./actions/wait'),
 };
 
@@ -302,6 +304,32 @@ function injectUserParams(steps, user) {
       s.params = {
         ...(step.params || {}),
         userIdentity: user.identityPrompt || '',
+      };
+    }
+
+    if (step.type === 'outlook_login') {
+      const selectedEmail =
+        user.emails?.find((e) => e.selected)?.address || user.emails?.[0]?.address || '';
+      s.params = {
+        ...(step.params || {}),
+        email: step.params?.email || selectedEmail,
+        password: step.params?.password || user.emailPassword || '',
+      };
+    }
+
+    if (step.type === 'facebook_signup') {
+      const selectedEmail =
+        user.emails?.find((e) => e.selected)?.address || user.emails?.[0]?.address || '';
+      s.params = {
+        ...(step.params || {}),
+        userId: step.params?.userId || user._id || user.id || '',
+        firstName: step.params?.firstName || user.firstName || '',
+        lastName: step.params?.lastName || user.lastName || '',
+        birthdayDate:
+          step.params?.birthdayDate || user.birthdayDate || user.dob || '',
+        gender: step.params?.gender || user.gender || '',
+        email: step.params?.email || selectedEmail,
+        password: step.params?.password || user.facebookPassword || '',
       };
     }
 
