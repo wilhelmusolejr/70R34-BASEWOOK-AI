@@ -383,6 +383,12 @@ const actionSchemas = {
         description:
           'Sender profile ID for the friend-request record posted on every successful Add friend press. Auto-injected from user._id when omitted.',
       },
+      maxFriends: {
+        type: 'number',
+        default: 30,
+        description:
+          'Only used when pool="users". Filters candidates to profiles whose recorded friends count is below this threshold. Profiles with no recorded count are still included (their count gets PATCHed during the visit).',
+      },
     },
     hasChildren: false,
   },
@@ -482,6 +488,69 @@ const actionSchemas = {
         default: '',
         description:
           'Email address. Auto-injected from user.emails (selected, or [0]) when omitted.',
+      },
+      password: {
+        type: 'string',
+        default: '',
+        description: 'Facebook password. Auto-injected from user.facebookPassword when omitted.',
+      },
+    },
+    hasChildren: false,
+  },
+  ensure_login: {
+    description:
+      'Leaf: re-login when the session has been logged out. Detection signals: URL match (/login), visible input[name="pass"], or profile probe via user.profileUrl (if final URL contains /people/ or pfbid, session is browsing as guest). Re-auth navigates to https://web.facebook.com/reg/?entry_point=login&next= and re-runs the signup form fill — facebook_signup is called with skipPostSetup=true so it returns once the home href appears (no /settings/bundled walk, no status PATCH). Runner auto-invokes this at session start when isLoggedOut() returns true. All signup params auto-injected from the user record.',
+    params: {
+      firstName: {
+        type: 'string',
+        default: '',
+        description: 'First name. Auto-injected from user.firstName when omitted.',
+      },
+      lastName: {
+        type: 'string',
+        default: '',
+        description: 'Last name. Auto-injected from user.lastName when omitted.',
+      },
+      birthdayDate: {
+        type: 'string',
+        default: '',
+        description:
+          'Date of birth. Auto-injected from user.birthdayDate (fallback: user.dob) when omitted.',
+      },
+      gender: {
+        type: 'string',
+        default: '',
+        description: 'Gender. Auto-injected from user.gender when omitted.',
+      },
+      email: {
+        type: 'string',
+        default: '',
+        description:
+          'Facebook account email. Auto-injected from user.emails (selected, or [0]) when omitted.',
+      },
+      password: {
+        type: 'string',
+        default: '',
+        description: 'Facebook password. Auto-injected from user.facebookPassword when omitted.',
+      },
+      skipPostSetup: {
+        type: 'boolean',
+        default: false,
+        description:
+          'When true, return as soon as the home href appears — skip the /settings/bundled walk and the status PATCH. Used by ensure_login when re-running the signup form purely as a re-login mechanism.',
+      },
+    },
+    hasChildren: false,
+  },
+  facebook_login: {
+    description:
+      'Leaf: sign into an existing Facebook account from the logged-out homepage. Fills #login_form (email + password), presses Enter, dismisses the "Save your login info?" prompt, and waits for the Home button (href="/") to confirm. Credentials auto-injected from user.emails (selected, or [0]) and user.facebookPassword.',
+    params: {
+      email: {
+        type: 'string',
+        default: '',
+        description:
+          'Facebook account email. Auto-injected from user.emails (selected, or [0]) when omitted.',
       },
       password: {
         type: 'string',
