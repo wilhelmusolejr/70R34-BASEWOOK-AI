@@ -26,7 +26,13 @@
       "WebFetch(domain:help.multilogin.com)",
       "WebFetch(domain:docs.multilogin.com)",
       "WebFetch(domain:github.com)",
-      "Bash(Select-String -Pattern \"partial_update|profile/{id}|profile/p/|WINNER|All profile-update\" -Context 0,5)"
+      "Bash(Select-String -Pattern \"partial_update|profile/{id}|profile/p/|WINNER|All profile-update\" -Context 0,5)",
+      "Bash(dir *)",
+      "Read(//c/Users/hinatardp/Desktop/70R34/**)",
+      "Read(//c/Users/hinatardp/Desktop/70R34/server/**)",
+      "PowerShell(if \\(Test-Path \"C:\\\\Users\\\\hinatardp\\\\Desktop\\\\70R34-BASEWOOK-AI\\\\logs\"\\) { Get-ChildItem \"C:\\\\Users\\\\hinatardp\\\\Desktop\\\\70R34-BASEWOOK-AI\\\\logs\" | Sort-Object LastWriteTime -Descending | Select-Object -First 10 Name, LastWriteTime, @{N='SizeKB';E={[Math]::Round\\($_.Length/1KB,1\\)}} } else { \"logs dir does not exist\" })",
+      "PowerShell(Get-EventLog *)",
+      "Bash(git config *)"
     ]
   }
 }
