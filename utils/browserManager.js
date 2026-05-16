@@ -14,8 +14,8 @@ const USER_API_BASE_URL = process.env.USER_API_BASE_URL;
 const BROWSER_PROVIDER = (process.env.BROWSER_PROVIDER || 'hidemium').toLowerCase();
 
 // Hidemium API configuration
-const API = 'http://127.0.0.1:2222';
-const API_TOKEN = 'pMgajBtFminGid3d6Wh0zFu2gPGx3BhUt3KX0S';
+const API = process.env.HIDEMIUM_API_URL || 'http://127.0.0.1:2222';
+const API_TOKEN = process.env.HIDEMIUM_API_TOKEN || 'pMgajBtFminGid3d6Wh0zFu2gPGx3BhUt3KX0S';
 
 const headers = { Authorization: `Bearer ${API_TOKEN}` };
 
@@ -29,6 +29,121 @@ let mlxToken = null;
 
 const OPEN_PROFILE_ATTEMPTS = 3;
 const OPEN_PROFILE_RETRY_MS = 5000;
+
+/**
+ * Stealth init script. Runs in EVERY page on EVERY new document load — before
+ * any site JS executes. Patches the signals that Chromium flips on when a CDP
+ * debugger attaches (Playwright over CDP triggers all of these), which is what
+ * Facebook's "third-party automation" detector reads.
+ *
+ * Defined as a string so it's evaluated fresh in each page context, with no
+ * closure leaks back to the Node side.
+ */
+const STEALTH_INIT_SCRIPT = `(() => {
+  try {
+    // 1. navigator.webdriver — THE signal. CDP attach flips this to true even
+    //    when Chrome was launched with --disable-blink-features=AutomationControlled.
+    Object.defineProperty(Navigator.prototype, 'webdriver', {
+      get: () => false,
+      configurable: true,
+      enumerable: true,
+    });
+
+    // 2. window.chrome — real Chrome has this object populated. Patched Chrome
+    //    under CDP can show it as undefined or stripped.
+    if (!window.chrome) {
+      window.chrome = {};
+    }
+    if (!window.chrome.runtime) {
+      window.chrome.runtime = {
+        OnInstalledReason: {},
+        OnRestartRequiredReason: {},
+        PlatformArch: {},
+        PlatformNaclArch: {},
+        PlatformOs: {},
+        RequestUpdateCheckStatus: {},
+      };
+    }
+    if (!window.chrome.app) {
+      window.chrome.app = {
+        InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+        RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+        isInstalled: false,
+      };
+    }
+
+    // 3. navigator.permissions.query for 'notifications' — well-known
+    //    automation tell. Headless/automated Chrome returns 'denied' here when
+    //    a real Chrome returns 'default' unless the user changed it.
+    if (navigator.permissions && navigator.permissions.query) {
+      const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+      navigator.permissions.query = (parameters) => {
+        if (parameters && parameters.name === 'notifications') {
+          return Promise.resolve({ state: Notification.permission, onchange: null });
+        }
+        return originalQuery(parameters);
+      };
+    }
+
+    // 4. navigator.plugins / mimeTypes — CDP-attached Chrome can report empty
+    //    arrays even when launched normally. Stuff in three plausible plugins
+    //    so .length > 0 and the shape matches real Chrome.
+    if (navigator.plugins && navigator.plugins.length === 0) {
+      const fakePlugin = (name, filename, description) => ({
+        name, filename, description, length: 1,
+      });
+      const plugins = [
+        fakePlugin('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+        fakePlugin('Chrome PDF Viewer', 'internal-pdf-viewer', ''),
+        fakePlugin('Chromium PDF Viewer', 'internal-pdf-viewer', ''),
+      ];
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => plugins,
+        configurable: true,
+      });
+    }
+
+    // 5. languages — empty array is a tell. Fall back to en-US,en if blank.
+    if (!navigator.languages || navigator.languages.length === 0) {
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+        configurable: true,
+      });
+    }
+  } catch (e) {
+    // Never throw — if patching fails, prefer being detected over crashing the page.
+  }
+})();`;
+
+/**
+ * Apply the stealth init script to a browser context and reload any existing
+ * page in it. addInitScript only runs on NEW document loads, so we reload the
+ * tab the profile opened with — otherwise the patches miss the first
+ * navigation FB sees.
+ */
+async function applyStealthInitScript(context) {
+  if (!context) return;
+  try {
+    await context.addInitScript(STEALTH_INIT_SCRIPT);
+  } catch (err) {
+    console.warn(`[browserManager] addInitScript failed (non-fatal): ${err.message}`);
+    return;
+  }
+
+  // Reload the existing page so the patch applies to whatever URL the profile
+  // launched on. about:blank doesn't need reloading.
+  for (const p of context.pages()) {
+    const url = p.url();
+    if (!url || url === 'about:blank' || url.startsWith('chrome://')) continue;
+    try {
+      await p.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (err) {
+      // Reload can fail mid-navigation; the init script still applies on the
+      // next goto.
+      console.warn(`[browserManager] Post-attach reload failed (non-fatal): ${err.message}`);
+    }
+  }
+}
 
 const PROXY_BATCH_SIZE = 10;
 const MAX_PROXY_BATCHES = 5;
@@ -409,6 +524,8 @@ async function openProfile(uuid) {
       let page = context.pages()[0];
       if (!page) page = await context.newPage();
 
+      await applyStealthInitScript(context);
+
       return { browser, context, page, port, profileId: uuid, provider: 'hidemium' };
     } catch (error) {
       lastError = error;
@@ -635,6 +752,8 @@ async function openMultiloginProfile(profileId) {
       let page = context.pages()[0];
       if (!page) page = await context.newPage();
 
+      await applyStealthInitScript(context);
+
       return { browser, context, page, port, profileId, provider: 'multilogin' };
     } catch (error) {
       lastError = error;
@@ -719,29 +838,103 @@ async function openBrowserForUser(userId) {
   return { ...session, user };
 }
 
+const BROWSER_CLOSE_TIMEOUT_MS = 10000;
+const STOP_REQUEST_TIMEOUT_MS = 15000;
+const STOP_RETRY_ATTEMPTS = 3;
+const STOP_RETRY_WAIT_MS = 2000;
+
+/**
+ * Close a Playwright browser with a hard timeout. CDP sockets can hang when
+ * the underlying agent (Hidemium / MLX) is unresponsive; without this, the
+ * whole task waits forever.
+ */
+async function closeBrowserWithTimeout(browser, profileId) {
+  if (!browser) return;
+  const timeout = new Promise((resolve) =>
+    setTimeout(() => {
+      console.warn(
+        `[browserManager] browser.close() timed out after ${BROWSER_CLOSE_TIMEOUT_MS}ms for ${profileId.slice(-8)} — abandoning CDP connection`
+      );
+      resolve();
+    }, BROWSER_CLOSE_TIMEOUT_MS)
+  );
+  await Promise.race([browser.close().catch(() => {}), timeout]);
+}
+
+async function stopMultiloginProfile(profileId) {
+  const url = `${MLX_LAUNCHER}/api/v1/profile/stop/p/${profileId}`;
+  let lastError;
+
+  for (let attempt = 1; attempt <= STOP_RETRY_ATTEMPTS; attempt++) {
+    try {
+      await axios.get(url, {
+        headers: await mlxAuthHeaders(),
+        timeout: STOP_REQUEST_TIMEOUT_MS,
+      });
+      return true;
+    } catch (err) {
+      lastError = err;
+
+      if (err.response?.status === 401) {
+        console.log('[browserManager] MLX stop got 401, re-signing in');
+        try {
+          await mlxSignIn();
+        } catch (signInErr) {
+          console.warn(
+            `[browserManager] MLX re-signin during stop failed: ${formatErrorDetails(signInErr)}`
+          );
+        }
+      }
+
+      console.warn(
+        `[browserManager] MLX stop failed for ${profileId.slice(-8)} (attempt ${attempt}/${STOP_RETRY_ATTEMPTS}): ${formatErrorDetails(err)}`
+      );
+
+      if (attempt < STOP_RETRY_ATTEMPTS) await sleep(STOP_RETRY_WAIT_MS);
+    }
+  }
+
+  console.error(
+    `[browserManager] MLX stop gave up for ${profileId.slice(-8)} — profile may still be running on the agent. Last error: ${formatErrorDetails(lastError)}`
+  );
+  return false;
+}
+
+async function stopHidemiumProfile(profileId) {
+  try {
+    await axios.get(`${API}/closeProfile?uuid=${profileId}`, {
+      headers,
+      timeout: STOP_REQUEST_TIMEOUT_MS,
+    });
+    return true;
+  } catch (err) {
+    console.warn(
+      `[browserManager] Hidemium close failed for ${profileId.slice(-8)}: ${formatErrorDetails(err)}`
+    );
+    return false;
+  }
+}
+
 /**
  * Close a profile, dispatching by provider stored on the session.
  */
 async function closeProfile(profileId, browser, provider) {
-  if (browser) await browser.close().catch(() => {});
+  await closeBrowserWithTimeout(browser, profileId);
 
   const resolvedProvider = (provider || BROWSER_PROVIDER || 'hidemium').toLowerCase();
 
-  if (resolvedProvider === 'multilogin') {
-    try {
-      await axios.get(`${MLX_LAUNCHER}/api/v1/profile/stop/p/${profileId}`, {
-        headers: await mlxAuthHeaders(),
-      });
-    } catch (err) {
-      console.warn(
-        `[browserManager] MLX stop failed for ${profileId.slice(-8)}: ${formatErrorDetails(err)}`
-      );
-    }
-  } else {
-    await axios.get(`${API}/closeProfile?uuid=${profileId}`, { headers }).catch(() => {});
-  }
+  const stopped =
+    resolvedProvider === 'multilogin'
+      ? await stopMultiloginProfile(profileId)
+      : await stopHidemiumProfile(profileId);
 
-  console.log(`[browserManager] Profile ${profileId.slice(-8)} closed (${resolvedProvider})`);
+  if (stopped) {
+    console.log(`[browserManager] Profile ${profileId.slice(-8)} closed (${resolvedProvider})`);
+  } else {
+    console.error(
+      `[browserManager] Profile ${profileId.slice(-8)} CLOSE FAILED (${resolvedProvider}) — likely leaked, check ${resolvedProvider === 'multilogin' ? 'MLX dashboard' : 'Hidemium app'} and kill manually if needed`
+    );
+  }
 }
 
 /**
