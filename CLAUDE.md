@@ -565,6 +565,34 @@ Constants: `STEP_RETRY_ATTEMPTS=3`, `RETRY_WAIT_MS=60000`.
 
 If not on facebook.com, `runBrowser` navigates first.
 
+### Auto re-login
+
+After the nav, `runBrowser` calls `isLoggedOut(page, { profileProbeUrl: user.profileUrl })`
+(from `ensure_login`). Three detection signals:
+
+1. URL match — current URL contains `/login` or `login.php`
+2. Password field — `input[name="pass"]` visible on the page
+3. Profile probe — if `user.profileUrl` is set, navigate to it; if FB rewrites
+   to `/people/...` or `/pfbid...`, the session is browsing as guest
+
+If logged out, `ensure_login` is invoked as a synthetic step before any task
+step runs. Re-auth strategy is **not** the login form — it navigates to
+`https://web.facebook.com/reg/?entry_point=login&next=` and re-runs the
+signup form fill via `facebook_signup` (called with `skipPostSetup: true` so
+it stops at the home href and skips the `/settings/bundled` walk + status
+PATCH). All signup params auto-injected from the user record.
+
+`facebook_signup` detects when the URL already contains `/reg/` and skips its
+own facebook.com nav + "Create new account" click — that's what makes the
+delegation work.
+
+Failures log `FAIL at ensure_login: ...` and short-circuit the profile with
+`noRetry`.
+
+**`ensure_login` vs `facebook_login`:** `ensure_login` is the auto session
+recovery (signup-as-login). `facebook_login` is a separate password-form
+login action that lives next to `facebook_signup`. Don't conflate them.
+
 ### Open-time tab cleanup
 
 Right after the page timeouts are set (before media-blocking), `runBrowser`
