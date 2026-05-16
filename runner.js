@@ -6,10 +6,11 @@
 require('dotenv').config();
 const axios = require('axios');
 const { launchBrowsers, closeBrowsers } = require('./utils/browserManager');
-const { fetchUser } = require('./utils/userApi');
+const { fetchUser, updateProfile } = require('./utils/userApi');
 const presets = require('./config/presets.json');
 const { buildPageAddress } = require('./utils/pageAddressData');
 const { runInSession, addStripId, buildDisplayName } = require('./utils/sessionLog');
+const { vaultLog } = require('./vault-log');
 
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
 const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
@@ -45,19 +46,29 @@ function describeStepChain(step) {
   return [step.type, ...nested].join(' - ');
 }
 
+function formatElapsed(ms) {
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const min = Math.floor(sec / 60);
+  const remSec = Math.round(sec % 60);
+  return `${min}m ${remSec}s`;
+}
+
 /**
  * Build the tracker-log note body.
- * On success: "SUCCESS\n1. <chain>\n2. <chain>..."
- * On failure: "FAIL at <type>: <message>\n1. <completed chain>..."
+ * On success: "SUCCESS (8m 44s)\n1. <chain>\n2. <chain>..."
+ * On failure: "FAIL at <type> (1m 27s): <message>\n1. <completed chain>..."
+ * Elapsed is omitted if elapsedMs is falsy.
  */
-function buildTrackerNote(completed, failure) {
+function buildTrackerNote(completed, failure, elapsedMs) {
   const lines = [];
+  const elapsed = elapsedMs ? ` (${formatElapsed(elapsedMs)})` : '';
   if (failure) {
     const where = failure.step?.type ? ` at ${failure.step.type}` : '';
     const msg = failure.error?.message || String(failure.error || 'unknown error');
-    lines.push(`FAIL${where}: ${msg}`);
+    lines.push(`FAIL${where}${elapsed}: ${msg}`);
   } else {
-    lines.push('SUCCESS');
+    lines.push(`SUCCESS${elapsed}`);
   }
   completed.forEach((chain, i) => lines.push(`${i + 1}. ${chain}`));
   return lines.join('\n');
@@ -112,8 +123,12 @@ const handlers = {
   accept_loop: require('./actions/accept_loop'),
   outlook_login: require('./actions/outlook_login'),
   facebook_signup: require('./actions/facebook_signup'),
+  facebook_login: require('./actions/facebook_login'),
+  ensure_login: require('./actions/ensure_login'),
   wait: require('./actions/wait'),
 };
+
+const { isLoggedOut } = require('./actions/ensure_login');
 
 const STEP_RETRY_ATTEMPTS = 3;
 const RETRY_WAIT_MS = 60000;
@@ -132,10 +147,17 @@ async function runWithRetry(fn, profileId, stepType, page) {
       // Mark the error so runBrowser can short-circuit the whole task.
       const url = page ? safePageUrl(page) : '';
       if (url.includes('checkpoint')) {
-        console.warn(`CHECKPOINT detected on ${stepType} (url=${url}) — aborting profile`);
-        err.checkpoint = true;
-        err.noRetry = true;
-        break;
+        // Soft "we suspect automated behavior" modal? Dismiss and let the
+        // retry continue on the (now clean) page. Only escalate to a hard
+        // checkpoint abort if Dismiss isn't there.
+        const dismissed = await tryDismissSoftCheckpoint(page);
+        if (!dismissed) {
+          console.warn(`CHECKPOINT detected on ${stepType} (url=${url}) — aborting profile`);
+          err.checkpoint = true;
+          err.noRetry = true;
+          break;
+        }
+        console.log(`Soft checkpoint dismissed during ${stepType} — letting retry continue`);
       }
 
       // Handlers can set err.noRetry = true to opt out of step-level retry
@@ -164,6 +186,45 @@ function safePageUrl(page) {
     return page.url();
   } catch (_) {
     return '';
+  }
+}
+
+/**
+ * Some "checkpoint" URLs are soft warnings — FB shows a modal saying
+ * "We suspect automated behavior on your account" with a Dismiss button.
+ * The account is NOT actually challenged; the modal is informational and
+ * the page underneath is functional. Click Dismiss and the URL clears.
+ *
+ * Returns true if a soft modal was found and dismissed, false otherwise.
+ * Requires both signals (the Dismiss button AND the warning text) so we
+ * don't dismiss something unrelated.
+ */
+async function tryDismissSoftCheckpoint(page) {
+  if (!page) return false;
+  const { humanClick, humanWait } = require('./utils/humanBehavior');
+
+  try {
+    const dismissBtn = page.locator('div[aria-label="Dismiss"][role="button"]').first();
+    const btnVisible = await dismissBtn.isVisible({ timeout: 2000 }).catch(() => false);
+    if (!btnVisible) return false;
+
+    const warningVisible = await page
+      .getByText(/automated behavior/i)
+      .first()
+      .isVisible({ timeout: 1000 })
+      .catch(() => false);
+    if (!warningVisible) return false;
+
+    const box = await dismissBtn.boundingBox();
+    if (!box) return false;
+
+    console.log('Soft checkpoint modal detected — clicking Dismiss');
+    await humanClick(page, box);
+    await humanWait(page, 1500, 2500);
+    return true;
+  } catch (err) {
+    console.warn(`tryDismissSoftCheckpoint failed (non-fatal): ${err.message}`);
+    return false;
   }
 }
 
@@ -333,6 +394,31 @@ function injectUserParams(steps, user) {
       };
     }
 
+    if (step.type === 'facebook_login') {
+      const selectedEmail =
+        user.emails?.find((e) => e.selected)?.address || user.emails?.[0]?.address || '';
+      s.params = {
+        ...(step.params || {}),
+        email: step.params?.email || selectedEmail,
+        password: step.params?.password || user.facebookPassword || '',
+      };
+    }
+
+    if (step.type === 'ensure_login') {
+      const selectedEmail =
+        user.emails?.find((e) => e.selected)?.address || user.emails?.[0]?.address || '';
+      s.params = {
+        ...(step.params || {}),
+        firstName: step.params?.firstName || user.firstName || '',
+        lastName: step.params?.lastName || user.lastName || '',
+        birthdayDate:
+          step.params?.birthdayDate || user.birthdayDate || user.dob || '',
+        gender: step.params?.gender || user.gender || '',
+        email: step.params?.email || selectedEmail,
+        password: step.params?.password || user.facebookPassword || '',
+      };
+    }
+
     if (s.steps) {
       s.steps = injectUserParams(s.steps, user);
     }
@@ -346,7 +432,7 @@ function injectUserParams(steps, user) {
  * Preset steps are passed through injectUserParams so they get the same
  * auto-injection treatment as top-level tasks.json steps.
  */
-async function runRandomPreset(page, step, profileId, user) {
+async function runRandomPreset(page, step, profileId, user, vaultState) {
   const pool = (step.params && step.params.from) || Object.keys(presets);
   const validKeys = pool.filter((k) => presets[k]);
 
@@ -360,17 +446,48 @@ async function runRandomPreset(page, step, profileId, user) {
   const presetSteps = user ? injectUserParams(preset.steps, user) : preset.steps;
 
   for (const presetStep of presetSteps) {
-    await runStep(page, presetStep, profileId, user);
+    await runStep(page, presetStep, profileId, user, vaultState);
   }
+}
+
+function emitVaultStepStart(vaultState, step, path) {
+  if (!vaultState) return;
+  vaultLog.browser(
+    {
+      browserId: vaultState.browserId,
+      profileId: vaultState.profileId,
+      profileName: vaultState.profileName,
+      online: true,
+      currentStepPath: path.join(' › '),
+    },
+    [`Starting: ${step.type}`]
+  );
 }
 
 /**
  * Execute a single step and recurse into child steps.
  */
-async function runStep(page, step, profileId, user) {
+async function runStep(page, step, profileId, user, vaultState) {
   if (step.type === 'random_preset') {
-    await runRandomPreset(page, step, profileId, user);
+    await runRandomPreset(page, step, profileId, user, vaultState);
     return;
+  }
+
+  // Step-level skip probability. `"chance": 0.6` = run 60% of the time, skip
+  // 40%. Applies to any step type. A skipped step also skips its nested
+  // `steps[]` subtree — the whole branch is "did nothing" for this session.
+  // Lets a single tasks.json look different on every run.
+  if (typeof step.chance === 'number' && step.chance < 1) {
+    if (Math.random() >= step.chance) {
+      console.log(`Skipping: ${step.type} (chance=${step.chance})`);
+      if (vaultState) {
+        vaultLog.browser(
+          { browserId: vaultState.browserId },
+          [`Skipped: ${step.type} (chance=${step.chance})`]
+        );
+      }
+      return;
+    }
   }
 
   const handler = handlers[step.type];
@@ -378,16 +495,42 @@ async function runStep(page, step, profileId, user) {
 
   console.log(`Starting: ${step.type}`);
 
+  const nextPath = vaultState ? [...vaultState.path, step.type] : null;
+  emitVaultStepStart(vaultState, step, nextPath || [step.type]);
+
   await runWithRetry(() => handler(page, step.params || {}), profileId, step.type, page);
+
+  // Post-action checkpoint sweep. runWithRetry already short-circuits when a
+  // step throws on a checkpoint URL, but FB can also silently redirect
+  // mid-action without the handler throwing — e.g. a like_posts that
+  // completes its clicks while the next navigation lands on /checkpoint/.
+  // Catch that here so the next step doesn't run on the challenge page.
+  const urlAfter = safePageUrl(page);
+  if (urlAfter && urlAfter.includes('checkpoint')) {
+    // Soft modal first — if dismissed, we continue normally. Only a true
+    // (non-dismissable) checkpoint should abort the profile.
+    const dismissed = await tryDismissSoftCheckpoint(page);
+    if (!dismissed) {
+      const cpErr = new Error(`Checkpoint detected after ${step.type} (url=${urlAfter})`);
+      cpErr.checkpoint = true;
+      cpErr.noRetry = true;
+      throw cpErr;
+    }
+  }
 
   console.log(`Completed: ${step.type}`);
 
+  if (vaultState) {
+    vaultLog.browser({ browserId: vaultState.browserId }, [`Completed: ${step.type}`]);
+  }
+
   if (step.steps && step.steps.length > 0) {
+    const childState = vaultState ? { ...vaultState, path: nextPath } : null;
     for (const childStep of step.steps) {
       const betweenMs = 5000 + Math.random() * 10000;
       console.log(`Waiting ${(betweenMs / 1000).toFixed(1)}s before next step...`);
       await new Promise((r) => setTimeout(r, betweenMs));
-      await runStep(page, childStep, profileId, user);
+      await runStep(page, childStep, profileId, user, childState);
     }
   }
 }
@@ -397,6 +540,24 @@ async function runStep(page, step, profileId, user) {
  */
 async function runBrowser(session, steps, options = {}) {
   const { page, profileId, user } = session;
+  const { browserId, profileName } = options;
+  const browserStartedAt = Date.now();
+  const vaultState = browserId
+    ? { browserId, profileId, profileName: profileName || profileId, path: [] }
+    : null;
+
+  if (vaultState) {
+    vaultLog.browser(
+      {
+        browserId,
+        profileId,
+        profileName: vaultState.profileName,
+        online: true,
+        currentStepPath: '',
+      },
+      ['browser:online']
+    );
+  }
 
   page.setDefaultNavigationTimeout(90000);
   page.setDefaultTimeout(60000);
@@ -449,6 +610,49 @@ async function runBrowser(session, steps, options = {}) {
   let failure = null;
 
   try {
+    // Auto re-login: detect logged-out state and re-auth before any task step
+    // runs on a guest session. Detection uses three signals (URL / password
+    // field / profile probe via user.profileUrl). Re-auth navigates to
+    // /reg/?entry_point=login&next= and re-runs the signup form fill — same
+    // success signal as a fresh signup (home href visible). Treated as a
+    // synthetic step so failures land in the tracker log + per-profile FAIL.
+    try {
+      const probeUrl = user?.profileUrl || '';
+      if (await isLoggedOut(page, { profileProbeUrl: probeUrl })) {
+        console.log(`[${profileId}] Session is logged out — attempting re-login via signup...`);
+        const selectedEmail =
+          user?.emails?.find((e) => e.selected)?.address || user?.emails?.[0]?.address || '';
+        const reloginParams = {
+          firstName: user?.firstName || '',
+          lastName: user?.lastName || '',
+          birthdayDate: user?.birthdayDate || user?.dob || '',
+          gender: user?.gender || '',
+          email: selectedEmail,
+          password: user?.facebookPassword || '',
+        };
+        const missing = Object.entries(reloginParams)
+          .filter(([_, v]) => !v)
+          .map(([k]) => k);
+        if (missing.length) {
+          const err = new Error(`missing signup fields on user record: ${missing.join(', ')}`);
+          err.noRetry = true;
+          throw err;
+        }
+        await handlers.ensure_login(page, reloginParams);
+        console.log(`[${profileId}] Re-login succeeded.`);
+        completed.push('ensure_login (auto)');
+      }
+    } catch (err) {
+      err.noRetry = true;
+      failure = { step: { type: 'ensure_login' }, error: err };
+      if (vaultState) {
+        vaultLog.browser({ browserId: vaultState.browserId }, [
+          { level: 'error', msg: `Auto re-login failed: ${err.message}` },
+        ]);
+      }
+      throw err;
+    }
+
     for (let i = 0; i < injectedSteps.length; i++) {
       if (i > 0) {
         const betweenMs = 5000 + Math.random() * 10000;
@@ -457,22 +661,58 @@ async function runBrowser(session, steps, options = {}) {
       }
       const step = injectedSteps[i];
       try {
-        await runStep(page, step, profileId, user);
+        await runStep(page, step, profileId, user, vaultState);
         completed.push(describeStepChain(step));
       } catch (err) {
         failure = { step, error: err };
+        if (vaultState) {
+          const msg =
+            err && err.checkpoint
+              ? `Checkpoint hit during ${step.type} — aborting profile`
+              : `Step ${step.type} failed: ${err.message}`;
+          vaultLog.browser({ browserId: vaultState.browserId }, [{ level: 'error', msg }]);
+        }
         if (err && err.checkpoint) {
           console.warn(
             `Checkpoint hit during ${step.type} — skipping remaining steps for this profile`
           );
+
+          // Flag the user record so it's surfaced for manual review and won't
+          // get picked up by another task run blind. Best-effort — PATCH
+          // errors are logged but don't block the abort.
+          const userId = user?._id || user?.id || '';
+          if (userId) {
+            try {
+              await updateProfile(userId, { status: 'Need Checking' });
+              console.log(`Profile ${userId} status -> "Need Checking"`);
+            } catch (patchErr) {
+              console.warn(
+                `Failed to PATCH status "Need Checking" for ${userId}: ${patchErr.message}`
+              );
+            }
+          }
         }
         throw err;
       }
     }
   } finally {
     const userId = user?._id || user?.id || '';
-    const note = buildTrackerNote(completed, failure);
+    const elapsedMs = Date.now() - browserStartedAt;
+    const note = buildTrackerNote(completed, failure, elapsedMs);
     await persistTrackerLog(userId, note);
+
+    // Per log.md "Ending a profile" — final /browser MUST fire on both success
+    // and failure paths, with currentStepPath: "done" and online: false. Lives
+    // in finally so a thrown step still produces the offline ping.
+    if (vaultState) {
+      const endLogs = failure
+        ? ['profile failed', 'browser:offline']
+        : ['profile complete', 'browser:offline'];
+      vaultLog.browser(
+        { browserId: vaultState.browserId, online: false, currentStepPath: 'done' },
+        endLogs
+      );
+    }
   }
 
   // Leave the browser on a single blank tab before close
@@ -503,17 +743,31 @@ async function runTask(task) {
   const { taskId, profiles: userIds, concurrency, blockMedia, steps } = task;
   const limit = concurrency && concurrency > 0 ? concurrency : userIds.length;
   const options = { blockMedia: blockMedia !== false };
+  const startedAtMs = Date.now();
 
   console.log(
     `\n=== Task ${taskId}: ${userIds.length} profile(s), concurrency: ${limit}, blockMedia: ${options.blockMedia} ===\n`
   );
 
+  vaultLog.task({
+    taskId,
+    concurrency: limit,
+    blockMedia: options.blockMedia,
+    profiles: userIds,
+    steps,
+  });
+
+  const provider = process.env.BROWSER_PROVIDER || 'hidemium';
   const results = new Array(userIds.length);
+  const timingsMs = new Array(userIds.length).fill(0);
   const queue = [...userIds.entries()];
 
-  async function worker() {
+  async function worker(slotIndex) {
+    const browserId = `${provider}-${slotIndex}`;
+
     while (queue.length > 0) {
       const [index, userId] = queue.shift();
+      const profileStartedAt = Date.now();
 
       let userPreview = null;
       try {
@@ -523,7 +777,7 @@ async function runTask(task) {
       }
       const displayName = buildDisplayName(userPreview, userId);
 
-      await runInSession({ displayName, idsToStrip: [userId] }, async () => {
+      await runInSession({ displayName, browserId, idsToStrip: [userId] }, async () => {
         let session;
         try {
           const browserInfos = await launchBrowsers([userId]);
@@ -531,36 +785,87 @@ async function runTask(task) {
         } catch (err) {
           console.error(`Failed to open browser:`, err.message);
           results[index] = { status: 'rejected', reason: err };
+          vaultLog.browser(
+            {
+              browserId,
+              profileId: userId,
+              profileName: displayName,
+              online: false,
+              currentStepPath: 'done',
+            },
+            [
+              { level: 'error', msg: `Failed to open browser: ${err.message}` },
+              'browser:offline',
+            ]
+          );
+          vaultLog.done(userId);
           return;
         }
 
         addStripId(session.profileId);
 
         results[index] = await Promise.allSettled([
-          runBrowser(session, session.steps, options),
+          runBrowser(session, session.steps, {
+            ...options,
+            browserId,
+            profileName: displayName,
+          }),
         ]).then((r) => r[0]);
+
+        vaultLog.done(session.profileId || userId);
 
         await closeBrowsers([session]);
       });
+
+      timingsMs[index] = Date.now() - profileStartedAt;
     }
   }
 
-  const workers = Array.from({ length: limit }, () => worker());
+  const workers = Array.from({ length: limit }, (_, i) => worker(i + 1));
   await Promise.all(workers);
 
+  // profileId in results = user record _id (the value from tasks.json
+  // `profiles[]`), NOT the underlying browser UUID. Callers and downstream
+  // dashboards key off the user id; the browser id is an implementation
+  // detail of the provider.
   const formattedResults = results.map((result, index) => {
     const userId = userIds[index];
-    const profileId = result?.value?.profileId || userId;
+    const elapsedSec = Number((timingsMs[index] / 1000).toFixed(1));
     if (result?.status === 'fulfilled') {
-      return { profileId, status: 'success' };
+      return { profileId: userId, status: 'success', elapsedSec };
     } else {
       const msg = result?.reason?.message || 'unknown error';
-      console.error(`[${profileId}] Error:`, msg);
-      return { profileId, status: 'error', error: msg };
+      console.error(`[${userId}] Error:`, msg);
+      return { profileId: userId, status: 'error', error: msg, elapsedSec };
     }
   });
 
-  console.log(`\n=== Task ${taskId}: Completed ===\n`);
+  const successCount = formattedResults.filter((r) => r.status === 'success').length;
+  const errorCount = formattedResults.length - successCount;
+  const totalElapsedSec = ((Date.now() - startedAtMs) / 1000).toFixed(1);
+
+  const perProfileMs = timingsMs.filter((ms) => ms > 0);
+  const avgSec = perProfileMs.length
+    ? (perProfileMs.reduce((a, b) => a + b, 0) / perProfileMs.length / 1000).toFixed(1)
+    : '0.0';
+  const minSec = perProfileMs.length ? (Math.min(...perProfileMs) / 1000).toFixed(1) : '0.0';
+  const maxSec = perProfileMs.length ? (Math.max(...perProfileMs) / 1000).toFixed(1) : '0.0';
+
+  console.log(`\n=== Task ${taskId}: Completed ===`);
+  console.log(`  Profiles:    ${formattedResults.length}`);
+  console.log(`  Succeeded:   ${successCount}`);
+  console.log(`  Failed:      ${errorCount}`);
+  console.log(`  Total time:  ${totalElapsedSec}s`);
+  console.log(`  Per profile: avg ${avgSec}s, min ${minSec}s, max ${maxSec}s`);
+
+  if (errorCount > 0) {
+    console.log('\n  Failures:');
+    formattedResults
+      .filter((r) => r.status === 'error')
+      .forEach((r) => console.log(`    - ${r.profileId} (${r.elapsedSec}s): ${r.error}`));
+  }
+  console.log();
+
   return { taskId, results: formattedResults };
 }
 
