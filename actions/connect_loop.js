@@ -42,7 +42,7 @@ const CONFIRM_SELECTOR =
 const CANCEL_REQUEST_SELECTOR =
   'xpath=//div[@role="button"][.//span[normalize-space(text())="Cancel request"]]';
 
-async function pickTarget(pool) {
+async function pickTarget(pool, { maxFriends } = {}) {
   if (STATIC_POOLS[pool]) {
     const list = STATIC_POOLS[pool];
     if (!list.length) return null;
@@ -50,8 +50,12 @@ async function pickTarget(pool) {
   }
   if (pool === 'users') {
     const profiles = await fetchActiveProfiles(5);
-    if (!profiles.length) return null;
-    const u = profiles[Math.floor(Math.random() * profiles.length)];
+    const eligible =
+      typeof maxFriends === 'number'
+        ? profiles.filter((p) => p.friends == null || p.friends < maxFriends)
+        : profiles;
+    if (!eligible.length) return null;
+    const u = eligible[Math.floor(Math.random() * eligible.length)];
     const name = `${u.firstName || ''} ${u.lastName || ''}`.trim();
     return { profileUrl: u.profileUrl, userId: u._id || u.id || '', name };
   }
@@ -171,13 +175,14 @@ module.exports = async function connect_loop(page, params = {}) {
   const waitMin = Number(params.waitMin ?? 30);
   const waitMax = Number(params.waitMax ?? 60);
   const senderId = params.userId || '';
+  const maxFriends = params.maxFriends != null ? Number(params.maxFriends) : 30;
 
   let successCount = 0;
   let attempts = 0;
   let stopReason = '';
 
   console.log(
-    `[connect_loop] target=${targetCount} pool="${pool}" maxAttempts=${maxAttempts} wait=${waitMin}-${waitMax}s sender=${senderId || '(none)'}`
+    `[connect_loop] target=${targetCount} pool="${pool}" maxAttempts=${maxAttempts} wait=${waitMin}-${waitMax}s sender=${senderId || '(none)'} maxFriends=${maxFriends}`
   );
 
   while (successCount < targetCount && attempts < maxAttempts) {
@@ -186,14 +191,16 @@ module.exports = async function connect_loop(page, params = {}) {
     // ── 1. Pick + visit ───────────────────────────────────────────────
     let target;
     try {
-      target = await pickTarget(pool);
+      target = await pickTarget(pool, { maxFriends });
     } catch (err) {
       console.warn(`[connect_loop] pickTarget failed: ${err.message} — stopping.`);
       stopReason = 'pool error';
       break;
     }
     if (!target) {
-      console.log(`[connect_loop] Pool "${pool}" empty — stopping.`);
+      console.log(
+        `[connect_loop] Pool "${pool}" had no eligible target (maxFriends=${maxFriends}) — stopping.`
+      );
       stopReason = 'empty pool';
       break;
     }
