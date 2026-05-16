@@ -1,0 +1,19 @@
+{
+  "taskId": "test-connect-loop-maxfriends",
+  "profiles": ["69fa03a5d7f59db2c21adf65"],
+  "concurrency": 1,
+  "blockMedia": true,
+  "steps": [
+    {
+      "type": "connect_loop",
+      "params": {
+        "pool": "users",
+        "count": 2,
+        "maxAttempts": 5,
+        "waitMin": 10,
+        "waitMax": 20,
+        "maxFriends": 30
+      }
+    }
+  ]
+}
