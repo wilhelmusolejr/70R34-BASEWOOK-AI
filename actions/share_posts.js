@@ -13,6 +13,7 @@
 
 const { humanWait, humanType, humanDelay } = require('../utils/humanBehavior');
 const { generateMessage } = require('../utils/generateMessage');
+const { resolveCount } = require('../utils/randomCount');
 
 // Anchor on FB's own marker `<div data-ad-rendering-role="share_button">` —
 // stable across feed/Page timelines and locale-independent. We then walk up
@@ -25,7 +26,13 @@ const SHARE_BTN_SELECTOR = [
 ].join(', ');
 
 module.exports = async function sharePosts(page, params) {
-  const targetCount = params.count ?? 1;
+  const targetCount = resolveCount(params, 1);
+
+  if (targetCount === 0) {
+    console.log(`  Share skipped: count rolled 0 (min=${params.min}, max=${params.max})`);
+    return;
+  }
+
   const staticMessage = params.message ?? '';
   const userIdentity = params.userIdentity ?? '';
   const useApi = !staticMessage && !!userIdentity;
