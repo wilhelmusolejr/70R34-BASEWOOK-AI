@@ -190,6 +190,7 @@ module.exports = async function facebook_signup(page, params) {
   const genderName = titleCase(params.gender);
   const email = (params.email || '').trim();
   const password = params.password || '';
+  const skipPostSetup = !!params.skipPostSetup;
 
   if (!firstName) throw new Error('facebook_signup: firstName is required');
   if (!lastName) throw new Error('facebook_signup: lastName is required');
@@ -204,22 +205,30 @@ module.exports = async function facebook_signup(page, params) {
 
   console.log(`  [facebook_signup] signing up "${firstName} ${lastName}"`);
 
+  // If already on the /reg/ page (e.g. ensure_login navigated us directly to
+  // /reg/?entry_point=login&next=), skip the facebook.com → "Create new
+  // account" click. Form is already showing.
   const currentUrl = page.url();
-  if (!currentUrl.includes('facebook.com')) {
-    console.log('  [facebook_signup] not on facebook — navigating...');
-    await page.goto('https://www.facebook.com', { waitUntil: 'domcontentloaded' });
-    await humanWait(page, 2500, 4000);
+  if (/\/reg(\/|\?|$)/i.test(currentUrl)) {
+    console.log('  [facebook_signup] already on /reg/ — skipping nav + Create-new-account click.');
+    await humanWait(page, 1500, 2500);
+  } else {
+    if (!currentUrl.includes('facebook.com')) {
+      console.log('  [facebook_signup] not on facebook — navigating...');
+      await page.goto('https://www.facebook.com', { waitUntil: 'domcontentloaded' });
+      await humanWait(page, 2500, 4000);
+    }
+
+    console.log('  [facebook_signup] clicking "Create new account"...');
+    await clickHuman(
+      page,
+      page.locator('a[aria-label="Create new account"]').first(),
+      'Create new account'
+    );
+
+    await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+    await humanWait(page, 1500, 2500);
   }
-
-  console.log('  [facebook_signup] clicking "Create new account"...');
-  await clickHuman(
-    page,
-    page.locator('a[aria-label="Create new account"]').first(),
-    'Create new account'
-  );
-
-  await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
-  await humanWait(page, 1500, 2500);
 
   console.log('  [facebook_signup] First name...');
   await fillHuman(
@@ -274,6 +283,16 @@ module.exports = async function facebook_signup(page, params) {
     .waitFor({ state: 'visible', timeout: 300000 });
 
   console.log('  [facebook_signup] Home button visible — account is logged in.');
+
+  // Re-login mode: ensure_login uses this handler purely as a "fill the reg
+  // form and confirm we land on the home feed" routine. Skip the status PATCH
+  // and the post-signup /settings/bundled walk so we don't disturb an existing
+  // account's setup state.
+  if (skipPostSetup) {
+    console.log('  [facebook_signup] skipPostSetup=true — returning after home href.');
+    return;
+  }
+
   await markNeedSetup(userId);
 
   // Post-signup: walk the bundled-settings privacy acknowledgment
