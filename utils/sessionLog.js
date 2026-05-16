@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { AsyncLocalStorage } = require('async_hooks');
 const { inspect } = require('util');
+const { vaultLog } = require('../vault-log');
 
 const LOGS_DIR = path.join(process.cwd(), 'logs');
 const als = new AsyncLocalStorage();
@@ -84,6 +85,15 @@ function patchConsole() {
       const ts = new Date().toISOString();
       const line = `${ts} [${method.toUpperCase()}] ${outArgs.slice(1).map(formatArg).join(' ')}`;
       appendLine(ctx.logPath, line);
+
+      // Tee to the Profile Vault dashboard. Same content as the file log,
+      // minus the [DisplayName] prefix. Fire-and-forget — vault-log swallows
+      // all errors so this can never crash a session.
+      if (ctx.browserId) {
+        const level = method === 'warn' ? 'warn' : method === 'error' ? 'error' : 'info';
+        const msg = outArgs.slice(1).map(formatArg).join(' ').trim();
+        if (msg) vaultLog.browser({ browserId: ctx.browserId }, [{ level, msg }]);
+      }
     };
   }
 
@@ -107,12 +117,12 @@ function buildDisplayName(user, fallback) {
  * to the per-profile log file. `idsToStrip` lets the wrapper drop legacy
  * `[uuid]` prefixes already baked into log strings.
  */
-function runInSession({ displayName, idsToStrip = [] }, fn) {
+function runInSession({ displayName, browserId, idsToStrip = [] }, fn) {
   patchConsole();
   const logPath = logFilePath(displayName);
   const ts = new Date().toISOString();
   appendLine(logPath, `\n=== Session start ${ts} (${displayName}) ===`);
-  return als.run({ displayName, logPath, idsToStrip }, fn);
+  return als.run({ displayName, logPath, idsToStrip, browserId }, fn);
 }
 
 /**
