@@ -9,11 +9,17 @@
  */
 
 const { humanWait, humanClick, humanDelay } = require('../utils/humanBehavior');
+const { resolveCount } = require('../utils/randomCount');
 
 const LIKE_BTN_SELECTOR = 'div[role="button"][aria-label="Like"]';
 
 module.exports = async function likePosts(page, params) {
-  const targetCount = params.count ?? 2;
+  const targetCount = resolveCount(params, 2);
+
+  if (targetCount === 0) {
+    console.log(`  Like skipped: count rolled 0 (min=${params.min}, max=${params.max})`);
+    return;
+  }
 
   const vp = page.viewportSize() || { width: 1280, height: 800 };
   const usedKeys = new Set();
