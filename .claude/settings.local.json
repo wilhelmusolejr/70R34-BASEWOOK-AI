@@ -32,7 +32,10 @@
       "Read(//c/Users/hinatardp/Desktop/70R34/server/**)",
       "PowerShell(if \\(Test-Path \"C:\\\\Users\\\\hinatardp\\\\Desktop\\\\70R34-BASEWOOK-AI\\\\logs\"\\) { Get-ChildItem \"C:\\\\Users\\\\hinatardp\\\\Desktop\\\\70R34-BASEWOOK-AI\\\\logs\" | Sort-Object LastWriteTime -Descending | Select-Object -First 10 Name, LastWriteTime, @{N='SizeKB';E={[Math]::Round\\($_.Length/1KB,1\\)}} } else { \"logs dir does not exist\" })",
       "PowerShell(Get-EventLog *)",
-      "Bash(git config *)"
+      "Bash(git config *)",
+      "PowerShell(Get-Process *)",
+      "Bash(tee run.log)",
+      "PowerShell(Get-CimInstance *)"
     ]
   }
 }
