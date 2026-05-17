@@ -130,6 +130,23 @@ const handlers = {
 
 const { isLoggedOut } = require('./actions/ensure_login');
 
+// Step types that do NOT require an authenticated Facebook session. If the
+// entire task tree is made of these, the runner skips its auto re-login —
+// otherwise an outlook_login / check_ip / wait-only task would be hijacked
+// by the FB signup form. `random_preset` is excluded conservatively: presets
+// can contain FB steps, so we treat them as needing an FB session.
+const NON_FB_STEP_TYPES = new Set(['outlook_login', 'check_ip', 'wait']);
+
+function taskNeedsFacebookSession(steps) {
+  if (!Array.isArray(steps)) return true;
+  for (const step of steps) {
+    if (!step || !step.type) continue;
+    if (!NON_FB_STEP_TYPES.has(step.type)) return true;
+    if (step.steps && taskNeedsFacebookSession(step.steps)) return true;
+  }
+  return false;
+}
+
 const STEP_RETRY_ATTEMPTS = 3;
 const RETRY_WAIT_MS = 60000;
 
@@ -616,31 +633,41 @@ async function runBrowser(session, steps, options = {}) {
     // /reg/?entry_point=login&next= and re-runs the signup form fill — same
     // success signal as a fresh signup (home href visible). Treated as a
     // synthetic step so failures land in the tracker log + per-profile FAIL.
+    //
+    // Gate: only run when the task actually touches Facebook. An outlook_login
+    // / check_ip / wait-only task does not need an FB session, and hijacking
+    // it for a signup form burns minutes and overwrites the test scenario.
     try {
-      const probeUrl = user?.profileUrl || '';
-      if (await isLoggedOut(page, { profileProbeUrl: probeUrl })) {
-        console.log(`[${profileId}] Session is logged out — attempting re-login via signup...`);
-        const selectedEmail =
-          user?.emails?.find((e) => e.selected)?.address || user?.emails?.[0]?.address || '';
-        const reloginParams = {
-          firstName: user?.firstName || '',
-          lastName: user?.lastName || '',
-          birthdayDate: user?.birthdayDate || user?.dob || '',
-          gender: user?.gender || '',
-          email: selectedEmail,
-          password: user?.facebookPassword || '',
-        };
-        const missing = Object.entries(reloginParams)
-          .filter(([_, v]) => !v)
-          .map(([k]) => k);
-        if (missing.length) {
-          const err = new Error(`missing signup fields on user record: ${missing.join(', ')}`);
-          err.noRetry = true;
-          throw err;
+      if (!taskNeedsFacebookSession(injectedSteps)) {
+        console.log(
+          `[${profileId}] Skipping auto re-login — no step in this task requires a Facebook session.`
+        );
+      } else {
+        const probeUrl = user?.profileUrl || '';
+        if (await isLoggedOut(page, { profileProbeUrl: probeUrl })) {
+          console.log(`[${profileId}] Session is logged out — attempting re-login via signup...`);
+          const selectedEmail =
+            user?.emails?.find((e) => e.selected)?.address || user?.emails?.[0]?.address || '';
+          const reloginParams = {
+            firstName: user?.firstName || '',
+            lastName: user?.lastName || '',
+            birthdayDate: user?.birthdayDate || user?.dob || '',
+            gender: user?.gender || '',
+            email: selectedEmail,
+            password: user?.facebookPassword || '',
+          };
+          const missing = Object.entries(reloginParams)
+            .filter(([_, v]) => !v)
+            .map(([k]) => k);
+          if (missing.length) {
+            const err = new Error(`missing signup fields on user record: ${missing.join(', ')}`);
+            err.noRetry = true;
+            throw err;
+          }
+          await handlers.ensure_login(page, reloginParams);
+          console.log(`[${profileId}] Re-login succeeded.`);
+          completed.push('ensure_login (auto)');
         }
-        await handlers.ensure_login(page, reloginParams);
-        console.log(`[${profileId}] Re-login succeeded.`);
-        completed.push('ensure_login (auto)');
       }
     } catch (err) {
       err.noRetry = true;
@@ -685,6 +712,29 @@ async function runBrowser(session, steps, options = {}) {
             try {
               await updateProfile(userId, { status: 'Need Checking' });
               console.log(`Profile ${userId} status -> "Need Checking"`);
+            } catch (patchErr) {
+              console.warn(
+                `Failed to PATCH status "Need Checking" for ${userId}: ${patchErr.message}`
+              );
+            }
+          }
+        }
+
+        // Credential rejection (e.g. outlook_login got "That password is
+        // incorrect"). Flag the user record so the email password gets
+        // re-issued instead of the bot re-running the same dead creds. Re-uses
+        // "Need Checking" — same status the checkpoint branch sets — because
+        // that value is whitelisted server-side. The tracker-log entry written
+        // in the finally block carries the specific reason for triage.
+        if (err && err.credentialsRejected) {
+          console.warn(
+            `Credentials rejected during ${step.type} — flagging profile and skipping remaining steps`
+          );
+          const userId = user?._id || user?.id || '';
+          if (userId) {
+            try {
+              await updateProfile(userId, { status: 'Need Checking' });
+              console.log(`Profile ${userId} status -> "Need Checking" (credentials rejected)`);
             } catch (patchErr) {
               console.warn(
                 `Failed to PATCH status "Need Checking" for ${userId}: ${patchErr.message}`
