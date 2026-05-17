@@ -211,6 +211,90 @@ Validate required params at top, throw clear errors. Default optionals
 (`params.count ?? 1`). Per-browser failures must NOT kill the task —
 `Promise.allSettled`. One action = one file.
 
+## Failure forensics — HTML + screenshot dumps
+
+When an action interacts with a 3rd-party site whose DOM can change without
+warning (Microsoft, Facebook, etc.), a thrown selector timeout tells you
+*what* timed out but not *why*. Re-running just to inspect doesn't help —
+the failing state may not reproduce. Capture the page state at the moment
+of failure instead.
+
+**Convention.** Add a small helper at the top of the action file:
+
+```javascript
+const fs = require('fs');
+const path = require('path');
+
+async function dumpFailure(page, label) {
+  try {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeLabel = String(label || 'failure').replace(/[^a-z0-9_-]+/gi, '_');
+    const logsDir = path.join(process.cwd(), 'logs');
+    if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+
+    const baseName = `<action>-${safeLabel}-${ts}`;
+    const htmlPath = path.join(logsDir, `${baseName}.html`);
+    const pngPath = path.join(logsDir, `${baseName}.png`);
+
+    let url = '(unknown)';
+    try { url = page.url(); } catch (_) {}
+
+    try {
+      const html = await page.content();
+      fs.writeFileSync(htmlPath, `<!-- url: ${url} -->\n${html}`, 'utf8');
+      console.warn(`  [<action>] dumped HTML → ${htmlPath}`);
+    } catch (err) {
+      console.warn(`  [<action>] HTML dump failed: ${err.message}`);
+    }
+
+    try {
+      await page.screenshot({ path: pngPath, fullPage: true });
+      console.warn(`  [<action>] dumped screenshot → ${pngPath}`);
+    } catch (err) {
+      console.warn(`  [<action>] screenshot failed: ${err.message}`);
+    }
+  } catch (err) {
+    console.warn(`  [<action>] dumpFailure swallowed: ${err.message}`);
+  }
+}
+```
+
+Then wrap the body of the action in `try/catch`, dump on throw, **re-throw**
+so the runner sees the original error:
+
+```javascript
+module.exports = async function my_action(page, params) {
+  try {
+    // ... action logic
+  } catch (err) {
+    await dumpFailure(page, `error-${params.userId || 'unknown'}`);
+    throw err;
+  }
+};
+```
+
+**Rules.**
+- Output dir is always `logs/` (auto-created). Same folder as per-profile session logs.
+- Filename: `<action>-<label>-<ISO-ts>.{html,png}`. The label identifies the
+  failing entity (email prefix, profile id, target URL) so concurrent
+  failures don't overwrite each other.
+- Embed the URL as an HTML comment in the dump (`<!-- url: ... -->`).
+  When you open the HTML standalone it lacks the address bar context.
+- `fullPage: true` on the screenshot — failures often involve a banner or
+  modal off the initial viewport.
+- **Helper swallows its own errors.** A dump-on-dump failure must never
+  mask the original throw — the action's stack is what runWithRetry sees.
+- **Always re-throw** in the catch. The dump is forensics, not recovery.
+- Reference implementation: `actions/outlook_login.js`'s `dumpFailure`.
+
+**When NOT to add it.**
+- Pure-FB actions where the same `humanClick` / selector pattern is used
+  across many handlers — selector breakage usually surfaces in one of the
+  feed actions first, and FB checkpoint URLs already get short-circuited
+  by `runner.js`. Adding dumps to every FB action would flood `logs/`.
+- Use it for actions that talk to 3rd-party sites with DOM that's hard to
+  reason about live (Microsoft, Outlook, OAuth flows, Stripe, etc.).
+
 ## What NOT to do
 
 - No combination action types (`search_and_add`) — combinations live in `steps`.
