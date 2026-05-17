@@ -289,6 +289,24 @@ module.exports = async function create_page(page, params) {
     await stepWait(page);
 
     /* ---------- POST-CREATE phase — each field retried individually ---------- */
+    // Canary probe: if the email input isn't visible within 15s, FB rendered
+    // a flow variant without the contact form. Bail out cleanly rather than
+    // burning ~11 min waitFor'ing every subsequent field × 2 retries × 15s.
+    // The Page was already committed in pre-create, so a half-configured
+    // Page is the intended outcome — don't fail the worker over it.
+    const emailProbe = page.locator('label:has-text("Email") input').first();
+    const postCreateFormVisible = await emailProbe
+      .waitFor({ state: 'visible', timeout: 15000 })
+      .then(() => true)
+      .catch(() => false);
+
+    if (!postCreateFormVisible) {
+      console.warn(
+        '  [create_page] Post-create email field not found within 15s — skipping rest of create_page (Page already committed on FB).'
+      );
+      return;
+    }
+
     if (emailValue) {
       await retryField('Fill email', async () => {
         const emailInput = page.locator('label:has-text("Email") input').first();
