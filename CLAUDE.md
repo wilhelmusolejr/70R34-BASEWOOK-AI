@@ -30,8 +30,11 @@ that posts to the same endpoint.
 │   ├── open_search_result.js    create_page.js    scroll.js
 │   ├── like_posts.js            share_posts.js    share_post.js
 │   ├── add_friend.js            follow.js         connect.js
+│   ├── connect_loop.js          accept_loop.js
 │   ├── setup_about.js           setup_avatar.js   setup_cover.js
 │   ├── schedule_posts.js        switch_profile.js wait.js
+│   ├── facebook_signup.js       facebook_login.js ensure_login.js
+│   ├── outlook_login.js
 │   └── check_ip.js
 ├── utils/
 │   ├── browserManager.js        # ONLY file aware of Hidemium / Multilogin
@@ -39,7 +42,11 @@ that posts to the same endpoint.
 │   ├── humanBehavior.js         # human-like interaction
 │   ├── generateMessage.js       # GitHub Models — share messages
 │   ├── pageSetupHelpers.js      # shared helpers for page setup
-│   └── pageAddressData.js       # city/state parsing + ZIP seeds
+│   ├── pageAddressData.js       # city/state parsing + ZIP seeds
+│   ├── randomCount.js           # {count} | {min,max} resolver for feed actions
+│   └── sessionLog.js            # per-profile log file + vault tee
+├── vault-log.js                 # POSTs to Profile Vault Logs dashboard (gated by VAULT_ENABLED)
+├── log.md                       # Vault Logs HTTP contract spec
 └── chat/nlToJson.js             # NL → task JSON
 ```
 
@@ -331,6 +338,16 @@ the whole `create_page` (would spawn duplicate Pages).
 
 Constants: `PRE_CREATE_ATTEMPTS=3`, `POST_FIELD_ATTEMPTS=2`, `RETRY_WAIT_MS=60000`.
 
+### Post-create form canary
+
+After the commit click, `create_page` probes `label:has-text("Email") input`
+with a 15s timeout. If the email field doesn't appear, FB rendered a flow
+variant without the contact form — the action **returns cleanly** instead of
+waitFor'ing every subsequent field × 2 retries × 15s (which used to burn
+~11 minutes per failing profile). The Page is already committed FB-side, so
+a half-configured Page is the intended outcome — the worker moves on to its
+next step instead of marking FAIL.
+
 ### Navigation
 
 ```
@@ -531,6 +548,84 @@ Matches persona style. Never starts with "Check this out", "Pretty cool", "Wow",
 
 `userIdentity` alone triggers API. `message` (static) wins over API.
 
+## `outlook_login` — Sign in to outlook.com
+
+Leaf action. Navigates to `outlook.live.com/mail/?prompt=select_account` and
+walks Microsoft's login flow. `prompt=select_account` forces the email-entry
+form even when a cached account exists (otherwise FB-style cached-tile flows
+land us on the marketing page).
+
+### Flow
+
+```
+goto outlook.live.com/mail (with prompt=select_account)
+  → if URL already on /mail → return early (signed in)
+  → probe "Use another account" tile BEFORE waitForSelector(#i0116) — when
+    present, the email input is hidden until clicked; reverse order burns 60s
+  → wait for #i0116 (email input), 60s timeout
+  → fillFormInput #i0116 + click #idSIButton9
+  → fillFormInput input[name='passwd'] + click button[data-testid='primaryButton'], #idSIButton9
+  → detectCredentialError(page) — fast-fail on Microsoft rejection (~2s)
+  → walkPostLoginPrompts(page) — 12 ticks × 2.5-3.5s
+      KMSI → Yes (gated on "Stay signed in?" header text, NOT #idSIButton9 alone)
+      Passkey/FIDO → Skip for now (gated on /fido|/passkey URL)
+      Protect-account → Skip for now
+      Generic Not now / Skip setup / iCancel / idBtn_Back
+      every tick: detectCredentialError check (in case the banner appears late)
+  → if final URL not on outlook.live.com/mail → goto inbox to normalize
+```
+
+Credentials auto-injected from the user record:
+- `email` ← `user.emails.find(e=>e.selected)?.address || user.emails[0]?.address`
+- `password` ← `user.emailPassword`
+
+### Credential rejection — fast-fail patterns
+
+`CREDENTIAL_ERROR_PATTERNS` (regex, case-insensitive). Matched against rendered
+page text by `detectCredentialError(page)`:
+
+```
+/that password is incorrect/i
+/your account or password is incorrect/i
+/incorrect account or password/i           ← word-order variant
+/tried to sign in too many times/i         ← rate-limit
+/we couldn't find an account with that username/i
+/this username may be incorrect/i
+/sign-in is blocked/i
+/your account has been locked/i
+/account has been temporarily blocked/i
+```
+
+When matched, throws `Error('outlook_login: credentials rejected (<reason>)')`
+with `err.credentialsRejected = true` + `err.noRetry = true`. Runner catches,
+PATCHes `status: "Need Checking"`, writes the specific reason to the tracker
+log (see Network resilience > Credential rejection short-circuit above).
+
+Check runs in TWO places:
+1. Immediately after the password submit (~2s after click) — fast-fail
+2. At the top of every `walkPostLoginPrompts` tick — catches delayed banner renders
+
+### Failure forensics — `dumpFailure(page, label)`
+
+Whole action wrapped in try/catch. On ANY throw, writes to `logs/`:
+- `outlook-error-<email-prefix>-<ISO-ts>.html` (with URL embedded as HTML comment)
+- `outlook-error-<email-prefix>-<ISO-ts>.png` (full-page screenshot)
+
+Then re-throws. The dump itself swallows its own errors so a dump-on-dump
+failure can't mask the original. Always check the screenshot first when
+debugging — it usually shows the Microsoft error inline.
+
+### Why Multilogin can fail when manual login works
+
+A successful manual login in a normal browser + a failing automated login in
+Multilogin with the SAME password almost always means **proxy IP reputation**.
+Microsoft's risk engine silently rejects logins from flagged datacenter /
+abused residential IPs with the generic "incorrect password" message — it
+won't reveal the real reason. Verify by hitting `ipqualityscore.com` /
+`scamalytics.com` on the proxy IP. Fix is to rotate the proxy, not the
+credentials. The `Need Checking` flag from the runner correctly surfaces this
+for manual review regardless of root cause.
+
 ## Network resilience — `runner.js`
 
 ### Timeouts (per browser)
@@ -553,11 +648,29 @@ set this so `runWithRetry` won't restart and re-trigger committed side effects.
 **Checkpoint short-circuit:** after every step error, `runWithRetry` reads
 `page.url()` (via `safePageUrl`). If the URL contains `"checkpoint"`, FB has
 flagged the profile (login challenge / ID verification / etc.) — retrying is
-pointless. The error is tagged `err.checkpoint = true` + `err.noRetry = true`,
-the retry loop breaks immediately, and `runBrowser`'s per-step catch logs
-`Checkpoint hit during <step> — skipping remaining steps for this profile`,
-short-circuits the rest of the steps, fires the tracker log, and the worker
-moves on to the next profile in the queue.
+pointless. `runWithRetry` first calls `tryDismissSoftCheckpoint(page)` (FB's
+"We suspect automated behavior" modal has a Dismiss button on a clean page
+underneath — gated on both the button AND the warning text being visible).
+If dismissed, the retry continues. If not, the error is tagged
+`err.checkpoint = true` + `err.noRetry = true`, the retry loop breaks
+immediately, `runBrowser`'s per-step catch logs `Checkpoint hit during
+<step> — skipping remaining steps for this profile`, PATCHes the user
+record `{ status: "Need Checking" }` so it's surfaced for manual review,
+fires the tracker log, and the worker moves on. The post-action sweep in
+`runStep` also re-checks the URL after a successful step — catches FB
+redirects that didn't throw.
+
+**Credential rejection short-circuit:** handlers like `outlook_login` set
+`err.credentialsRejected = true` + `err.noRetry = true` when Microsoft
+returns "incorrect account or password" / "we couldn't find an account" /
+soft-lock messages. `runWithRetry` does NOT retry (noRetry); `runBrowser`'s
+per-step catch logs `Credentials rejected during <step> — flagging profile`
+and PATCHes the user record `{ status: "Need Checking" }`. The tracker
+log entry written in the finally block carries the *specific* Microsoft
+message (e.g. `FAIL at outlook_login (1m 4s): outlook_login: credentials
+rejected (incorrect account or password)`) so triage can distinguish
+"checkpoint" vs "bad password" vs "rate-limited" vs "account doesn't exist"
+from the same `status: "Need Checking"` flag.
 
 Constants: `STEP_RETRY_ATTEMPTS=3`, `RETRY_WAIT_MS=60000`.
 
@@ -575,8 +688,16 @@ After the nav, `runBrowser` calls `isLoggedOut(page, { profileProbeUrl: user.pro
 3. Profile probe — if `user.profileUrl` is set, navigate to it; if FB rewrites
    to `/people/...` or `/pfbid...`, the session is browsing as guest
 
-If logged out, `ensure_login` is invoked as a synthetic step before any task
-step runs. Re-auth strategy is **not** the login form — it navigates to
+**Gate:** the auto re-login only runs when the task actually touches Facebook.
+`taskNeedsFacebookSession(steps)` walks the (injected) step tree and returns
+false if every step type is in `NON_FB_STEP_TYPES = {'outlook_login',
+'check_ip', 'wait'}`. An outlook-only task would otherwise be hijacked by the
+FB signup form (since the profile is logged out of FB by default). Logs
+`Skipping auto re-login — no step in this task requires a Facebook session.`
+when skipped.
+
+If logged out (and the task requires FB), `ensure_login` is invoked as a
+synthetic step before any task step runs. Re-auth strategy is **not** the login form — it navigates to
 `https://web.facebook.com/reg/?entry_point=login&next=` and re-runs the
 signup form fill via `facebook_signup` (called with `skipPostSetup: true` so
 it stops at the home href and skips the `/settings/bundled` walk + status
@@ -592,6 +713,38 @@ Failures log `FAIL at ensure_login: ...` and short-circuit the profile with
 **`ensure_login` vs `facebook_login`:** `ensure_login` is the auto session
 recovery (signup-as-login). `facebook_login` is a separate password-form
 login action that lives next to `facebook_signup`. Don't conflate them.
+
+### Crash diagnostics — `run-task.js`
+
+Bot exits "out of nowhere" used to leave no clue why. `run-task.js` now
+installs four diagnostic surfaces; the LAST line printed before the prompt
+returns tells you the cause:
+
+| Banner | Meaning |
+|---|---|
+| `!!! Received SIGINT / SIGTERM / SIGBREAK / SIGHUP` | External kill — Ctrl+C, terminal close, RDP drop, taskkill. Signal handlers force a print + `process.exit(130|143)`. |
+| `!!! beforeExit (code N)` | Event loop drained naturally — every worker resolved OR every pending promise was silently dropped. |
+| `!!! UNHANDLED REJECTION` / `!!! UNCAUGHT EXCEPTION` | Async rejection or sync throw escaped — stack trace follows. |
+| `!!! process.exit(N)` | Always the final line. Reports the exit code. |
+
+Plus a heartbeat every 30s: `[heartbeat] alive Xm Ys | handles=N requests=M`.
+If the last heartbeat is at T-30s before the prompt returns, Node died
+abruptly. If heartbeats go silent first, then output stops, then prompt
+returns — slow drain. `setInterval` is `.unref()`d so the heartbeat alone
+can never block exit.
+
+**Windows-specific gotchas:**
+- **QuickEdit Mode**: clicking in the PowerShell window pauses stdout. Node
+  keeps running but `console.log` blocks. Right-click title bar → Properties
+  → uncheck QuickEdit.
+- **Tee-Object buffering**: PowerShell's `Tee-Object` batches stdout, so the
+  last few seconds (including the diagnostic banner) may be in the buffer
+  when the pipe closes. Prefer `Start-Process node -ArgumentList "run-task.js"
+  -RedirectStandardOutput "run.log" -NoNewWindow` for forensics.
+
+`run-task.js` also accepts a positional task file argument:
+`node run-task.js [task-file]` (defaults to `tasks.json`). Lets us run
+alternates without juggling the main file.
 
 ### Open-time tab cleanup
 
@@ -628,6 +781,9 @@ Walks step tree before execution, fills missing params from user record.
 | `search` | `city` from `user.city` (page mode) |
 | `check_ip` | `userId` |
 | `share_posts` / `share_post` | `userIdentity` |
+| `facebook_signup` / `ensure_login` | `firstName`, `lastName`, `birthdayDate` (or `dob`), `gender`, `email` (selected or `[0]`), `password` from `user.facebookPassword` |
+| `facebook_login` | `email` (selected or `[0]`), `password` from `user.facebookPassword` |
+| `outlook_login` | `email` (selected or `[0]`), `password` from `user.emailPassword` |
 
 Explicit params always win.
 
