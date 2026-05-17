@@ -1,0 +1,34 @@
+{
+  "taskId": "new-account-setup-and-warmup",
+  "profiles": [],
+  "concurrency": 1,
+  "blockMedia": true,
+  "steps": [
+    { "type": "setup_about" },
+    { "type": "wait", "params": { "min": 60, "max": 120 } },
+
+    { "type": "setup_avatar" },
+    { "type": "wait", "params": { "min": 60, "max": 120 } },
+
+    { "type": "setup_cover" },
+    { "type": "wait", "params": { "min": 60, "max": 120 } },
+
+    {
+      "type": "homepage_interaction",
+      "steps": [
+        { "type": "scroll", "params": { "min": 15, "max": 30 } },
+        { "type": "like_posts", "params": { "min": 0, "max": 2 } }
+      ]
+    },
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "wait", "params": { "min": 8, "max": 15 } },
+        { "type": "share_posts", "params": { "count": 1 } }
+      ]
+    }
+  ]
+}

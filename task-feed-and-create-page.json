@@ -1,0 +1,54 @@
+{
+  "taskId": "full-setup-and-engage",
+  "profiles": [
+  "6a0161869ceed638ddd6a849"
+],
+  "concurrency": 5,
+  "blockMedia": true,
+  "steps": [
+    {
+      "type": "homepage_interaction",
+      "steps": [
+        { "type": "scroll", "params": { "min": 15, "max": 30 } },
+        { "type": "like_posts", "params": { "min": 0, "max": 4 } }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "scroll", "params": { "min": 15, "max": 40 } },
+        { "type": "like_posts", "params": { "min": 0, "max": 5 } },
+        { "type": "share_posts", "params": { "count": 1 } }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "scroll", "params": { "min": 15, "max": 40 } },
+        { "type": "like_posts", "params": { "min": 0, "max": 5 } },
+        { "type": "share_posts", "params": { "count": 1 } }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "create_page",
+      "steps": [
+        { "type": "switch_profile" },
+        { "type": "wait", "params": { "min": 60, "max": 120 } }
+      ]
+    },
+
+    { "type": "scroll", "params": { "min": 15, "max": 40 } },
+    { "type": "wait", "params": { "min": 60, "max": 120 } }
+  ]
+}

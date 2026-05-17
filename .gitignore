@@ -4,3 +4,5 @@ node_modules/
 config/profiles.json
 tasks.json
 user.json
+logs/
+run.log

@@ -75,7 +75,7 @@ function loadTask(fileArg) {
   const taskFile = path.resolve(process.cwd(), fileArg || 'tasks.json');
   if (!fs.existsSync(taskFile)) {
     throw new Error(
-      `Task file not found: ${taskFile}\nPass a task file, for example: node run-task.js "tasks copy.json"`
+      `Task file not found: ${taskFile}\nPass a task file, for example: node run-task.js task-warmup-full.json`
     );
   }
 
