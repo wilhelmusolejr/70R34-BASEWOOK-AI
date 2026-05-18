@@ -35,7 +35,13 @@
       "Bash(git config *)",
       "PowerShell(Get-Process *)",
       "Bash(tee run.log)",
-      "PowerShell(Get-CimInstance *)"
+      "PowerShell(Get-CimInstance *)",
+      "Bash(git mv *)",
+      "Bash(git status *)",
+      "Bash(git restore *)",
+      "PowerShell(Stop-Process *)",
+      "Bash(grep -nA 30 \"^async function humanType\\\\|^function humanType\\\\|humanType\\\\s*=\" utils/humanBehavior.js)",
+      "Bash(xargs -I{} ls -la \"{}profiles/\")"
     ]
   }
 }

@@ -1,0 +1,27 @@
+{
+  "taskId": "test-publish-post",
+  "profiles": ["69fa99acd7f59db2c21ae867","69fa99acd7f59db2c21ae868","69fa99acd7f59db2c21ae869","69fa99acd7f59db2c21ae86b","69fa99acd7f59db2c21ae86c","69fae84ad7f59db2c21aed26","69fb09bad7f59db2c21aeed2","69fb09bad7f59db2c21aeed5","69fca17c1e49eec688fcfc05","69fca17c1e49eec688fcfc06","69fca17c1e49eec688fcfc08","69fca9971e49eec688fcfd11","69fcb1e51e49eec688fcfd46","69fcb1e51e49eec688fcfd48","69fd12241e49eec688fd02c2","69fd22161e49eec688fd02fd","69fd22161e49eec688fd02ff","69fd22161e49eec688fd0301","69fd22161e49eec688fd0302","69fd22161e49eec688fd0303","69fd22161e49eec688fd0304","69fd22161e49eec688fd0305","69fd22161e49eec688fd0306","69fd3f371e49eec688fd03fb","69fd3f371e49eec688fd03fd","69fd3f371e49eec688fd03fe","69fd3f371e49eec688fd03ff","69fd432b1e49eec688fd045d","69fd432b1e49eec688fd045e","69fd432b1e49eec688fd045f","69fd63801e49eec688fd0507","69fd63801e49eec688fd0508","69fd63801e49eec688fd0509","69fd72f01e49eec688fd0554","69fd72f01e49eec688fd0555","6a002c3caaa538982f47769b","6a002c3caaa538982f47769c","6a002c3caaa538982f47769d","6a002c3caaa538982f47769e","6a0146ae9ceed638ddd6a35b","6a0146ae9ceed638ddd6a35c","6a0146ae9ceed638ddd6a35e","6a0146ae9ceed638ddd6a35f","6a0146ae9ceed638ddd6a360","6a0146ae9ceed638ddd6a361","6a0161869ceed638ddd6a841","6a0161869ceed638ddd6a842","6a0161869ceed638ddd6a844"],
+  "concurrency": 2,
+  "blockMedia": true,
+  "steps": [
+
+    {
+      "type": "homepage_interaction",
+      "steps": [
+        { "type": "scroll", "params": { "min": 15, "max": 30 } },
+        { "type": "like_posts", "params": { "min": 0, "max": 2 } }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    { "type": "publish_post" },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    { "type": "accept_loop" },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } }
+
+  ]
+}

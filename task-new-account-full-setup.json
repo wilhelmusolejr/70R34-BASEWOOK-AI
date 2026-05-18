@@ -1,6 +1,6 @@
 {
   "taskId": "new-account-setup-and-warmup",
-  "profiles": [],
+  "profiles": ["69fd22161e49eec688fd02fe","69fd56b51e49eec688fd04c8","6a0161869ceed638ddd6a849","6a01899c9ceed638ddd6abc2","6a03d4b076c1dbb6df141b1f","6a03d4b076c1dbb6df141b22","6a03d4b076c1dbb6df141b23","6a03d4b076c1dbb6df141b24"],
   "concurrency": 1,
   "blockMedia": true,
   "steps": [
@@ -20,6 +20,7 @@
         { "type": "like_posts", "params": { "min": 0, "max": 2 } }
       ]
     },
+    
     { "type": "wait", "params": { "min": 30, "max": 60 } },
 
     {
