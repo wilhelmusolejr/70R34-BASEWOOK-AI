@@ -4,12 +4,20 @@
  */
 
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 const axios = require('axios');
 const { launchBrowsers, closeBrowsers } = require('./utils/browserManager');
 const { fetchUser, updateProfile } = require('./utils/userApi');
 const presets = require('./config/presets.json');
 const { buildPageAddress } = require('./utils/pageAddressData');
-const { runInSession, addStripId, buildDisplayName } = require('./utils/sessionLog');
+const {
+  runInSession,
+  addStripId,
+  buildDisplayName,
+  getProfileLogDir,
+} = require('./utils/sessionLog');
+const { initRunLogDir } = require('./utils/runLogDir');
 const { vaultLog } = require('./vault-log');
 
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
@@ -114,6 +122,7 @@ const handlers = {
   add_friend: require('./actions/add_friend'),
   visit_profile: require('./actions/visit_profile'),
   share_post: require('./actions/share_post'),
+  publish_post: require('./actions/publish_post'),
   check_ip: require('./actions/check_ip'),
   search: require('./actions/search'),
   open_search_result: require('./actions/open_search_result'),
@@ -169,6 +178,7 @@ async function runWithRetry(fn, profileId, stepType, page) {
         // checkpoint abort if Dismiss isn't there.
         const dismissed = await tryDismissSoftCheckpoint(page);
         if (!dismissed) {
+          await dumpCheckpointState(page, `step-${stepType}`);
           console.warn(`CHECKPOINT detected on ${stepType} (url=${url}) — aborting profile`);
           err.checkpoint = true;
           err.noRetry = true;
@@ -207,37 +217,100 @@ function safePageUrl(page) {
 }
 
 /**
- * Some "checkpoint" URLs are soft warnings — FB shows a modal saying
- * "We suspect automated behavior on your account" with a Dismiss button.
- * The account is NOT actually challenged; the modal is informational and
- * the page underneath is functional. Click Dismiss and the URL clears.
+ * Failure forensics for checkpoint detection — follows the dumpFailure
+ * convention documented in CLAUDE.md ("Failure forensics — HTML + screenshot
+ * dumps"). Writes the current page HTML + a full-page PNG so the actual
+ * checkpoint variant can be inspected later (was it a real hard checkpoint
+ * gating the account, or a soft modal variant we didn't recognize — different
+ * button label, different warning text, different language?).
  *
- * Returns true if a soft modal was found and dismissed, false otherwise.
- * Requires both signals (the Dismiss button AND the warning text) so we
- * don't dismiss something unrelated.
+ * Output path: when called inside a `runInSession` scope, drops into the
+ * per-profile run-scoped folder (`logs/{taskId}-{ts}/profiles/{name}-{shortId}/`).
+ * Falls back to flat `logs/` when no session is active.
+ *
+ * Best-effort — swallows its own errors so a dump failure can never mask the
+ * underlying checkpoint throw. Caller MUST still throw after the dump returns.
+ */
+async function dumpCheckpointState(page, label) {
+  try {
+    if (!page) return;
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeLabel = String(label || 'checkpoint').replace(/[^a-z0-9_-]+/gi, '_');
+
+    const profileDir = getProfileLogDir();
+    const targetDir = profileDir || path.join(process.cwd(), 'logs');
+    try {
+      if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+    } catch (_) {}
+
+    const baseName = `checkpoint-${safeLabel}-${ts}`;
+    const htmlPath = path.join(targetDir, `${baseName}.html`);
+    const pngPath = path.join(targetDir, `${baseName}.png`);
+
+    let url = '(unknown)';
+    try {
+      url = page.url();
+    } catch (_) {}
+
+    try {
+      const html = await page.content();
+      fs.writeFileSync(htmlPath, `<!-- url: ${url} -->\n${html}`, 'utf8');
+      console.warn(`  [checkpoint] dumped HTML → ${htmlPath}`);
+    } catch (err) {
+      console.warn(`  [checkpoint] HTML dump failed: ${err.message}`);
+    }
+
+    try {
+      await page.screenshot({ path: pngPath, fullPage: true });
+      console.warn(`  [checkpoint] dumped screenshot → ${pngPath}`);
+    } catch (err) {
+      console.warn(`  [checkpoint] screenshot failed: ${err.message}`);
+    }
+  } catch (err) {
+    console.warn(`  [checkpoint] dumpCheckpointState swallowed: ${err.message}`);
+  }
+}
+
+/**
+ * Some "checkpoint" URLs are soft warnings — FB shows a modal with a Dismiss
+ * button on top of an otherwise functional page. Click Dismiss and the URL
+ * clears. Returns true if a Dismiss button was found and clicked, false
+ * otherwise (caller treats false as a hard checkpoint).
+ *
+ * **Caller MUST have already confirmed the URL contains "checkpoint" before
+ * calling.** That gate is what makes "any Dismiss button on this page" a
+ * reliable signal of the soft variant. We deliberately do NOT gate on the
+ * warning text — FB tweaks the wording, shows it in different languages, and
+ * any Dismiss button on a /checkpoint/ URL IS the checkpoint dismiss button.
+ *
+ * Uses `waitFor({ state: 'visible' })`, not `isVisible({ timeout })`:
+ * Playwright's `isVisible` reads the current visibility state and only
+ * partially honors `timeout`, which is why the previous 2s probe was firing
+ * before the modal mounted on slower checkpoint pages and returning false
+ * even when the Dismiss button was about to appear.
  */
 async function tryDismissSoftCheckpoint(page) {
   if (!page) return false;
   const { humanClick, humanWait } = require('./utils/humanBehavior');
 
   try {
-    const dismissBtn = page.locator('div[aria-label="Dismiss"][role="button"]').first();
-    const btnVisible = await dismissBtn.isVisible({ timeout: 2000 }).catch(() => false);
-    if (!btnVisible) return false;
+    // Let the checkpoint page finish its redirect chain + modal mount before
+    // probing. Already-loaded pages resolve immediately.
+    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
 
-    const warningVisible = await page
-      .getByText(/automated behavior/i)
-      .first()
-      .isVisible({ timeout: 1000 })
-      .catch(() => false);
-    if (!warningVisible) return false;
+    const dismissBtn = page.locator('div[aria-label="Dismiss"][role="button"]').first();
+    try {
+      await dismissBtn.waitFor({ state: 'visible', timeout: 10000 });
+    } catch (_) {
+      return false; // genuinely not there — hard checkpoint
+    }
 
     const box = await dismissBtn.boundingBox();
     if (!box) return false;
 
     console.log('Soft checkpoint modal detected — clicking Dismiss');
     await humanClick(page, box);
-    await humanWait(page, 1500, 2500);
+    await humanWait(page, 2000, 3500);
     return true;
   } catch (err) {
     console.warn(`tryDismissSoftCheckpoint failed (non-fatal): ${err.message}`);
@@ -385,6 +458,46 @@ function injectUserParams(steps, user) {
       };
     }
 
+    // publish_post: when imageUrls is missing, pick a random entry from
+    // user.posts[] and use its images. We deliberately do NOT inject
+    // pick.caption — captions are now AI-generated from userIdentity +
+    // postContext via generatePostCaption (uses system_prompt_post.txt).
+    // pick.context (a short description of what's in the images) is
+    // injected as postContext so the model has something concrete to anchor
+    // on; the 50-reasons fallback in the prompt handles vague/empty
+    // contexts. Explicit params always win.
+    //
+    // user.posts[*].images entries are stored as `{ filename }` (sometimes
+    // nested as `{ imageId: { filename } }`) — resolve through buildImageUrl
+    // so they end up as full URLs the downloader can consume.
+    if (step.type === 'publish_post') {
+      const next = { ...(step.params || {}) };
+      const userPosts = Array.isArray(user.posts) ? user.posts : [];
+      const hasImages = Array.isArray(next.imageUrls) && next.imageUrls.length > 0;
+
+      if (!hasImages && userPosts.length > 0) {
+        const candidates = userPosts.filter(
+          (p) => p && Array.isArray(p.images) && p.images.length > 0
+        );
+        if (candidates.length > 0) {
+          const pick = candidates[Math.floor(Math.random() * candidates.length)];
+          next.imageUrls = pick.images
+            .map((img) => {
+              if (typeof img === 'string') return buildImageUrl(img);
+              if (!img) return '';
+              return buildImageUrl(getAssetFilename(img));
+            })
+            .filter(Boolean);
+          if (!next.postContext && typeof pick.context === 'string') {
+            next.postContext = pick.context;
+          }
+        }
+      }
+
+      if (!next.userIdentity) next.userIdentity = user.identityPrompt || '';
+      s.params = next;
+    }
+
     if (step.type === 'outlook_login') {
       const selectedEmail =
         user.emails?.find((e) => e.selected)?.address || user.emails?.[0]?.address || '';
@@ -528,6 +641,7 @@ async function runStep(page, step, profileId, user, vaultState) {
     // (non-dismissable) checkpoint should abort the profile.
     const dismissed = await tryDismissSoftCheckpoint(page);
     if (!dismissed) {
+      await dumpCheckpointState(page, `post-${step.type}`);
       const cpErr = new Error(`Checkpoint detected after ${step.type} (url=${urlAfter})`);
       cpErr.checkpoint = true;
       cpErr.noRetry = true;
@@ -627,6 +741,59 @@ async function runBrowser(session, steps, options = {}) {
   let failure = null;
 
   try {
+    // Pre-flight checkpoint check. If FB has redirected the homepage to a
+    // /checkpoint/ URL, the session is logged-in-but-flagged. Running any
+    // step on that page (including isLoggedOut → ensure_login, which would
+    // re-trigger the signup form on top of a flagged session) wastes time
+    // at best and risks duplicate-account creation at worst. Detect early,
+    // attempt the soft-modal dismiss, else short-circuit the profile with
+    // the same "Need Checking" PATCH the post-step sweep uses.
+    try {
+      const preFlightUrl = safePageUrl(page);
+      if (preFlightUrl.includes('checkpoint')) {
+        const dismissed = await tryDismissSoftCheckpoint(page);
+        if (!dismissed) {
+          // Dump page state before throwing so we can inspect whether this
+          // was a real hard checkpoint or a soft modal variant we didn't
+          // recognize. Forensics only — must still throw.
+          await dumpCheckpointState(page, 'preflight');
+          const cpErr = new Error(
+            `Checkpoint detected at pre-flight (url=${preFlightUrl})`
+          );
+          cpErr.checkpoint = true;
+          cpErr.noRetry = true;
+          throw cpErr;
+        }
+        console.log(`Soft checkpoint dismissed at pre-flight — continuing`);
+      }
+    } catch (err) {
+      failure = { step: { type: 'pre_flight_checkpoint' }, error: err };
+      if (vaultState) {
+        const msg =
+          err && err.checkpoint
+            ? `Checkpoint hit at pre-flight — aborting profile`
+            : `Pre-flight check failed: ${err.message}`;
+        vaultLog.browser({ browserId: vaultState.browserId }, [{ level: 'error', msg }]);
+      }
+      if (err && err.checkpoint) {
+        console.warn(
+          `Checkpoint hit at pre-flight — skipping all steps for this profile`
+        );
+        const userId = user?._id || user?.id || '';
+        if (userId) {
+          try {
+            await updateProfile(userId, { status: 'Need Checking' });
+            console.log(`Profile ${userId} status -> "Need Checking"`);
+          } catch (patchErr) {
+            console.warn(
+              `Failed to PATCH status "Need Checking" for ${userId}: ${patchErr.message}`
+            );
+          }
+        }
+      }
+      throw err;
+    }
+
     // Auto re-login: detect logged-out state and re-auth before any task step
     // runs on a guest session. Detection uses three signals (URL / password
     // field / profile probe via user.profileUrl). Re-auth navigates to
@@ -795,9 +962,15 @@ async function runTask(task) {
   const options = { blockMedia: blockMedia !== false };
   const startedAtMs = Date.now();
 
+  // Memoized — if run-task.js already initialized the dir (so it could set up
+  // the top-level tasks-logs.log tee before this point), this call is a no-op
+  // and returns the same path.
+  const runLogDir = initRunLogDir(taskId);
+
   console.log(
-    `\n=== Task ${taskId}: ${userIds.length} profile(s), concurrency: ${limit}, blockMedia: ${options.blockMedia} ===\n`
+    `\n=== Task ${taskId}: ${userIds.length} profile(s), concurrency: ${limit}, blockMedia: ${options.blockMedia} ===`
   );
+  console.log(`Logs: ${runLogDir}\n`);
 
   vaultLog.task({
     taskId,
@@ -827,7 +1000,7 @@ async function runTask(task) {
       }
       const displayName = buildDisplayName(userPreview, userId);
 
-      await runInSession({ displayName, browserId, idsToStrip: [userId] }, async () => {
+      await runInSession({ displayName, browserId, idsToStrip: [userId], userId }, async () => {
         let session;
         try {
           const browserInfos = await launchBrowsers([userId]);

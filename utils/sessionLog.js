@@ -1,8 +1,20 @@
 /**
  * Per-profile logging: tags console output with the user's display name and
- * tees every line to logs/{name}-{date}.log. Uses AsyncLocalStorage so any
- * console.log triggered within a profile's lifecycle (runBrowser, action
- * handlers, etc.) is automatically routed to that profile's log file.
+ * tees every line to the profile's session.log inside the run-scoped log
+ * directory.
+ *
+ * When the run dir has been initialized (via utils/runLogDir.js), each
+ * profile gets its own folder:
+ *
+ *   logs/{taskId}-{ts}/profiles/{DisplayName}-{shortId}/session.log
+ *
+ * If the run dir hasn't been initialized (legacy entry points / unit tests),
+ * we fall back to the flat layout: logs/{DisplayName}-{date}.log.
+ *
+ * Uses AsyncLocalStorage so any console.log triggered within a profile's
+ * lifecycle (runBrowser, action handlers, etc.) is automatically routed to
+ * that profile's log file. The profile folder path is also exposed on the
+ * ALS context so dumpFailure helpers can write HTML/PNG dumps alongside.
  */
 
 const fs = require('fs');
@@ -10,26 +22,56 @@ const path = require('path');
 const { AsyncLocalStorage } = require('async_hooks');
 const { inspect } = require('util');
 const { vaultLog } = require('../vault-log');
+const { ensureProfileLogDir } = require('./runLogDir');
 
-const LOGS_DIR = path.join(process.cwd(), 'logs');
+const LEGACY_LOGS_DIR = path.join(process.cwd(), 'logs');
 const als = new AsyncLocalStorage();
 
-function ensureLogsDir() {
+function ensureLegacyLogsDir() {
   try {
-    fs.mkdirSync(LOGS_DIR, { recursive: true });
+    fs.mkdirSync(LEGACY_LOGS_DIR, { recursive: true });
   } catch (_) {}
 }
 
 function sanitize(name) {
-  return String(name || 'unknown')
-    .replace(/[\\/:*?"<>|]/g, '_')
-    .trim() || 'unknown';
+  return (
+    String(name || 'unknown')
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .trim() || 'unknown'
+  );
 }
 
-function logFilePath(displayName) {
-  ensureLogsDir();
+/**
+ * Build a folder name unique within the run by appending a short userId
+ * suffix to the display name (`Janet Sullivan-69fae777`). When displayName
+ * already equals the userId (no firstName/lastName on the user record), the
+ * suffix is skipped to avoid `69fae777...-69fae777` duplication.
+ */
+function buildProfileFolderName(displayName, userId) {
+  const safeDisplay = sanitize(displayName);
+  if (!userId) return safeDisplay;
+  const shortId = String(userId).slice(0, 8);
+  if (safeDisplay === sanitize(userId)) return safeDisplay;
+  return `${safeDisplay}-${shortId}`;
+}
+
+/**
+ * Resolve the path for a profile's session log. When the run dir is
+ * initialized, returns `{runDir}/profiles/{folderName}/session.log` plus
+ * the folder path. Falls back to the flat layout when not.
+ */
+function resolveSessionLogPaths(displayName, userId) {
+  const folderName = buildProfileFolderName(displayName, userId);
+  const profileDir = ensureProfileLogDir(folderName);
+  if (profileDir) {
+    return { logPath: path.join(profileDir, 'session.log'), profileDir };
+  }
+  ensureLegacyLogsDir();
   const day = new Date().toISOString().slice(0, 10);
-  return path.join(LOGS_DIR, `${sanitize(displayName)}-${day}.log`);
+  return {
+    logPath: path.join(LEGACY_LOGS_DIR, `${sanitize(displayName)}-${day}.log`),
+    profileDir: null,
+  };
 }
 
 function formatArg(a) {
@@ -114,15 +156,16 @@ function buildDisplayName(user, fallback) {
 /**
  * Run `fn` inside a session-scoped logging context.
  * All console output within `fn` is prefixed with [displayName] and appended
- * to the per-profile log file. `idsToStrip` lets the wrapper drop legacy
- * `[uuid]` prefixes already baked into log strings.
+ * to the per-profile session.log inside the run-scoped folder. `idsToStrip`
+ * lets the wrapper drop legacy `[uuid]` prefixes already baked into log
+ * strings. `userId` is used to disambiguate the profile folder.
  */
-function runInSession({ displayName, browserId, idsToStrip = [] }, fn) {
+function runInSession({ displayName, browserId, idsToStrip = [], userId }, fn) {
   patchConsole();
-  const logPath = logFilePath(displayName);
+  const { logPath, profileDir } = resolveSessionLogPaths(displayName, userId);
   const ts = new Date().toISOString();
   appendLine(logPath, `\n=== Session start ${ts} (${displayName}) ===`);
-  return als.run({ displayName, logPath, idsToStrip, browserId }, fn);
+  return als.run({ displayName, logPath, idsToStrip, browserId, profileDir }, fn);
 }
 
 /**
@@ -134,4 +177,21 @@ function addStripId(id) {
   if (ctx && id && !ctx.idsToStrip.includes(id)) ctx.idsToStrip.push(id);
 }
 
-module.exports = { runInSession, addStripId, buildDisplayName, logFilePath };
+/**
+ * Return the current profile's log directory (the folder containing
+ * session.log) when called inside a `runInSession` scope. Returns null
+ * outside a session OR when the run dir wasn't initialized (legacy flat
+ * layout — dumps fall back to logs/).
+ */
+function getProfileLogDir() {
+  const ctx = als.getStore();
+  return ctx ? ctx.profileDir || null : null;
+}
+
+module.exports = {
+  runInSession,
+  addStripId,
+  buildDisplayName,
+  buildProfileFolderName,
+  getProfileLogDir,
+};

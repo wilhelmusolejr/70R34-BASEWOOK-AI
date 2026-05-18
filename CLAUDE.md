@@ -29,8 +29,8 @@ that posts to the same endpoint.
 │   ├── homepage_interaction.js  visit_profile.js  search.js
 │   ├── open_search_result.js    create_page.js    scroll.js
 │   ├── like_posts.js            share_posts.js    share_post.js
-│   ├── add_friend.js            follow.js         connect.js
-│   ├── connect_loop.js          accept_loop.js
+│   ├── publish_post.js          add_friend.js     follow.js
+│   ├── connect.js               connect_loop.js   accept_loop.js
 │   ├── setup_about.js           setup_avatar.js   setup_cover.js
 │   ├── schedule_posts.js        switch_profile.js wait.js
 │   ├── facebook_signup.js       facebook_login.js ensure_login.js
@@ -40,11 +40,15 @@ that posts to the same endpoint.
 │   ├── browserManager.js        # ONLY file aware of Hidemium / Multilogin
 │   ├── userApi.js               # 3rd-party user fetch
 │   ├── humanBehavior.js         # human-like interaction
-│   ├── generateMessage.js       # GitHub Models — share messages
+│   ├── generateMessage.js       # Gemini — share/comment messages
+│   ├── generatePostCaption.js   # Gemini — original post captions (publish_post)
 │   ├── pageSetupHelpers.js      # shared helpers for page setup
 │   ├── pageAddressData.js       # city/state parsing + ZIP seeds
 │   ├── randomCount.js           # {count} | {min,max} resolver for feed actions
-│   └── sessionLog.js            # per-profile log file + vault tee
+│   ├── runLogDir.js             # per-run scoped log directory (logs/{taskId}-{ts}/)
+│   └── sessionLog.js            # per-profile session.log inside the run dir + vault tee
+├── system_prompt.txt            # generateMessage system instruction (shares/comments)
+├── system_prompt_post.txt       # generatePostCaption system instruction (publish_post)
 ├── vault-log.js                 # POSTs to Profile Vault Logs dashboard (gated by VAULT_ENABLED)
 ├── log.md                       # Vault Logs HTTP contract spec
 └── chat/nlToJson.js             # NL → task JSON
@@ -157,9 +161,10 @@ via `resolveSetupPageImages()` (`linkedPage.assets[0]` → profile, `[1]` → co
 | `city` / `hometown` | `setup_about`, `create_page` (via `parseCityState`), `search` (page mode) |
 | `bio` | `setup_about` (NOT `create_page` — that uses `linkedPage.bio`) |
 | `personal`, `work`, `education`, `hobbies`, `travel`, `interests` | `setup_about` |
-| `identityPrompt` | share-message generation |
+| `identityPrompt` | share-message generation, `publish_post` caption generation |
 | `images[0]` (face annotation) | `setup_avatar` |
 | `images[1]` | `setup_cover` |
+| `posts[].{images[],context,caption?}` | `publish_post` (random pick; `images[].filename` resolved via `buildImageUrl`; `context` seeds `postContext` for AI caption; `caption` is **not** auto-injected — captions are AI-generated) |
 | `linkedPage.{pageName,bio,assets[0..1],posts}` | `create_page`, `schedule_posts` |
 | `browsers[]` | `browserManager` (matched by `provider`) |
 | `pageUrl` | PATCHed back after `create_page` |
@@ -211,6 +216,51 @@ Validate required params at top, throw clear errors. Default optionals
 (`params.count ?? 1`). Per-browser failures must NOT kill the task —
 `Promise.allSettled`. One action = one file.
 
+## Run-scoped log directory
+
+Every `runTask` invocation gets its own folder under `logs/`, named
+`{taskId}-{YYYYMMDD-HHmmss}`. Top-level run output + every profile's session
+log + any failure dumps for that run all live under one roof:
+
+```
+logs/
+  engage-and-add-20260517-200351/
+    tasks-logs.log                   ← top-level stream: banners, heartbeats,
+                                       Result JSON, !!! beforeExit / exit /
+                                       UNHANDLED REJECTION diagnostics
+    profiles/
+      Natalie Gray-6a03d4b0/
+        session.log                  ← per-profile console output, tagged
+                                       with [DisplayName] prefix
+        publish_post-error-4img-2026-05-18T03-09-27-064Z.html
+        publish_post-error-4img-2026-05-18T03-09-27-064Z.png
+        checkpoint-preflight-2026-05-17T20-04-15-732Z.{html,png}
+```
+
+**Folder name = `{DisplayName}-{first 8 chars of userId}`.** The short-id
+suffix prevents collisions when two profiles share `firstName + lastName`.
+
+`utils/runLogDir.js` owns the layout. `initRunLogDir(taskId)` is memoized
+per process, so `run-task.js` (which sets it up before anything else logs)
+and `runner.js` (which calls it again from `runTask`) both resolve to the
+same dir without coordination.
+
+**stdout/stderr tee.** `run-task.js` wraps `process.stdout.write` and
+`process.stderr.write` synchronously (`fs.writeSync`, not `createWriteStream`)
+so every byte going to either stream is also appended to `tasks-logs.log`.
+The sync path is critical: an async stream queues work on the event loop,
+which makes `beforeExit` fire on every drain, which writes the banner via
+`console.error`, which queues more work — infinite loop, 1.6M lines in
+seconds. Sync writes don't queue work; `beforeExit` fires exactly once and
+the final bytes are guaranteed flushed before `process.exit`.
+
+**Per-profile log file = `session.log` inside the profile folder** (fixed
+name; the folder identifies the profile). Written by `utils/sessionLog.js`
+via a `console.{log,info,warn,error}` monkey-patch that re-routes output
+when inside a `runInSession` scope. The profile folder path is also stored
+in the AsyncLocalStorage context — actions can read it via
+`getProfileLogDir()` from `sessionLog` to drop dumps alongside.
+
 ## Failure forensics — HTML + screenshot dumps
 
 When an action interacts with a 3rd-party site whose DOM can change without
@@ -219,22 +269,32 @@ warning (Microsoft, Facebook, etc.), a thrown selector timeout tells you
 the failing state may not reproduce. Capture the page state at the moment
 of failure instead.
 
-**Convention.** Add a small helper at the top of the action file:
+**Convention.** Add a small helper at the top of the action file. Drop the
+dump into the **run-scoped profile folder** via `getProfileLogDir()` so all
+forensics for a profile land alongside its `session.log`:
 
 ```javascript
 const fs = require('fs');
 const path = require('path');
+const { getProfileLogDir } = require('../utils/sessionLog');
 
 async function dumpFailure(page, label) {
   try {
+    if (!page) return;
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const safeLabel = String(label || 'failure').replace(/[^a-z0-9_-]+/gi, '_');
-    const logsDir = path.join(process.cwd(), 'logs');
-    if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+
+    // Prefer the per-profile run-scoped dir. Falls back to flat logs/ when
+    // called outside a runInSession scope (dev scripts, unit tests).
+    const profileDir = getProfileLogDir();
+    const targetDir = profileDir || path.join(process.cwd(), 'logs');
+    try {
+      if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+    } catch (_) {}
 
     const baseName = `<action>-${safeLabel}-${ts}`;
-    const htmlPath = path.join(logsDir, `${baseName}.html`);
-    const pngPath = path.join(logsDir, `${baseName}.png`);
+    const htmlPath = path.join(targetDir, `${baseName}.html`);
+    const pngPath = path.join(targetDir, `${baseName}.png`);
 
     let url = '(unknown)';
     try { url = page.url(); } catch (_) {}
@@ -274,10 +334,14 @@ module.exports = async function my_action(page, params) {
 ```
 
 **Rules.**
-- Output dir is always `logs/` (auto-created). Same folder as per-profile session logs.
-- Filename: `<action>-<label>-<ISO-ts>.{html,png}`. The label identifies the
-  failing entity (email prefix, profile id, target URL) so concurrent
-  failures don't overwrite each other.
+- Output dir is the **per-profile run-scoped folder** when called inside a
+  `runInSession` scope (which is every action invocation from the runner):
+  `logs/{taskId}-{YYYYMMDD-HHmmss}/profiles/{DisplayName}-{shortUserId}/`.
+  Falls back to flat `logs/` outside a session.
+- Filename: `<action>-<label>-<ISO-ts>.{html,png}`. The folder already
+  identifies the profile, so labels can be terse (`error-preflight`,
+  `error-4img`) — they're for distinguishing concurrent failures within
+  the same profile.
 - Embed the URL as an HTML comment in the dump (`<!-- url: ... -->`).
   When you open the HTML standalone it lacks the address bar context.
 - `fullPage: true` on the screenshot — failures often involve a banner or
@@ -285,7 +349,9 @@ module.exports = async function my_action(page, params) {
 - **Helper swallows its own errors.** A dump-on-dump failure must never
   mask the original throw — the action's stack is what runWithRetry sees.
 - **Always re-throw** in the catch. The dump is forensics, not recovery.
-- Reference implementation: `actions/outlook_login.js`'s `dumpFailure`.
+- Reference implementations: `actions/outlook_login.js` (Microsoft login),
+  `actions/publish_post.js` (FB composer), `runner.js`
+  `dumpCheckpointState` (pre-flight + post-step checkpoint detection).
 
 **When NOT to add it.**
 - Pure-FB actions where the same `humanClick` / selector pattern is used
@@ -601,6 +667,88 @@ Like confirmed:          [aria-label="Remove Like"] or [aria-label="Unlike"]
 Single-post version. Navigates to post URL directly, extracts context, shares with
 static `message` OR API-generated via `userIdentity` + `instruction`.
 
+## `publish_post` — Create a new post on the user's timeline
+
+Leaf action. Publishes a new post (one or more images + AI-generated caption)
+to the user's own profile.
+
+### Flow
+
+```
+goto facebook.com/me  ← unconditional, /me is the known-good landing page
+  → find page-level <input type="file" multiple accept*="image">
+  → setInputFiles(tmpPaths)   ← THIS triggers FB's React modal-open handler
+  → wait for div[role="dialog"][aria-label="Create post"] to appear (30s)
+  → (best-effort) set audience to Public
+  → wait for img[alt] preview inside dialog (45s)
+  → click dialog-scoped textbox div[role="textbox"][data-lexical-editor="true"]
+  → focus() + humanType(caption)
+  → click div[role="button"][aria-label="Post"]
+  → wait for dialog detach (60s) = success signal
+  → unlink all tmp files in finally
+```
+
+### Caption — AI-generated via Gemini
+
+Captions are produced by `utils/generatePostCaption.js` using
+`system_prompt_post.txt` at the repo root. Priority:
+
+1. Explicit `params.caption` wins (lets a task hardcode test text).
+2. `generatePostCaption(userIdentity, postContext)` — voice-matched caption.
+3. Empty (post goes captionless).
+
+The system prompt does the heavy lifting: persona matching from `userIdentity`,
+50-reasons-people-post-on-Facebook fallback when `postContext` is vague,
+emoji/hashtag restraint, no AI tells. **`pick.caption` from `user.posts[]` is
+deliberately NOT auto-injected** — the AI generates fresh per call.
+
+### Composer modal-vs-inline — why we skip every click
+
+FB serves the post composer in two layouts depending on where the session
+lands after the homepage navigation:
+
+| Layout | Trigger | Behavior |
+|--------|---------|----------|
+| Home Feed | `div[role="button"]` "What's on your mind?" | Click opens the Create post modal. `Photo/video` is INSIDE the modal. |
+| `/me` Profile | `[role="textbox"]` + inline quick-action row | Clicking the textbox just focuses it. Clicking the inline `Photo/video` triggers a NATIVE file chooser, which Playwright auto-cancels without a `waitForEvent` listener — modal never appears. |
+
+Both layouts mount a hidden `<input type="file" multiple
+accept="image/*,video/*,...">` in the page DOM as part of the composer
+surface. **Calling `setInputFiles` directly on that input fires FB's React
+change handler, which opens the modal with previews loaded.** This bypasses
+every click-trigger ambiguity, works identically on both layouts, and avoids
+the native-chooser auto-cancel trap.
+
+The CLAUDE.md `setup_avatar` warning ("Do NOT use `setInputFiles` on the
+hidden input") is about a different React state path — it does not apply to
+the composer's flow.
+
+### Other gotchas
+
+- **Lexical textbox locator MUST be scoped to the dialog**
+  (`dialog.locator('div[role="textbox"][data-lexical-editor="true"]').first()`).
+  FB pre-renders ~4 hidden Lexical editors page-wide (Stories composer,
+  Marketplace search, etc.). A page-level `.first()` grabs an off-screen
+  instance, Playwright auto-scrolls the page to it (the visible "scroll
+  jump"), focus + keys land on the wrong editor.
+
+- **`textbox.click()` (NOT `humanClick`).** Direct locator click — humanClick's
+  bbox-center offset can miss padded child hit regions on modal targets.
+
+- **Audience widget timeout is non-fatal.** When the account already defaults
+  to Public, `[aria-label="Audience selector"]` never renders and our 3s
+  wait warns + continues. Real (non-default) audience changes still work.
+
+### Auto-injected params
+
+| Param | Source |
+|-------|--------|
+| `imageUrls` | random pick from `user.posts[].images`, each `{filename}` resolved through `buildImageUrl(IMAGE_SERVER_BASE_URL + filename)` |
+| `postContext` | `pick.context` (the picked entry's image description) |
+| `userIdentity` | `user.identityPrompt` |
+
+Explicit params always win.
+
 ## `wait` — Idle action
 
 Two modes:
@@ -631,6 +779,37 @@ Matches persona style. Never starts with "Check this out", "Pretty cool", "Wow",
 "Interesting". Reacts to post mood.
 
 `userIdentity` alone triggers API. `message` (static) wins over API.
+
+## `utils/generatePostCaption.js` — Original post caption generation
+
+Used by `publish_post` to generate first-person captions for an account's own
+timeline posts (NOT reactions to someone else's content — that's
+`generateMessage`).
+
+Same Gemini env vars as `generateMessage` (`GEMINI_API_KEY`, `GEMINI_MODEL`),
+but reads from a separate `system_prompt_post.txt` at the repo root. Split
+marker on read: `/^##\s*Input Format|^INPUT FORMAT:/im` (matches either the
+markdown-heading or the legacy line-marker form).
+
+Differences from `generateMessage`:
+
+- Voice-first prompt — persona match is the north star. A 22-year-old in
+  marketing writes nothing like a 55-year-old engineer.
+- 50-reasons fallback: when `postContext` is vague ("four lifestyle shots",
+  "person at a place"), the prompt picks the most believable posting reason
+  from a 50-entry list (photo dump, birthday shoutout, conference, etc.)
+  cross-referenced against the user's age + job + hobbies + relationship.
+- Caption length: 1-3 sentences typical, 4-6 OK for photo dumps. Never an
+  essay.
+- Emojis: ~50% chance of 1-2 emojis, biased lower for older / professional
+  personas.
+- Higher temperature (`0.95` vs `0.9`) and longer `maxOutputTokens` (300 vs
+  200) for more identity variance.
+
+Returns plain string, or `''` on API error / SKIP / empty. Same em/en-dash
+sanitization as `generateMessage`. `params.caption` (static) wins over the
+API call. `userIdentity` alone triggers the call; `postContext` is
+recommended but optional.
 
 ## `outlook_login` — Sign in to outlook.com
 
@@ -729,20 +908,48 @@ Every handler is wrapped in `runWithRetry(fn, profileId, stepType, page)`:
 `err.noRetry = true` opts out — handlers with internal retries (e.g. `create_page`)
 set this so `runWithRetry` won't restart and re-trigger committed side effects.
 
-**Checkpoint short-circuit:** after every step error, `runWithRetry` reads
-`page.url()` (via `safePageUrl`). If the URL contains `"checkpoint"`, FB has
-flagged the profile (login challenge / ID verification / etc.) — retrying is
-pointless. `runWithRetry` first calls `tryDismissSoftCheckpoint(page)` (FB's
-"We suspect automated behavior" modal has a Dismiss button on a clean page
-underneath — gated on both the button AND the warning text being visible).
-If dismissed, the retry continues. If not, the error is tagged
-`err.checkpoint = true` + `err.noRetry = true`, the retry loop breaks
-immediately, `runBrowser`'s per-step catch logs `Checkpoint hit during
-<step> — skipping remaining steps for this profile`, PATCHes the user
-record `{ status: "Need Checking" }` so it's surfaced for manual review,
-fires the tracker log, and the worker moves on. The post-action sweep in
-`runStep` also re-checks the URL after a successful step — catches FB
-redirects that didn't throw.
+**Checkpoint short-circuit:** FB redirects flagged accounts to
+`/checkpoint/{id}/?next=...` URLs. Retrying any step from that state is
+pointless. Detected in three places:
+
+1. **Pre-flight** (`runBrowser`, immediately after the facebook.com nav,
+   before any task step runs). Catches profiles that were already on a
+   checkpoint when the browser opened, OR that FB redirected after the
+   nav. Failure here is reported as `FAIL at pre_flight_checkpoint` (not
+   misattributed to whatever step would have run first).
+2. **Step error** (inside `runWithRetry`, when a step throws). The URL is
+   re-read on every error tick; if it contains `"checkpoint"`, the retry
+   loop short-circuits.
+3. **Post-step sweep** (after each successful step in `runStep`). Catches
+   FB redirects that didn't throw — e.g. a like_posts that finishes its
+   clicks while the next navigation lands on `/checkpoint/`.
+
+All three call `tryDismissSoftCheckpoint(page)` first. Some checkpoint
+URLs are "soft" — FB shows a modal with a Dismiss button on top of an
+otherwise functional page. The helper:
+
+- Waits `domcontentloaded` (10s) so the modal has time to mount.
+- Waits up to 10s for `div[aria-label="Dismiss"][role="button"]` to be
+  visible (`waitFor`, NOT `isVisible({timeout})` — the latter only
+  partially honors the timeout and the previous 2s probe was firing
+  before the modal mounted).
+- **No warning-text gate.** Callers have already confirmed the URL
+  contains `"checkpoint"`, so any Dismiss button on the page IS the
+  checkpoint dismiss. The text gate previously made the helper brittle
+  to FB's wording + locale tweaks.
+- If clicked, returns true → retry continues on the now-clean page.
+
+If the dismiss helper returns false (hard checkpoint, no Dismiss button),
+the error is tagged `err.checkpoint = true` + `err.noRetry = true`,
+`runWithRetry` breaks the loop, `runBrowser`'s catch logs
+`Checkpoint hit during <step> — skipping remaining steps for this profile`,
+PATCHes the user record `{ status: "Need Checking" }`, fires the tracker
+log, and the worker moves on. **Before throwing, `dumpCheckpointState` in
+`runner.js` writes the page HTML + full-page PNG to the profile folder**
+(`checkpoint-preflight-<ts>.{html,png}`, `checkpoint-step-<type>-<ts>`,
+`checkpoint-post-<type>-<ts>`) so the actual checkpoint variant can be
+inspected later — was it a real hard checkpoint, or a soft modal variant
+the dismiss helper didn't recognize?
 
 **Credential rejection short-circuit:** handlers like `outlook_login` set
 `err.credentialsRejected = true` + `err.noRetry = true` when Microsoft
@@ -865,6 +1072,7 @@ Walks step tree before execution, fills missing params from user record.
 | `search` | `city` from `user.city` (page mode) |
 | `check_ip` | `userId` |
 | `share_posts` / `share_post` | `userIdentity` |
+| `publish_post` | `imageUrls` (random pick from `user.posts[].images`, resolved via `buildImageUrl`), `postContext` (picked entry's `context`), `userIdentity` |
 | `facebook_signup` / `ensure_login` | `firstName`, `lastName`, `birthdayDate` (or `dob`), `gender`, `email` (selected or `[0]`), `password` from `user.facebookPassword` |
 | `facebook_login` | `email` (selected or `[0]`), `password` from `user.facebookPassword` |
 | `outlook_login` | `email` (selected or `[0]`), `password` from `user.emailPassword` |
@@ -995,12 +1203,15 @@ POST errors caught + warned. Skipped if `userId`, `note`, or `USER_API_BASE_URL`
 
 **Done:** server, runner, browserManager (Hidemium + Multilogin), humanBehavior, all actions
 listed in project structure, virtualized-feed pattern, network resilience, retry-all-errors,
-user API integration, `injectUserParams`, `concurrency` + `blockMedia`, GitHub Models share
-generation, between-step delays, end-of-task tab cleanup, auto tracker-log, NL→JSON.
+user API integration, `injectUserParams`, `concurrency` + `blockMedia`, Gemini share + post
+caption generation (`generateMessage` + `generatePostCaption`), `publish_post` with
+input-driven modal opening, between-step delays, end-of-task tab cleanup, auto tracker-log,
+NL→JSON, pre-flight + per-step checkpoint detection with HTML/PNG forensic dumps, per-run
+scoped log dirs (`logs/{taskId}-{ts}/profiles/{name}-{shortId}/`).
 
 **TODO:** `comment_post`, `join_group`, `send_message`; comment generation; SQLite task state;
-per-task/per-browser logging; Web UI for chat; schema validation on generated JSON; Multilogin
-profile creation in `create-profile.js`.
+Web UI for chat; schema validation on generated JSON; Multilogin profile creation in
+`create-profile.js`.
 
 ## Notes
 

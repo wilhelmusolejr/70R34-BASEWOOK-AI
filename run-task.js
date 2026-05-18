@@ -10,6 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 const { runTask } = require('./runner');
+const { initRunLogDir } = require('./utils/runLogDir');
 
 // Crash diagnostics — modern Node (15+) kills the process on unhandled
 // rejections by default. If that happens inside a patched console.log path,
@@ -86,9 +87,69 @@ function loadTask(fileArg) {
   }
 }
 
-async function main() {
+/**
+ * Tee stdout + stderr to `tasks-logs.log` inside the run-scoped folder.
+ * Wraps the raw process stream writers so it captures EVERYTHING: the
+ * top-level banners, heartbeats, the final Result JSON, AND every per-profile
+ * line that flows through the sessionLog console patch (which still calls
+ * the original console methods → process.stdout.write under the hood).
+ *
+ * **Writes must be synchronous.** An async fs.createWriteStream queues work
+ * on the event loop, which prevents Node from exiting after the final
+ * Result print — and worse, it makes `beforeExit` fire on every drain. The
+ * beforeExit handler writes a diagnostic line via console.error, which
+ * queues another async write, which drains, which fires beforeExit, which
+ * writes, ad infinitum (1.6M lines in seconds the first time). fs.writeSync
+ * adds no event-loop work, so beforeExit fires exactly once and the final
+ * bytes (`!!! process.exit`) are guaranteed flushed before the process dies.
+ *
+ * Per-profile session.log files are still written separately by sessionLog,
+ * so the top-level file is a complete superset transcript while per-profile
+ * files give you the filtered view.
+ */
+function teeStdoutToFile(filePath) {
+  let fd = null;
   try {
-    const task = loadTask(process.argv[2]);
+    fd = fs.openSync(filePath, 'a');
+  } catch (_) {
+    return; // file unwritable — skip tee, original stdout/stderr untouched
+  }
+
+  const wrap = (origWrite) => {
+    return function (chunk, encoding, cb) {
+      try {
+        const buf = Buffer.isBuffer(chunk)
+          ? chunk
+          : Buffer.from(String(chunk), typeof encoding === 'string' ? encoding : 'utf8');
+        fs.writeSync(fd, buf);
+      } catch (_) {}
+      return origWrite.call(this, chunk, encoding, cb);
+    };
+  };
+
+  process.stdout.write = wrap(process.stdout.write);
+  process.stderr.write = wrap(process.stderr.write);
+}
+
+async function main() {
+  let task;
+  try {
+    task = loadTask(process.argv[2]);
+  } catch (err) {
+    console.error('Task failed:', err.message);
+    process.exitCode = 1;
+    return;
+  }
+
+  // Initialize the run-scoped log dir BEFORE anything else logs — this way
+  // even the "=== Task ... ===" banner and the resolved-paths line from
+  // runner.js end up in tasks-logs.log. runTask's own initRunLogDir call is
+  // memoized and will return the same dir.
+  const runLogDir = initRunLogDir(task.taskId);
+  teeStdoutToFile(path.join(runLogDir, 'tasks-logs.log'));
+  console.log(`Top-level log: ${path.join(runLogDir, 'tasks-logs.log')}`);
+
+  try {
     const result = await runTask(task);
     console.log('\nResult:', JSON.stringify(result, null, 2));
   } catch (err) {

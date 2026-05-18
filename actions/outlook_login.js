@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const { humanWait, humanClick, humanType } = require('../utils/humanBehavior');
+const { getProfileLogDir } = require('../utils/sessionLog');
 
 const PROMPT_TICKS = 12;
 const PROMPT_INTERVAL_MS = 2500;
@@ -61,21 +62,32 @@ async function detectCredentialError(page) {
 }
 
 /**
- * Write the current page's HTML + a PNG screenshot to logs/ so failures can
- * be diagnosed without re-running. Filename includes a timestamp + label so
- * concurrent failures don't overwrite each other. Best-effort — swallows
- * its own errors, never throws.
+ * Write the current page's HTML + a PNG screenshot to the profile's run-
+ * scoped log folder so failures can be diagnosed without re-running. When
+ * called inside a `runInSession` scope, drops into
+ * `logs/{taskId}-{ts}/profiles/{name}-{shortId}/`. When called outside one,
+ * falls back to `logs/`. Best-effort — swallows its own errors, never throws.
  */
 async function dumpFailure(page, label) {
   try {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const safeLabel = String(label || 'failure').replace(/[^a-z0-9_-]+/gi, '_');
-    const logsDir = path.join(process.cwd(), 'logs');
-    if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
 
-    const baseName = `outlook-${safeLabel}-${ts}`;
-    const htmlPath = path.join(logsDir, `${baseName}.html`);
-    const pngPath = path.join(logsDir, `${baseName}.png`);
+    // Prefer the per-profile dir from the run-scoped log layout. Folder name
+    // already identifies the profile, so we drop the email/label prefix and
+    // just write `outlook-error-{ts}.{html,png}`. Outside a session scope
+    // (e.g. dev script), fall back to the flat logs/ dir with the legacy
+    // `outlook-{label}-{ts}` filename so dumps don't get overwritten.
+    const profileDir = getProfileLogDir();
+    const useLegacy = !profileDir;
+    const targetDir = profileDir || path.join(process.cwd(), 'logs');
+    if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+
+    const baseName = useLegacy
+      ? `outlook-${safeLabel}-${ts}`
+      : `outlook-error-${ts}`;
+    const htmlPath = path.join(targetDir, `${baseName}.html`);
+    const pngPath = path.join(targetDir, `${baseName}.png`);
 
     let url = '(unknown)';
     try {
