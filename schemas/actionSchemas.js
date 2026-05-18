@@ -428,6 +428,11 @@ const actionSchemas = {
         description:
           'Only used when pool="users". Filters candidates to profiles whose recorded friends count is below this threshold. Profiles with no recorded count are still included (their count gets PATCHed during the visit).',
       },
+      skipIfFriendsAbove: {
+        type: 'number',
+        description:
+          'Optional sender-side skip. When set, the action navigates to /me, reads the sender\'s own current friend count, PATCHes it back to the user record (keeps the DB fresh — sender friend count is otherwise only updated when another bot visits this profile), and if the count exceeds this threshold returns without running the loop. Omit to never skip.',
+      },
     },
     hasChildren: false,
   },

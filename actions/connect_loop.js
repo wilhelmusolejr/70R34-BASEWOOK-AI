@@ -176,14 +176,62 @@ module.exports = async function connect_loop(page, params = {}) {
   const waitMax = Number(params.waitMax ?? 60);
   const senderId = params.userId || '';
   const maxFriends = params.maxFriends != null ? Number(params.maxFriends) : 30;
+  const skipIfFriendsAbove =
+    params.skipIfFriendsAbove != null ? Number(params.skipIfFriendsAbove) : null;
 
   let successCount = 0;
   let attempts = 0;
   let stopReason = '';
 
   console.log(
-    `[connect_loop] target=${targetCount} pool="${pool}" maxAttempts=${maxAttempts} wait=${waitMin}-${waitMax}s sender=${senderId || '(none)'} maxFriends=${maxFriends}`
+    `[connect_loop] target=${targetCount} pool="${pool}" maxAttempts=${maxAttempts} wait=${waitMin}-${waitMax}s sender=${senderId || '(none)'} maxFriends=${maxFriends}` +
+      (skipIfFriendsAbove != null ? ` skipIfFriendsAbove=${skipIfFriendsAbove}` : '')
   );
+
+  // ── Sender-side skip check ───────────────────────────────────────────────
+  // When skipIfFriendsAbove is set, navigate to /me, read this account's
+  // current friend count, opportunistically PATCH it back (the sender's own
+  // friends count is otherwise only updated when ANOTHER bot visits this
+  // profile, so it goes stale), and skip the whole loop if the threshold is
+  // exceeded. Lets daily-engage tasks stop friend-adding once an account has
+  // filled out its initial social graph without the caller having to know
+  // the count up front.
+  if (skipIfFriendsAbove != null) {
+    try {
+      console.log(`[connect_loop] Pre-check: navigating to /me to read sender friend count...`);
+      await page.goto('https://www.facebook.com/me', { waitUntil: 'domcontentloaded' });
+      await humanWait(page, 2000, 3500);
+
+      const currentFriends = await readFriendCount(page);
+      if (currentFriends == null) {
+        console.log(
+          `[connect_loop] Could not read sender friend count from /me — proceeding with connect_loop.`
+        );
+      } else {
+        console.log(`[connect_loop] Sender friends=${currentFriends}.`);
+        if (senderId) {
+          try {
+            await updateProfile(senderId, { friends: currentFriends });
+            console.log(
+              `[connect_loop] PATCHed self friends=${currentFriends} on user ${senderId}.`
+            );
+          } catch (err) {
+            console.warn(`[connect_loop] PATCH self friends failed: ${err.message}`);
+          }
+        }
+        if (currentFriends > skipIfFriendsAbove) {
+          console.log(
+            `[connect_loop] Sender friends=${currentFriends} > ${skipIfFriendsAbove} — skipping action.`
+          );
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn(
+        `[connect_loop] Pre-check failed (${err.message}) — proceeding with connect_loop anyway.`
+      );
+    }
+  }
 
   while (successCount < targetCount && attempts < maxAttempts) {
     attempts++;
