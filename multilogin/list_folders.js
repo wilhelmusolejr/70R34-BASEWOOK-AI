@@ -37,17 +37,36 @@ async function get(token, path) {
   return res.json();
 }
 
-const { MLX_EMAIL, MLX_PASSWORD, WORKSPACE_ID } = process.env;
-if (!MLX_EMAIL || !MLX_PASSWORD || !WORKSPACE_ID) {
-  console.error("Set MLX_EMAIL, MLX_PASSWORD, and WORKSPACE_ID in .env first");
+const email = process.env.MULTILOGIN_EMAIL || process.env.MLX_EMAIL;
+const password = process.env.MULTILOGIN_PASSWORD || process.env.MLX_PASSWORD;
+const workspaceId = process.env.MULTILOGIN_WORKSPACE_ID || process.env.WORKSPACE_ID;
+const filter = process.argv[2] || process.env.FOLDER_FILTER || "";
+
+if (!email || !password || !workspaceId) {
+  console.error(
+    "Set MULTILOGIN_EMAIL, MULTILOGIN_PASSWORD, and MULTILOGIN_WORKSPACE_ID in .env first"
+  );
   process.exit(1);
 }
 
-const { token: initialToken, refreshToken } = await signIn(MLX_EMAIL, MLX_PASSWORD);
-const token = await switchWorkspace(initialToken, MLX_EMAIL, refreshToken, WORKSPACE_ID);
+const { token: initialToken, refreshToken } = await signIn(email, password);
+const token = await switchWorkspace(initialToken, email, refreshToken, workspaceId);
 
-const folders = await get(token, `/workspace/folders?workspace_id=${WORKSPACE_ID}`);
-console.log(`\n=== Folders (workspace ${WORKSPACE_ID}) ===`);
-console.dir(folders, { depth: null });
+const res = await get(token, `/workspace/folders?workspace_id=${workspaceId}`);
+const folders = res?.data?.folders ?? [];
 
-console.log("\nCopy the folder `id` you want into FOLDER_ID in .env");
+console.log(`\n=== Folders (workspace ${workspaceId}) — ${folders.length} total ===`);
+for (const f of folders) {
+  console.log(`  ${f.folder_id}  ${JSON.stringify(f.name)}  (profiles=${f.profiles_count})`);
+}
+
+if (filter) {
+  const needle = filter.toLowerCase();
+  const matches = folders.filter((f) => (f.name || "").toLowerCase().includes(needle));
+  console.log(`\n=== Matches for "${filter}" — ${matches.length} ===`);
+  for (const f of matches) {
+    console.log(`  ${f.folder_id}  ${JSON.stringify(f.name)}  (profiles=${f.profiles_count})`);
+  }
+}
+
+console.log("\nCopy the folder_id you want into FOLDER_ID in .env (or pass it to /profile/move).");
