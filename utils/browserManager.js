@@ -5,9 +5,13 @@
 
 const axios = require('axios');
 const crypto = require('crypto');
+const { exec } = require('child_process');
+const { promisify } = require('util');
 const { chromium } = require('playwright');
 const { fetchUser } = require('./userApi');
 require('dotenv').config();
+
+const execAsync = promisify(exec);
 
 const USER_API_BASE_URL = process.env.USER_API_BASE_URL;
 
@@ -846,19 +850,108 @@ const STOP_RETRY_WAIT_MS = 2000;
 /**
  * Close a Playwright browser with a hard timeout. CDP sockets can hang when
  * the underlying agent (Hidemium / MLX) is unresponsive; without this, the
- * whole task waits forever.
+ * whole task waits forever. Returns whether the timeout fired — the caller
+ * uses that to decide whether to reap a leaked chromium process.
  */
 async function closeBrowserWithTimeout(browser, profileId) {
-  if (!browser) return;
-  const timeout = new Promise((resolve) =>
-    setTimeout(() => {
+  if (!browser) return { timedOut: false };
+  let timedOut = false;
+  let timerId = null;
+  const timeout = new Promise((resolve) => {
+    timerId = setTimeout(() => {
+      timedOut = true;
       console.warn(
         `[browserManager] browser.close() timed out after ${BROWSER_CLOSE_TIMEOUT_MS}ms for ${profileId.slice(-8)} — abandoning CDP connection`
       );
       resolve();
-    }, BROWSER_CLOSE_TIMEOUT_MS)
-  );
-  await Promise.race([browser.close().catch(() => {}), timeout]);
+    }, BROWSER_CLOSE_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([browser.close().catch(() => {}), timeout]);
+  } finally {
+    // Clear when close resolved first — without this the timer fires later and
+    // logs a spurious "timed out" warning AFTER the profile already closed
+    // cleanly, leaks a 10s active handle each call, and was confusing to read.
+    if (timerId) clearTimeout(timerId);
+  }
+  return { timedOut };
+}
+
+/**
+ * Windows-only: find the PID of the process listening on a TCP port via
+ * `netstat -ano`. Returns null on non-Windows, on parse failure, or when no
+ * LISTENING socket on that port exists.
+ */
+async function findListeningPidOnPort(port) {
+  if (process.platform !== 'win32' || !port) return null;
+  try {
+    const { stdout } = await execAsync('netstat -ano -p TCP');
+    for (const line of stdout.split(/\r?\n/)) {
+      const cols = line.trim().split(/\s+/);
+      // Format: "TCP <local> <foreign> LISTENING <pid>"
+      if (cols.length < 5 || cols[0] !== 'TCP' || cols[3] !== 'LISTENING') continue;
+      const localPort = cols[1].split(':').pop();
+      if (localPort !== String(port)) continue;
+      const pid = parseInt(cols[4], 10);
+      if (Number.isFinite(pid) && pid > 0) return pid;
+    }
+  } catch (err) {
+    console.warn(`[browserManager] netstat lookup failed: ${err.message}`);
+  }
+  return null;
+}
+
+async function getProcessName(pid) {
+  if (process.platform !== 'win32' || !pid) return null;
+  try {
+    const { stdout } = await execAsync(`tasklist /FI "PID eq ${pid}" /NH /FO CSV`);
+    const first = stdout.trim().split(/\r?\n/)[0];
+    const m = first && first.match(/^"([^"]+)"/);
+    return m ? m[1] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * When `browser.close()` times out, the MLX/Hidemium agent may also fail to
+ * actually terminate the chromium process — over hours of runtime those
+ * orphans accumulate and eventually OOM-kill the bot. This reaper looks up
+ * the PID listening on the abandoned CDP port and force-kills it.
+ *
+ * Safety checks before kill: process must exist on the port, must not be
+ * this Node process, and its name must contain "chrom" (so we never kill
+ * the MLX agent / node / unrelated listeners).
+ */
+async function reapOrphanChromium(port, profileId) {
+  if (!port || process.platform !== 'win32') return false;
+  const pid = await findListeningPidOnPort(port);
+  if (!pid) return false;
+  if (pid === process.pid) {
+    console.warn(
+      `[browserManager] Reap aborted — PID ${pid} on port ${port} is this Node process`
+    );
+    return false;
+  }
+  const name = (await getProcessName(pid)) || '';
+  if (!/chrom/i.test(name)) {
+    console.warn(
+      `[browserManager] Reap aborted — PID ${pid} on port ${port} is "${name}", not chromium`
+    );
+    return false;
+  }
+  try {
+    await execAsync(`taskkill /F /PID ${pid}`);
+    console.warn(
+      `[browserManager] Reaped orphan ${name} PID ${pid} on port ${port} for ${profileId.slice(-8)}`
+    );
+    return true;
+  } catch (err) {
+    console.warn(
+      `[browserManager] Reap failed for ${name} PID ${pid} on port ${port}: ${err.message}`
+    );
+    return false;
+  }
 }
 
 async function stopMultiloginProfile(profileId) {
@@ -917,9 +1010,14 @@ async function stopHidemiumProfile(profileId) {
 
 /**
  * Close a profile, dispatching by provider stored on the session.
+ *
+ * `port` is optional. When provided AND `browser.close()` times out, we
+ * additionally reap the orphan chromium process listening on that CDP port
+ * — prevents long-running tasks from accumulating leaked browsers when
+ * the MLX/Hidemium agent fails to actually terminate chromium.
  */
-async function closeProfile(profileId, browser, provider) {
-  await closeBrowserWithTimeout(browser, profileId);
+async function closeProfile(profileId, browser, provider, port) {
+  const { timedOut } = await closeBrowserWithTimeout(browser, profileId);
 
   const resolvedProvider = (provider || BROWSER_PROVIDER || 'hidemium').toLowerCase();
 
@@ -927,6 +1025,10 @@ async function closeProfile(profileId, browser, provider) {
     resolvedProvider === 'multilogin'
       ? await stopMultiloginProfile(profileId)
       : await stopHidemiumProfile(profileId);
+
+  if (timedOut) {
+    await reapOrphanChromium(port, profileId);
+  }
 
   if (stopped) {
     console.log(`[browserManager] Profile ${profileId.slice(-8)} closed (${resolvedProvider})`);
@@ -974,7 +1076,9 @@ async function launchBrowsers(userIds) {
  */
 async function closeBrowsers(sessions) {
   await Promise.allSettled(
-    sessions.map((session) => closeProfile(session.profileId, session.browser, session.provider))
+    sessions.map((session) =>
+      closeProfile(session.profileId, session.browser, session.provider, session.port)
+    )
   );
 }
 

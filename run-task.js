@@ -66,8 +66,10 @@ function formatElapsed(ms) {
 const hb = setInterval(() => {
   const handles = process._getActiveHandles ? process._getActiveHandles().length : '?';
   const requests = process._getActiveRequests ? process._getActiveRequests().length : '?';
+  const m = process.memoryUsage();
+  const mb = (n) => Math.round(n / 1024 / 1024);
   console.log(
-    `[heartbeat] alive ${formatElapsed(Date.now() - startedAt)} | handles=${handles} requests=${requests}`
+    `[heartbeat] alive ${formatElapsed(Date.now() - startedAt)} | handles=${handles} requests=${requests} | rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}/${mb(m.heapTotal)}MB ext=${mb(m.external)}MB`
   );
 }, HEARTBEAT_MS);
 hb.unref();
