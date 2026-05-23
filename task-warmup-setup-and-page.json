@@ -1,0 +1,42 @@
+{
+  "taskId": "warmup-setup-and-page",
+  "profiles": [
+    "6a03d4b076c1dbb6df141b23",
+    "6a03d4b076c1dbb6df141b22",
+    "6a03d4b076c1dbb6df141b1f",
+    "6a03d4b076c1dbb6df141b1e",
+    "6a02943a9ceed638ddd6d90f",
+    "6a01fcb69ceed638ddd6c3eb",
+    "6a01899c9ceed638ddd6abc2",
+    "6a0161869ceed638ddd6a849",
+    "6a0161869ceed638ddd6a840",
+    "69fd72f01e49eec688fd0551"
+  ],
+  "concurrency": 2,
+  "blockMedia": true,
+  "steps": [
+    {
+      "type": "homepage_interaction",
+      "steps": [
+        { "type": "scroll", "params": { "min": 30, "max": 60 } },
+        { "type": "like_posts", "params": { "min": 0, "max": 3 } }
+      ]
+    },
+
+    {
+      "type": "create_page",
+      "steps": [
+        { "type": "switch_profile" },
+        { "type": "wait", "params": { "min": 60, "max": 120 } }
+      ]
+    },
+
+       {
+      "type": "homepage_interaction",
+      "steps": [
+        { "type": "scroll", "params": { "min": 30, "max": 60 } },
+        { "type": "like_posts", "params": { "min": 0, "max": 3 } }
+      ]
+    }
+  ]
+}

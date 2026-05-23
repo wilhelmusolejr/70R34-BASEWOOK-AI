@@ -41,7 +41,11 @@
       "Bash(git restore *)",
       "PowerShell(Stop-Process *)",
       "Bash(grep -nA 30 \"^async function humanType\\\\|^function humanType\\\\|humanType\\\\s*=\" utils/humanBehavior.js)",
-      "Bash(xargs -I{} ls -la \"{}profiles/\")"
+      "Bash(xargs -I{} ls -la \"{}profiles/\")",
+      "Bash(grep -nA 25 \"step.type === 'create_page'\" runner.js)",
+      "Bash(grep -nA 15 \"async function setPanelPrivacyPublic\\\\|async function clickPanelButton\" actions/setup_about.js)",
+      "Bash(grep -nA 25 \"async function waitForSaveComplete\" actions/setup_about.js)",
+      "PowerShell(Get-WinEvent *)"
     ]
   }
 }

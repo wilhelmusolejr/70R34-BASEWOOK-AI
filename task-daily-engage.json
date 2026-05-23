@@ -1,6 +1,6 @@
 {
   "taskId": "engage-and-add",
-  "profiles": ["69fd22161e49eec688fd0304"],
+  "profiles": ["69fd72f01e49eec688fd0556","6a01899c9ceed638ddd6abc2","6a01fcb69ceed638ddd6c3e8","6a01fcb69ceed638ddd6c3e9","6a01fcb69ceed638ddd6c3ea","6a01fcb69ceed638ddd6c3eb","6a0204629ceed638ddd6c512","6a0204629ceed638ddd6c513","6a0204629ceed638ddd6c514","6a0204629ceed638ddd6c516","6a02943a9ceed638ddd6d90d","6a02943a9ceed638ddd6d90f","6a03d4b076c1dbb6df141b1e","6a03d4b076c1dbb6df141b1f","6a03d4b076c1dbb6df141b20","6a03d4b076c1dbb6df141b22","6a03d4b076c1dbb6df141b23","6a03d4b076c1dbb6df141b24"],
   "concurrency": 5, 
   "blockMedia": true,
   "steps": [
@@ -38,6 +38,10 @@
         { "type": "like_posts", "params": { "min": 0, "max": 4 } },
         { "type": "share_posts", "params": { "count": 1 } }
       ]
-    }
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    { "type": "connect_loop", "params": { "count": 5, "skipIfFriendsAbove": 30 } }
   ]
 }
