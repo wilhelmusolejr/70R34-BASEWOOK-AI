@@ -6,6 +6,7 @@ tasks.json
 user.json
 logs/
 run.log
+state/
 delivery_export_*.csv
 profile_ids.json
 profiles.json

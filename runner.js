@@ -18,6 +18,7 @@ const {
   getProfileLogDir,
 } = require('./utils/sessionLog');
 const { initRunLogDir } = require('./utils/runLogDir');
+const { loadState, saveState, clearState } = require('./utils/taskState');
 const { vaultLog } = require('./vault-log');
 
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
@@ -980,6 +981,16 @@ async function runTask(task) {
   );
   console.log(`Logs: ${runLogDir}\n`);
 
+  // Resumable-state load. If a previous run of this task was interrupted, the
+  // completed-profile map tells us which userIds to skip. The profilesHash on
+  // the state file invalidates automatically when the task's profile list is
+  // edited.
+  const persisted = loadState(taskId, userIds);
+  const state = {
+    startedAt: persisted.startedAt || new Date().toISOString(),
+    completed: { ...persisted.completed },
+  };
+
   vaultLog.task({
     taskId,
     concurrency: limit,
@@ -991,7 +1002,30 @@ async function runTask(task) {
   const provider = process.env.BROWSER_PROVIDER || 'hidemium';
   const results = new Array(userIds.length);
   const timingsMs = new Array(userIds.length).fill(0);
-  const queue = [...userIds.entries()];
+
+  // Pre-seed results / timings for previously-completed profiles so the
+  // end-of-task summary covers the full task, not just this restart's slice.
+  for (let i = 0; i < userIds.length; i++) {
+    const prior = state.completed[userIds[i]];
+    if (!prior) continue;
+    results[i] =
+      prior.status === 'success'
+        ? { status: 'fulfilled', value: { profileId: userIds[i], status: 'success', resumed: true } }
+        : { status: 'rejected', reason: new Error(prior.error || 'previous run errored') };
+    timingsMs[i] = Math.round((prior.elapsedSec || 0) * 1000);
+  }
+
+  const queue = [...userIds.entries()].filter(([_, userId]) => !state.completed[userId]);
+
+  if (queue.length === 0 && userIds.length > 0) {
+    console.log(
+      `[taskState] All ${userIds.length} profile(s) already processed in this state — nothing to do. Use --fresh to re-run.`
+    );
+  } else if (Object.keys(state.completed).length > 0) {
+    console.log(
+      `[taskState] Skipping ${Object.keys(state.completed).length}, running ${queue.length} remaining profile(s)`
+    );
+  }
 
   async function worker(slotIndex) {
     const browserId = `${provider}-${slotIndex}`;
@@ -1049,11 +1083,33 @@ async function runTask(task) {
       });
 
       timingsMs[index] = Date.now() - profileStartedAt;
+
+      // Persist completion regardless of success/failure. Both are "we tried
+      // this one and moved on" — re-running shouldn't re-process either.
+      const result = results[index];
+      const elapsedSec = Number((timingsMs[index] / 1000).toFixed(1));
+      if (result?.status === 'fulfilled') {
+        state.completed[userId] = { status: 'success', completedAt: new Date().toISOString(), elapsedSec };
+      } else {
+        state.completed[userId] = {
+          status: 'error',
+          completedAt: new Date().toISOString(),
+          elapsedSec,
+          error: result?.reason?.message || 'unknown error',
+        };
+      }
+      saveState(taskId, userIds, state);
     }
   }
 
   const workers = Array.from({ length: limit }, (_, i) => worker(i + 1));
   await Promise.all(workers);
+
+  // All profiles in this task have been processed at least once → clear the
+  // state file so the next manual `node run-task.js ...` invocation starts
+  // fresh. A killed-mid-batch run leaves the file intact for resume.
+  const allDone = userIds.every((uid) => state.completed[uid]);
+  if (allDone) clearState(taskId);
 
   // profileId in results = user record _id (the value from tasks.json
   // `profiles[]`), NOT the underlying browser UUID. Callers and downstream

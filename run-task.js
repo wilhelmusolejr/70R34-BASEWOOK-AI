@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const { runTask } = require('./runner');
 const { initRunLogDir } = require('./utils/runLogDir');
+const { clearState } = require('./utils/taskState');
 
 // Crash diagnostics — modern Node (15+) kills the process on unhandled
 // rejections by default. If that happens inside a patched console.log path,
@@ -134,9 +135,16 @@ function teeStdoutToFile(filePath) {
 }
 
 async function main() {
+  // Parse argv: first non-flag positional is the task file. `--fresh` wipes
+  // any saved resume state for the task before it starts (use when you want
+  // to re-process everything regardless of prior completions).
+  const args = process.argv.slice(2);
+  const fresh = args.includes('--fresh');
+  const positional = args.find((a) => !a.startsWith('--'));
+
   let task;
   try {
-    task = loadTask(process.argv[2]);
+    task = loadTask(positional);
   } catch (err) {
     console.error('Task failed:', err.message);
     process.exitCode = 1;
@@ -150,6 +158,11 @@ async function main() {
   const runLogDir = initRunLogDir(task.taskId);
   teeStdoutToFile(path.join(runLogDir, 'tasks-logs.log'));
   console.log(`Top-level log: ${path.join(runLogDir, 'tasks-logs.log')}`);
+
+  if (fresh) {
+    console.log(`--fresh flag set — clearing prior state for ${task.taskId}`);
+    clearState(task.taskId);
+  }
 
   try {
     const result = await runTask(task);

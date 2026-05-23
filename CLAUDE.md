@@ -1218,6 +1218,53 @@ before the profile is closed.
 - Between child steps: 5-15s
 - After all steps: 10-15s cooldown before close
 
+### Resumable state — `state/{taskId}.json`
+
+`runTask` persists a per-profile completion map to `state/{taskId}.json`
+after every profile finishes (success OR error). On startup it reads
+that file and **skips profiles already marked done in this state**, so
+a process killed mid-batch — by the hypervisor, OOM, taskkill, or a
+native crash — picks up where it left off instead of re-running every
+profile from scratch.
+
+```
+state/engage-and-add.json
+{
+  "taskId": "engage-and-add",
+  "profilesHash": "<sha1 of sorted profile ids>",
+  "startedAt": "2026-05-23T04:03:36Z",
+  "lastUpdatedAt": "2026-05-23T04:47:00Z",
+  "completed": {
+    "<userId>": { "status": "success" | "error",
+                  "completedAt": "<iso>",
+                  "elapsedSec": <num>,
+                  "error": "<message>"  // only on error
+                }
+  }
+}
+```
+
+Lifecycle:
+- **Load** at task start. Hash mismatch (profile list edited) → start
+  fresh. File missing / unparseable → start fresh.
+- **Write** sync after each profile completes (success or error both
+  count — re-running shouldn't re-attempt either). Uses
+  `writeFileSync` + atomic `renameSync` so a hard kill mid-write can't
+  corrupt the file.
+- **Clear** automatically when every profile in the task is in the
+  completed map — so tomorrow's run starts clean while a same-day
+  restart resumes.
+- **Manual clear**: `node run-task.js task-daily-engage.json --fresh`
+  wipes the state for that taskId before the run starts.
+
+Errored profiles are treated as completed (don't auto-retry inside the
+same state). The next manual run starts fresh because the file was
+auto-cleared at task end; if you want to retry only the errored ones,
+edit `completed` and remove their entries before re-running, or pass
+`--fresh` to redo everything.
+
+`state/` is gitignored.
+
 ### `injectUserParams(steps, user)`
 
 Walks step tree before execution, fills missing params from user record.
