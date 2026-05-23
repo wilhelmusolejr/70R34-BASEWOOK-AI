@@ -403,6 +403,14 @@ function injectUserParams(steps, user) {
         profilePhotoUrl: step.params?.profilePhotoUrl || pageImages.profilePhotoUrl,
         coverPhotoUrl: step.params?.coverPhotoUrl || pageImages.coverPhotoUrl,
         userId: step.params?.userId || user._id || user.id || '',
+        // pageUrl is the duplicate-Page guard. When the user record already
+        // has one, create_page's guard returns immediately. Pass the current
+        // value (may be empty string) — explicit non-empty in step.params
+        // overrides; explicit empty string forces re-creation.
+        pageUrl:
+          typeof step.params?.pageUrl === 'string'
+            ? step.params.pageUrl
+            : user.pageUrl || '',
       };
     }
 

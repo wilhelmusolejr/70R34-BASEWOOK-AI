@@ -293,6 +293,12 @@ const actionSchemas = {
         description:
           'User ID for the PATCH call that records the new page URL. Auto-injected from user._id when omitted.',
       },
+      pageUrl: {
+        type: 'string',
+        default: '',
+        description:
+          'Duplicate-Page guard. When non-empty, the action returns immediately without touching FB — protects against creating a second Page on accounts that already have one. Auto-injected from user.pageUrl. Pass an explicit empty string to override and force re-creation.',
+      },
     },
     hasChildren: true,
   },

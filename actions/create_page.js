@@ -130,7 +130,22 @@ module.exports = async function create_page(page, params) {
     coverPhotoUrl = '',
     categoryKeyword = '',
     userId = '',
+    pageUrl = '',
   } = params;
+
+  // Guard: skip the whole action if this user already has a Page recorded.
+  // create_page is destructive (commits a real FB Page on first click) and
+  // running it twice produces a duplicate Page on the account — which then
+  // needs manual cleanup AND splits the page-asset state in the DB. The
+  // pageUrl is PATCHed to the user record after a successful create_page;
+  // when injectUserParams sees it non-empty, the action returns immediately.
+  // Pass an empty string explicitly to override (e.g. testing).
+  if (pageUrl && String(pageUrl).trim()) {
+    console.log(
+      `  [create_page] User already has pageUrl="${pageUrl}" — skipping (guard against duplicate Page).`
+    );
+    return;
+  }
 
   if (!pageName) throw new Error('create_page: pageName is required');
 
