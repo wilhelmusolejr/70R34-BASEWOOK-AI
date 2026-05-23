@@ -142,10 +142,14 @@ signin → user token + refresh_token
 - Start: `GET /api/v2/profile/f/{folderId}/p/{profileId}/start?automation_type=playwright&headless_mode=false` → `data.data.port`
 - Stop: `GET /api/v1/profile/stop/p/{profileId}` (note: **v1**, while start is v2)
 - Token cached in module memory; on 401 we re-signin once.
-- `MULTILOGIN_FOLDER_ID` is required; `WORKSPACE_ID` is required for the refresh step.
+- `MULTILOGIN_FOLDER_ID` is required (source / "creation" folder); `MULTILOGIN_WORKSPACE_ID` is required for the refresh step.
+- `MULTILOGIN_DELIVERY_FOLDER_ID` is the destination folder used by the `multilogin/move_profiles.js` and `multilogin/export_delivery.js` helpers (the bot itself doesn't read it). The pair lets you separate creation-stage profiles from delivery-ready ones in the MLX UI.
 
-`closeProfile(profileId, browser, provider)` and `closeBrowsers` dispatch by
-the `provider` field on the session object.
+`closeProfile(profileId, browser, provider, port?)` and `closeBrowsers`
+dispatch by the `provider` field on the session object. `port` is the
+optional CDP port the session connected over — when supplied AND
+`browser.close()` times out, the orphan-chromium reaper kicks in (see
+[Orphan-chromium reaper](#orphan-chromium-reaper-windows-only) below).
 
 ### `utils/userApi.js`
 
@@ -537,6 +541,34 @@ PATCH /api/profiles/{userId}  { "pageUrl": "..." }
 
 Skipped if URL didn't change (silent failure) so stale URL never overwrites a good one.
 
+### Duplicate-Page guard
+
+`create_page` is destructive: the commit click creates a real FB Page that
+cannot be undone via the same flow, and running the action twice on an
+account that already has a Page produces a second Page (which then needs
+manual cleanup AND splits page-asset state in the DB).
+
+The action checks `params.pageUrl` at entry. If non-empty (trimmed), it
+logs `User already has pageUrl="..." — skipping (guard against duplicate
+Page)` and `return`s — **no throw, no error**. From the runner's
+perspective the step completed successfully, so it moves on to the next
+top-level step in the task as if `create_page` had been a no-op.
+
+**Nested children are NOT executed when the guard fires.** The recursive
+child walk in `runStep` happens after the handler returns; an early
+return short-circuits the whole subtree. This is intentional —
+`switch_profile` (the typical create_page child) only makes sense if
+`create_page` left the session on a Page profile. If the guard fired,
+the session never switched to a Page in the first place, so running
+`switch_profile` would be a no-op or mis-fire.
+
+`injectUserParams` passes `user.pageUrl` through to `params.pageUrl`, so
+the guard fires automatically once the user record has a Page URL
+recorded (set by the persistence PATCH above). To force re-creation
+(e.g. testing on a known account), pass an explicit `"pageUrl": ""` in
+the step's params — the runner respects explicit-empty over the user
+record.
+
 ### Auto-injected params
 
 | Step | Param | Source |
@@ -546,6 +578,7 @@ Skipped if URL didn't change (silent failure) so stale URL never overwrites a go
 | `create_page` | `email` | `user.emails` (selected or `[0]`) |
 | `create_page` | `city`/`state`/`zipCode`/`streetAddress` | `buildPageAddress(...)` |
 | `create_page` | `profilePhotoUrl`/`coverPhotoUrl` | `resolveSetupPageImages(user)` |
+| `create_page` | `pageUrl` | `user.pageUrl` (duplicate-Page guard — non-empty short-circuits the action) |
 | `schedule_posts` | `posts` | `user.linkedPage.posts` |
 | `switch_profile` | `userName` | `firstName + lastName` |
 
@@ -600,6 +633,81 @@ clicks results tab. Matched against visible `<span>` in `a[role="link"]`.
 
 `/profile.php?id=*` is FB's canonical URL for **both** users and pages —
 filter type upstream via `search.filter`.
+
+## `connect_loop` + `accept_loop` — friend-graph loops
+
+Two leaf actions that iterate friend-graph activity in a single step instead
+of requiring the caller to manually chain `visit_profile + add_friend` /
+`visit_profile + connect`.
+
+| Action | Loop body | Stops on |
+|--------|-----------|----------|
+| `connect_loop` | Pick random target from pool → visit → probe action button (priority: Add friend > Cancel request > Confirm request) → click + DB sync | `count` successful Add-friend presses, FB rate-limit modal, `maxAttempts`, empty pool |
+| `accept_loop` | Fetch sender's `friendRequests[status="Pending"]` from the user record → for each, visit sender's profile → click "Confirm request" → PATCH record status=Accepted | List exhausted |
+
+### `connect_loop` action-button priority
+
+Exactly ONE button click per visited profile, picked in priority order:
+
+1. **Add friend** → click + check rate-limit modal + POST `friend-request`
+   record. Increments `successCount`.
+2. **Cancel request** → already-sent state; no click, just sync the record
+   (POST → 409-on-duplicate → PATCH status=Pending). Does NOT increment.
+3. **Confirm request** → incoming request (you're the receiver); click only,
+   no DB side effect, no count. Lets the same task pick up reciprocal adds
+   along the way.
+
+Trust model: a click is reported as pressed as soon as `humanClick` fires.
+The rate-limit modal ("You Can't Use This Feature Right Now") is the only
+failure signal — no DOM-state verification of the button afterwards, since
+FB's DOM updates were producing false "click did not register" reports.
+
+### `connect_loop.maxFriends` — target-side filter
+
+When `pool: "users"`, candidates with `user.friends >= maxFriends` are
+filtered out (already-popular profiles get fewer requests). Profiles with
+no recorded count are still eligible; their count gets PATCHed during the
+visit via `readFriendCount`.
+
+### `connect_loop.skipIfFriendsAbove` — sender-side skip
+
+Opt-in. When set, the action navigates to `/me` first, reads **this
+account's own** friend count from the profile header (`a[href*="sk=friends_all"]
+strong`), opportunistically PATCHes it back to the user record (sender
+friend count is otherwise only updated when ANOTHER bot visits this
+profile, so the DB value drifts stale), and skips the loop if the count
+exceeds the threshold.
+
+Use case: daily-engage tasks can keep firing `connect_loop` once per day
+without manually pruning accounts that have already filled out their
+target social graph.
+
+```json
+{ "type": "connect_loop", "params": { "count": 3, "skipIfFriendsAbove": 30 } }
+```
+
+Edge cases — none of these fail the action:
+- Friend-count selector not found on `/me` → log and proceed without skip.
+- `/me` navigation fails → log and proceed without skip.
+- `senderId` empty → still does the skip check on the page-read count,
+  just doesn't PATCH back.
+
+Param omitted (default) → no `/me` navigation, original loop behavior.
+
+### `accept_loop` — confirm pending incoming requests
+
+Source list is the receiver's `user.friendRequests` array filtered to
+`status == "Pending"`. Fetched fresh at action start, so a fast-moving
+graph picks up new requests added between task runs.
+
+For each pending sender, the action navigates to `sender.profileUrl`,
+clicks "Confirm request" via the same XPath used by `connect_loop`, and
+PATCHes the request record to `status: "Accepted"`. Senders whose profile
+no longer renders the Confirm button (already accepted out-of-band, or
+profile gone) are silently skipped.
+
+Random wait between iterations: `waitMin`-`waitMax` seconds (default
+30-60). Same anti-detection pacing as `connect_loop`.
 
 ## Feed actions — `like_posts` and `share_posts`
 
@@ -1018,13 +1126,33 @@ returns tells you the cause:
 | `!!! UNHANDLED REJECTION` / `!!! UNCAUGHT EXCEPTION` | Async rejection or sync throw escaped — stack trace follows. |
 | `!!! process.exit(N)` | Always the final line. Reports the exit code. |
 
-Plus a heartbeat every 30s: `[heartbeat] alive Xm Ys | handles=N requests=M`.
+Plus a heartbeat every 30s:
+`[heartbeat] alive Xm Ys | handles=N requests=M | rss=N MB heap=U/T MB ext=N MB`.
+
+- `handles=` / `requests=` from `process._getActiveHandles()` /
+  `_getActiveRequests()` — libuv-tracked work keeping the loop alive.
+- `rss` / `heap` / `ext` from `process.memoryUsage()` — `rss` is the
+  number Windows sees. A slow climb across the run = a leak; a sudden
+  spike right before death = a runaway allocation. Both are visible
+  live now, not only in retrospect.
+
 If the last heartbeat is at T-30s before the prompt returns, Node died
 abruptly. If heartbeats go silent first, then output stops, then prompt
 returns — slow drain. `setInterval` is `.unref()`d so the heartbeat alone
 can never block exit.
 
 **Windows-specific gotchas:**
+- **VS Code integrated terminal is unsafe for long-running bots.** When
+  VS Code auto-updates, reloads its window, crashes its extension host,
+  or suspends background work while the laptop sleeps, it kills its
+  child processes via `TerminateProcess` — no signal, so our
+  SIGINT/SIGHUP/SIGBREAK/SIGTERM handlers never fire, and there's no
+  System / Application / Kernel-Power event log entry to find later.
+  Death looks identical to a `taskkill /F`: `tasks-logs.log` cuts off
+  mid-step with no banner. **Run the bot from a non-VS-Code PowerShell
+  window**, or from a watchdog loop, for runs longer than a few
+  minutes. This was the cause of the silent 60-80 minute deaths on
+  `task-daily-engage.json` before we tracked it down.
 - **QuickEdit Mode**: clicking in the PowerShell window pauses stdout. Node
   keeps running but `console.log` blocks. Right-click title bar → Properties
   → uncheck QuickEdit.
@@ -1043,6 +1171,39 @@ Right after the page timeouts are set (before media-blocking), `runBrowser`
 closes every page in the context except `session.page`. Catches welcome tabs,
 session-restore tabs, and any extras Hidemium / Multilogin happen to launch
 with. Logs `Closed N extra tab(s) on open` when there were any.
+
+### Orphan-chromium reaper (Windows-only)
+
+`closeBrowserWithTimeout` races `browser.close()` against a 10s timer.
+When the timer wins, the CDP socket is abandoned — but the underlying
+chromium process is NOT necessarily killed. The MLX agent's `stop`
+endpoint sometimes acks the request without actually terminating
+chromium server-side, so over a long run the leaked browsers accumulate
+and eventually starve the machine.
+
+The reaper closes that gap. On a `browser.close()` timeout,
+`closeProfile`:
+
+1. Looks up the PID listening on the abandoned CDP port via
+   `netstat -ano -p TCP`.
+2. Verifies the process **name contains "chrom"** (so we never kill
+   node / the MLX agent / unrelated listeners), **isn't this Node
+   process**, and exists at all.
+3. Force-kills it with `taskkill /F /PID <pid>`.
+
+On success: `[browserManager] Reaped orphan chrome.exe PID 12345 on port 54277 for b210ca0f`.
+
+Non-Windows is a no-op; safety checks all swallow errors. The reaper
+runs in addition to the existing MLX / Hidemium `stop` calls, not
+instead of them — `stop` still gets a chance to clean up MLX-side
+bookkeeping first.
+
+Related fix: `closeBrowserWithTimeout` previously leaked a 10s
+`setTimeout` on every successful close (the timer was never cleared,
+so the "timed out / abandoning CDP" warning fired AFTER the profile
+had already closed cleanly, holding an active libuv handle for the
+full 10s). The race now `clearTimeout`s in a `finally` block — the
+warning is now only emitted on real timeouts.
 
 ### End-of-task tab cleanup
 
@@ -1115,6 +1276,38 @@ Timezone + geo auto-derived from proxy IP.
 
 Multilogin profile creation: not implemented in `create-profile.js` yet (assumes
 profile exists in MLX dashboard). Profile fetch + linking via `browsers[]` works.
+
+## `multilogin/` helper scripts
+
+Standalone ESM scripts for MLX-side operations the bot itself doesn't
+perform. Each one signs in with `MULTILOGIN_EMAIL` / `MULTILOGIN_PASSWORD`,
+refreshes into `MULTILOGIN_WORKSPACE_ID`, then calls the relevant MLX
+endpoint. Run with plain `node multilogin/<script>.js`.
+
+| Script | Job | Key endpoints |
+|---|---|---|
+| `list_folders.js [filter]` | Print every workspace folder with `folder_id`, `name`, `profiles_count`. Optional substring filter highlights matches. | `GET /workspace/folders` |
+| `list_profiles.js` | Dump every profile in `FOLDER_ID` (env) to `profile_ids.json` as `[{fullName, profile_id}]`. Paginated 100/page. | `POST /profile/search` |
+| `move_profiles.js` | Move profiles from the creation folder to the delivery folder. Edit the hardcoded `USER_IDS` array at the top — these are MongoDB `_id`s, not MLX UUIDs. The script resolves each via `GET /api/profiles/:id` → `browsers[].browserId` (where `provider === "multilogin"`). Pre-checks both folders so already-delivered and not-in-source ids are skipped without an API call. Moves one at a time with `MOVE_DELAY_MS=4000` between calls and exponential backoff on 5xx/429 (`[10s, 30s, 60s]`). | `POST /profile/move` (one-id-per-call), `POST /profile/search` (source + dest enumeration) |
+| `export_delivery.js [--out=…] [--folder=…]` | Dump every profile in the delivery folder to a CSV, joining MLX profile data with the linked user record. The MLX `notes` field carries the Mongo ObjectId (set by `create_profiles.js`); when notes parse as a 24-hex ObjectId the script fetches `/api/profiles/:id` and merges fields. Profiles without a user link still get a row with blank user columns. | `POST /profile/search`, `GET /api/profiles/:id` |
+
+CSV columns (`export_delivery.js`):
+`mlx_profile_id`, `mlx_profile_name`, `mlx_notes`, `mlx_created_at`,
+`mlx_browser_type`, `mlx_os_type`, `user_id`, `first_name`, `last_name`,
+`email`, `email_password`, `facebook_password`, `birthday_date`,
+`gender`, `profile_url`, `page_url`, `city`, `status`.
+
+The CSV contains credentials — `.gitignore` blocks `delivery_export_*.csv`
+along with `profile_ids.json` / `profiles.json` for the same reason.
+
+**Folder model.** Two folders are referenced by env:
+`MULTILOGIN_FOLDER_ID` is the source ("creation") folder — where
+`create_profiles.js` drops new MLX profiles AND where the bot reads
+from at runtime. `MULTILOGIN_DELIVERY_FOLDER_ID` is the destination
+folder for `move_profiles.js` and the source folder
+`export_delivery.js` reads from. The runtime bot **only** reads
+`MULTILOGIN_FOLDER_ID`; the delivery folder exists purely so the MLX
+UI can show what's been handed off.
 
 ## `homepage_interaction`
 
