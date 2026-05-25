@@ -802,26 +802,250 @@ async function openMultiloginProfile(profileId) {
   throw lastError;
 }
 
-/**
- * Open a browser for a given userId, dispatching by BROWSER_PROVIDER.
- */
-async function openBrowserForUser(userId) {
-  const user = await fetchUser(userId);
+// ============================================================================
+// Country-aware MLX provisioning. Used by openBrowserForUser's auto-provision
+// path AND by the multilogin/ helper scripts — single source of truth for
+// "create an MLX profile + assign a country-matched proxy".
+// ============================================================================
 
-  if (!user.browsers || user.browsers.length === 0) {
+const COUNTRY_REGIONS = {
+  US: [
+    'alabama', 'alaska', 'arizona', 'arkansas', 'california',
+    'colorado', 'connecticut', 'delaware', 'florida', 'georgia',
+    'hawaii', 'idaho', 'illinois', 'indiana', 'iowa',
+    'kansas', 'kentucky', 'louisiana', 'maine', 'maryland',
+    'massachusetts', 'michigan', 'minnesota', 'mississippi', 'missouri',
+    'montana', 'nebraska', 'nevada', 'new_hampshire', 'new_jersey',
+    'new_mexico', 'new_york', 'north_carolina', 'north_dakota', 'ohio',
+    'oklahoma', 'oregon', 'pennsylvania', 'rhode_island', 'south_carolina',
+    'south_dakota', 'tennessee', 'texas', 'utah', 'vermont',
+    'virginia', 'washington', 'west_virginia', 'wisconsin', 'wyoming',
+  ],
+  IT: [
+    'abruzzo', 'aosta_valley', 'apulia', 'basilicata', 'calabria',
+    'campania', 'emilia_romagna', 'friuli_venezia_giulia', 'lazio', 'liguria',
+    'lombardy', 'marche', 'molise', 'piedmont', 'sardinia',
+    'sicily', 'trentino_alto_adige', 'tuscany', 'umbria', 'veneto',
+  ],
+};
+
+const COUNTRY_ALIASES = {
+  US: new Set(['us', 'usa', 'united_states']),
+  IT: new Set(['it', 'ita', 'italy', 'italia']),
+};
+
+function normalizeCountry(c) {
+  return String(c ?? '').trim().toUpperCase();
+}
+
+function randomRegion(country) {
+  const list = COUNTRY_REGIONS[normalizeCountry(country)];
+  if (!list || !list.length) return null;
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+function proxyCountryCode(proxyObj) {
+  if (!proxyObj) return null;
+  const direct = (proxyObj.country ?? proxyObj.country_code ?? '').toString().toLowerCase();
+  if (direct) {
+    for (const [code, aliases] of Object.entries(COUNTRY_ALIASES)) {
+      if (aliases.has(direct)) return code;
+    }
+    return direct.toUpperCase();
+  }
+  const parsed = parseMlxProxyLocation(proxyObj.username);
+  if (parsed.country) {
+    const lc = parsed.country.toLowerCase();
+    for (const [code, aliases] of Object.entries(COUNTRY_ALIASES)) {
+      if (aliases.has(lc)) return code;
+    }
+    return lc.toUpperCase();
+  }
+  return null;
+}
+
+function isMatchingCountryProxy(proxyObj, expectedCountry) {
+  if (!proxyObj || !expectedCountry) return false;
+  return proxyCountryCode(proxyObj) === normalizeCountry(expectedCountry);
+}
+
+/**
+ * Create a Multilogin profile (no proxy yet). Returns the new MLX profile id.
+ * Pure MLX-side — caller PATCHes user.browsers separately.
+ */
+async function createMultiloginProfile(user) {
+  const folderId = process.env.MULTILOGIN_FOLDER_ID;
+  const workspaceId = process.env.MULTILOGIN_WORKSPACE_ID;
+  const browserType = process.env.MULTILOGIN_BROWSER_TYPE || process.env.BROWSER_TYPE || 'mimic';
+  const osType = process.env.MULTILOGIN_OS_TYPE || process.env.OS_TYPE || 'windows';
+  const coreVersion = Number(process.env.MULTILOGIN_CORE_VERSION || process.env.CORE_VERSION || '143');
+
+  if (!folderId) throw new Error('MULTILOGIN_FOLDER_ID is required');
+  if (!workspaceId) throw new Error('MULTILOGIN_WORKSPACE_ID is required');
+
+  const fullName = `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim();
+  if (!fullName) throw new Error(`User ${user._id} missing firstName/lastName`);
+
+  const body = {
+    name: fullName,
+    notes: user._id,
+    tags: ['NEW'],
+    workspace_id: workspaceId,
+    folder_id: folderId,
+    browser_type: browserType,
+    os_type: osType,
+    core_version: coreVersion,
+    times: 1,
+    parameters: {
+      flags: {
+        audio_masking: 'mask',
+        fonts_masking: 'mask',
+        geolocation_masking: 'mask',
+        geolocation_popup: 'prompt',
+        graphics_masking: 'mask',
+        graphics_noise: 'mask',
+        localization_masking: 'mask',
+        media_devices_masking: 'mask',
+        navigator_masking: 'mask',
+        ports_masking: 'mask',
+        proxy_masking: 'disabled',
+        screen_masking: 'mask',
+        timezone_masking: 'mask',
+        webrtc_masking: 'mask',
+      },
+      storage: { is_local: false, save_service_worker: false },
+    },
+  };
+
+  const { data } = await axios.post(`${MLX_API}/profile/create`, body, {
+    headers: { ...(await mlxAuthHeaders()), 'Content-Type': 'application/json' },
+  });
+
+  const d = data?.data;
+  let profileId = null;
+  if (Array.isArray(d?.ids) && d.ids.length) profileId = d.ids[0];
+  else if (Array.isArray(d?.profile_ids) && d.profile_ids.length) profileId = d.profile_ids[0];
+  else if (typeof d === 'string') profileId = d;
+  else if (Array.isArray(d) && d.length) profileId = typeof d[0] === 'string' ? d[0] : d[0]?.id;
+  else if (d?.id) profileId = d.id;
+  else if (d?.profile_id) profileId = d.profile_id;
+
+  if (!profileId) {
+    throw new Error(`MLX profile/create returned no id: ${JSON.stringify(data)}`);
+  }
+  return profileId;
+}
+
+/**
+ * Assign a country-matched proxy to an existing MLX profile.
+ * Uses the partial_update shape with parameters.flags.proxy_masking='custom'
+ * (the shape that actually engages the proxy — confirmed by reading metas
+ * back after the call).
+ */
+async function assignCountryProxy(profileId, country, { region, protocol = 'socks5' } = {}) {
+  const cc = normalizeCountry(country);
+  if (!COUNTRY_REGIONS[cc]) {
     throw new Error(
-      `User ${userId} (${user.firstName} ${user.lastName}) has no browsers configured`
+      `assignCountryProxy: country "${country}" not in COUNTRY_REGIONS map (supported: ${Object.keys(COUNTRY_REGIONS).join(', ')})`
+    );
+  }
+  const r = region || randomRegion(cc);
+  if (!r) throw new Error(`assignCountryProxy: no region resolved for ${cc}`);
+
+  const proxy = await generateMlxProxy({ country: cc.toLowerCase(), region: r, type: protocol });
+
+  await axios.post(
+    `${MLX_API}/profile/partial_update`,
+    {
+      profile_id: profileId,
+      proxy: {
+        host: proxy.host,
+        port: proxy.port,
+        type: proxy.type,
+        username: proxy.username,
+        password: proxy.password,
+      },
+      parameters: { flags: { proxy_masking: 'custom' } },
+    },
+    { headers: { ...(await mlxAuthHeaders()), 'Content-Type': 'application/json' } }
+  );
+
+  return { region: r, proxy };
+}
+
+/**
+ * Full auto-provision flow for a user that has no multilogin browser entry yet.
+ *   1. createMultiloginProfile()  — make the profile MLX-side
+ *   2. assignCountryProxy()       — pick a region from user.country, assign proxy
+ *   3. PATCH user.browsers        — link the new profile back to the user record
+ * Returns { browserId, region, country }.
+ */
+async function provisionMultiloginForUser(user) {
+  const country = normalizeCountry(user.country);
+  if (!country) {
+    throw new Error(`User ${user._id} has no country — can't auto-provision multilogin profile`);
+  }
+  if (!COUNTRY_REGIONS[country]) {
+    throw new Error(
+      `User ${user._id} country=${country} not in COUNTRY_REGIONS map (supported: ${Object.keys(COUNTRY_REGIONS).join(', ')})`
     );
   }
 
-  const entry = user.browsers.find(
+  console.log(
+    `[browserManager] Auto-provisioning MLX profile for ${user.firstName} ${user.lastName} (country=${country})`
+  );
+
+  const profileId = await createMultiloginProfile(user);
+  console.log(`[browserManager]   created MLX profile ${profileId.slice(-8)}`);
+
+  const { region } = await assignCountryProxy(profileId, country);
+  console.log(`[browserManager]   assigned ${country}/${region} proxy`);
+
+  if (USER_API_BASE_URL) {
+    const nextBrowsers = [...(user.browsers || []), { browserId: profileId, provider: 'multilogin' }];
+    try {
+      await axios.patch(`${USER_API_BASE_URL}/api/profiles/${user._id}`, { browsers: nextBrowsers });
+      console.log(`[browserManager]   linked browserId to user record`);
+    } catch (err) {
+      console.warn(
+        `[browserManager]   PATCH user.browsers failed (profile still created MLX-side): ${formatErrorDetails(err)}`
+      );
+    }
+  }
+
+  return { browserId: profileId, region, country };
+}
+
+/**
+ * Open a browser for a given userId, dispatching by BROWSER_PROVIDER.
+ * If no browser entry exists for the active provider AND auto-provisioning
+ * is enabled (multilogin only), creates one on the fly.
+ */
+async function openBrowserForUser(userId) {
+  let user = await fetchUser(userId);
+
+  let entry = (user.browsers || []).find(
     (b) => (b.provider || 'hidemium').toLowerCase() === BROWSER_PROVIDER
   );
 
   if (!entry) {
-    throw new Error(
-      `User ${userId} (${user.firstName} ${user.lastName}) has no "${BROWSER_PROVIDER}" browser entry`
-    );
+    const autoProvision =
+      (process.env.AUTO_PROVISION_BROWSER || 'true').toLowerCase() !== 'false';
+
+    if (BROWSER_PROVIDER === 'multilogin' && autoProvision) {
+      const provisioned = await provisionMultiloginForUser(user);
+      const newEntry = { browserId: provisioned.browserId, provider: 'multilogin' };
+      user = { ...user, browsers: [...(user.browsers || []), newEntry] };
+      entry = newEntry;
+    } else {
+      const hasAny = (user.browsers || []).length > 0;
+      throw new Error(
+        hasAny
+          ? `User ${userId} (${user.firstName} ${user.lastName}) has no "${BROWSER_PROVIDER}" browser entry`
+          : `User ${userId} (${user.firstName} ${user.lastName}) has no browsers configured` +
+            (BROWSER_PROVIDER === 'multilogin' ? ' (AUTO_PROVISION_BROWSER=false disables auto-create)' : '')
+      );
+    }
   }
 
   const { browserId } = entry;
@@ -1046,6 +1270,7 @@ async function launchBrowsers(userIds) {
   const connections = await Promise.allSettled(userIds.map((userId) => openBrowserForUser(userId)));
 
   const successful = [];
+  const failures = [];
   for (let i = 0; i < connections.length; i++) {
     const result = connections[i];
     if (result.status === 'fulfilled') {
@@ -1059,13 +1284,18 @@ async function launchBrowsers(userIds) {
         console.error('  API body   :', err.response.data);
       }
       console.error('  stack   :', err.stack);
+      failures.push({ userId: userIds[i], err });
     }
   }
 
   if (successful.length === 0) {
-    throw new Error(
-      'Could not connect to any profiles. Make sure Hidemium is running and API token is correct.'
-    );
+    if (failures.length === 1) throw failures[0].err;
+    const summary = failures
+      .map(({ userId, err }) => `${userId}: ${err.message || '(no message)'}`)
+      .join('; ');
+    const wrapped = new Error(`Failed to open ${failures.length} profile(s) — ${summary}`);
+    wrapped.failures = failures;
+    throw wrapped;
   }
 
   return successful;
@@ -1089,4 +1319,14 @@ module.exports = {
   closeBrowsers,
   createProfile,
   testProxy,
+  // Country-aware MLX provisioning — also used by multilogin/ helper scripts.
+  COUNTRY_REGIONS,
+  COUNTRY_ALIASES,
+  normalizeCountry,
+  randomRegion,
+  proxyCountryCode,
+  isMatchingCountryProxy,
+  createMultiloginProfile,
+  assignCountryProxy,
+  provisionMultiloginForUser,
 };

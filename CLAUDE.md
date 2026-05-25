@@ -144,12 +144,112 @@ signin → user token + refresh_token
 - Token cached in module memory; on 401 we re-signin once.
 - `MULTILOGIN_FOLDER_ID` is required (source / "creation" folder); `MULTILOGIN_WORKSPACE_ID` is required for the refresh step.
 - `MULTILOGIN_DELIVERY_FOLDER_ID` is the destination folder used by the `multilogin/move_profiles.js` and `multilogin/export_delivery.js` helpers (the bot itself doesn't read it). The pair lets you separate creation-stage profiles from delivery-ready ones in the MLX UI.
+- `MULTILOGIN_CORE_VERSION` (or `CORE_VERSION` in `multilogin/.env`) — minimum **143** as of 2026-05. MLX rejects older cores with `BAD_REQUEST_BODY: "Can't set core older than 143. Please set higher core version"`. Default in `utils/browserManager.js` is `143`; the `multilogin/.env` template tracks the same floor.
 
 `closeProfile(profileId, browser, provider, port?)` and `closeBrowsers`
 dispatch by the `provider` field on the session object. `port` is the
 optional CDP port the session connected over — when supplied AND
 `browser.close()` times out, the orphan-chromium reaper kicks in (see
 [Orphan-chromium reaper](#orphan-chromium-reaper-windows-only) below).
+
+### Country-aware auto-provisioning
+
+`openBrowserForUser` self-heals when a user record has no `browsers[]`
+entry for the active provider. Default ON for `BROWSER_PROVIDER=multilogin`
+(disable with `AUTO_PROVISION_BROWSER=false`).
+
+```
+openBrowserForUser(userId)
+  → fetchUser → no multilogin entry?
+    → provisionMultiloginForUser(user)
+       1. createMultiloginProfile(user)   → POST /profile/create (MLX)
+       2. assignCountryProxy(profileId,    → generate + apply country-matched proxy
+                              user.country)
+       3. PATCH /api/profiles/:id           → link browserId back to user
+    → splice new entry into local user.browsers
+    → fall through to openMultiloginProfile(browserId)
+```
+
+**Region pool — `utils/browserManager.js` `COUNTRY_REGIONS`**:
+
+| Country | Region count | Form |
+|---------|--------------|------|
+| `US` | 50 | English/underscored — `alabama, ..., west_virginia, wisconsin, wyoming` |
+| `IT` | 20 | English/underscored — `lazio, lombardy, sicily, tuscany, emilia_romagna, ...` |
+
+`randomRegion(country)` picks uniformly at random. `COUNTRY_ALIASES` maps
+loose forms (`us/usa/united_states`, `it/ita/italy/italia`) to the canonical
+ISO-3166-1 alpha-2 code. To add another country: add the region array +
+alias set, restart. No further wiring required — provisioning + verification
+both pick it up automatically.
+
+**Skip rules:**
+- `user.country` empty → throw (`User X has no country — can't auto-provision`).
+- `user.country` not in `COUNTRY_REGIONS` → throw (lists the supported codes in the message).
+- Non-`multilogin` providers (`hidemium`) → never auto-provision; throw the legacy "no browsers configured" error. Hidemium's create flow needs the proxy pool walk + ipinfo verification (`utils/browserManager.js` `createProfile`), which is a different shape than the MLX one-shot.
+
+**Shared with the helper scripts.** `multilogin/create_profiles.js` and
+`multilogin/assign_us_proxy.js` now both `import` from
+`../utils/browserManager.js` so the bot's auto-provision path and the
+batch CLI flow use the **same** `createMultiloginProfile` and
+`assignCountryProxy` functions. Single source of truth — no risk of the
+two paths drifting in proxy shape, masking flags, or region naming.
+
+**Exported for reuse** (`utils/browserManager.js`):
+`COUNTRY_REGIONS`, `COUNTRY_ALIASES`, `normalizeCountry`, `randomRegion`,
+`proxyCountryCode`, `isMatchingCountryProxy`, `createMultiloginProfile`,
+`assignCountryProxy`, `provisionMultiloginForUser`.
+
+**Proxy shape — what actually engages the proxy.** MLX's
+`/profile/partial_update` accepts two shapes. The one that ENGAGES the
+proxy is:
+
+```js
+{
+  profile_id,
+  proxy: { host, port, type, username, password },     // top-level
+  parameters: { flags: { proxy_masking: 'custom' } },  // must be set
+}
+```
+
+Without `parameters.flags.proxy_masking='custom'`, the proxy is stored on
+the profile but ignored at runtime (masking stays `'disabled'` from
+creation). `assignCountryProxy` always sets both.
+
+**Verification.** Verify a profile's proxy is actually country-matched:
+
+```js
+const meta = await getProfileMetas(token, [profileId]);
+isMatchingCountryProxy(meta.parameters.proxy, expectedCountry);
+// reads either proxy.country / proxy.country_code OR parses the MLX
+// proxy username (`country-it-region-lazio-sid-XXX`) — robust to both
+// shapes MLX returns across endpoints.
+```
+
+### Known gap — dead MLX profile detection
+
+`openBrowserForUser` triggers auto-provision when there's **no entry** for
+the active provider, but **not** when the entry points to an MLX profile
+that's been deleted MLX-side. The bot tries `/profile/start`, MLX returns
+`500: "Profile is removed"`, retry exhausts 3 attempts, profile is marked
+failed for the run. Workaround: manually PATCH the user record's
+`browsers` to strip the dead entry, then re-run — auto-provision recreates
+fresh. Fix would be narrow-match on the `"Profile is removed"` MLX message
+in `openMultiloginProfile`'s catch block, treat as "missing entry,"
+re-provision in place. Not implemented yet — would need to confirm MLX
+returns this exact message on every removal path.
+
+### `launchBrowsers` error semantics
+
+When `launchBrowsers([userId])` is called with a single userId (the
+per-profile path from `runner.js`), the wrapper now **rethrows the
+underlying error** instead of swallowing it under a generic `"Could not
+connect to any profiles. Make sure Hidemium is running and API token is
+correct."` (which was misleading both because it always said Hidemium
+even on the multilogin path AND because it masked the real cause). Multi-
+profile callers still get the aggregated `"Failed to open N profile(s) — ..."`
+wrapper with each underlying message joined. The aggregated error carries
+`err.failures = [{ userId, err }, ...]` for programmatic inspection.
 
 ### `utils/userApi.js`
 
@@ -1333,10 +1433,21 @@ endpoint. Run with plain `node multilogin/<script>.js`.
 
 | Script | Job | Key endpoints |
 |---|---|---|
+| `create_profiles.js` | Batch-create MLX profiles for every userId in `profiles.json`. **Thin wrapper around `createMultiloginProfile` from `utils/browserManager.js`** — single source of truth with the runtime auto-provision path. Skips users that already have a `provider: "multilogin"` entry in `browsers[]`. Sets the MLX `notes` field to the user's Mongo ObjectId so `export_delivery.js` can join the records later. | `POST /profile/create`, `PATCH /api/profiles/:id` (link browserId) |
+| `assign_us_proxy.js` | Batch-assign country-matched proxies to every MLX profile in `profiles.json`. **Thin wrapper around `assignCountryProxy` from `utils/browserManager.js`** — picks region from `COUNTRY_REGIONS[user.country]` (US: random state, IT: random region). Verifies post-assign via `profile/metas` + `isMatchingCountryProxy`. Skips when the existing proxy already matches the user's country AND `proxy_masking=custom`. Name is historical (was US-only); now handles every country in `COUNTRY_REGIONS`. | `POST /profile/partial_update`, `POST /profile/metas`, `POST {PROXY_BASE}/v1/proxy/connection_url` |
 | `list_folders.js [filter]` | Print every workspace folder with `folder_id`, `name`, `profiles_count`. Optional substring filter highlights matches. | `GET /workspace/folders` |
 | `list_profiles.js` | Dump every profile in `FOLDER_ID` (env) to `profile_ids.json` as `[{fullName, profile_id}]`. Paginated 100/page. | `POST /profile/search` |
 | `move_profiles.js` | Move profiles from the creation folder to the delivery folder. Edit the hardcoded `USER_IDS` array at the top — these are MongoDB `_id`s, not MLX UUIDs. The script resolves each via `GET /api/profiles/:id` → `browsers[].browserId` (where `provider === "multilogin"`). Pre-checks both folders so already-delivered and not-in-source ids are skipped without an API call. Moves one at a time with `MOVE_DELAY_MS=4000` between calls and exponential backoff on 5xx/429 (`[10s, 30s, 60s]`). | `POST /profile/move` (one-id-per-call), `POST /profile/search` (source + dest enumeration) |
 | `export_delivery.js [--out=…] [--folder=…]` | Dump every profile in the delivery folder to a CSV, joining MLX profile data with the linked user record. The MLX `notes` field carries the Mongo ObjectId (set by `create_profiles.js`); when notes parse as a 24-hex ObjectId the script fetches `/api/profiles/:id` and merges fields. Profiles without a user link still get a row with blank user columns. | `POST /profile/search`, `GET /api/profiles/:id` |
+
+**`multilogin/.env`** uses legacy short names (`MLX_EMAIL`, `MLX_PASSWORD`,
+`WORKSPACE_ID`, `FOLDER_ID`, `API_BASE`). The scripts bridge these to the
+canonical `MULTILOGIN_*` / `USER_API_BASE_URL` names the shared module
+reads. New deployments can use either name set — bridge is idempotent.
+
+**`PROFILES_FILE` is script-relative.** `path.resolve(__dirname, ...)`
+equivalent. `node multilogin/create_profiles.js` works from any CWD; no
+`cd multilogin/` required.
 
 CSV columns (`export_delivery.js`):
 `mlx_profile_id`, `mlx_profile_name`, `mlx_notes`, `mlx_created_at`,
