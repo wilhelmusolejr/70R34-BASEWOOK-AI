@@ -1,0 +1,50 @@
+{
+  "taskId": "onboard-letizia",
+  "profiles":  [
+    "6a0884ba94ca4be70028766f",
+    "6a0884ba94ca4be700287670",
+    "6a097438c68f2c604ba66552",
+    "6a097438c68f2c604ba66553",
+    "6a097438c68f2c604ba66554",
+    "6a097481c68f2c604ba66575",
+    "6a097481c68f2c604ba66576",
+    "6a0d52c7673f917afcff8eaa",
+    "6a0d52c7673f917afcff8eab",
+    "6a0d52c7673f917afcff8eac",
+    "6a0d52c7673f917afcff8ead",
+    "6a0d52c7673f917afcff8eae",
+    "6a0d52c7673f917afcff8eaf",
+    "6a0d52c7673f917afcff8eb0",
+    "6a0d52c7673f917afcff8eb1"
+  ],
+  "concurrency": 2,
+  "blockMedia": true,
+  "steps": [
+    { "type": "setup_privacy" },
+    { "type": "setup_about" },
+    {
+      "type": "homepage_interaction",
+      "steps": [
+        { "type": "wait", "params": { "min": 8, "max": 15 } },
+        { "type": "like_posts", "params": { "count": 2 } },
+        { "type": "wait", "params": { "min": 30, "max": 50 } }
+      ]
+    },
+    { "type": "connect_loop", "params": { "count": 5, "skipIfFriendsAbove": 30 } },
+
+    { "type": "wait", "params": { "min": 10, "max": 15 } },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "wait", "params": { "min": 8, "max": 15 } },
+        { "type": "like_posts", "params": { "count": 2 } },
+        { "type": "share_posts", "params": { "count": 1 } },
+        { "type": "wait", "params": { "min": 30, "max": 50 } }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 10, "max": 15 } }
+  ]
+}

@@ -6,8 +6,9 @@ Node.js backend that takes JSON task commands and runs automation across multipl
 BASEWOOK (Facebook) accounts in parallel using anti-detect browser profiles
 (Hidemium **or** Multilogin X) controlled via Playwright + CDP.
 
-`POST /execute` accepts JSON. `chat/nlToJson.js` is a separate NL→JSON layer
-that posts to the same endpoint.
+`POST /execute` accepts JSON (fire-and-forget — returns 202 immediately, task
+runs in background). `GET /status/:taskId` to check progress.
+`chat/nlToJson.js` is a separate NL→JSON layer that posts to the same endpoint.
 
 ## Tech stack
 
@@ -20,7 +21,7 @@ that posts to the same endpoint.
 
 ```
 70R34-BASEWOOK-AI/
-├── server.js                    # Express entry, POST /execute
+├── server.js                    # Express entry, POST /execute (async), GET /status/:taskId
 ├── runner.js                    # Recursive step runner
 ├── run-task.js                  # Run tasks.json directly
 ├── tasks.json                   # Editable task for manual runs
@@ -32,7 +33,8 @@ that posts to the same endpoint.
 │   ├── publish_post.js          add_friend.js     follow.js
 │   ├── connect.js               connect_loop.js   accept_loop.js
 │   ├── setup_about.js           setup_avatar.js   setup_cover.js
-│   ├── schedule_posts.js        switch_profile.js wait.js
+│   ├── setup_privacy.js         schedule_posts.js switch_profile.js
+│   ├── wait.js
 │   ├── facebook_signup.js       facebook_login.js ensure_login.js
 │   ├── outlook_login.js
 │   └── check_ip.js
@@ -499,6 +501,7 @@ facebook.com/me → About tab → sidebar link → panel button → fill → sav
 
 - About tab: matched by ANY of: href contains `sk=about`, href has `/about(?:/|?|$)` path-style, `aria-label="About"`, or `role="tab"` + `textContent === "About"`. FB's tab markup varies across account states / locales / fingerprints. Polled in-page via `waitForFunction(..., timeout: 30000)`. Use `textContent` (DOM-only), not `innerText` (layout-dependent — returns `''` on slow renders).
 - Sidebar `sk` values: `directory_intro`, `directory_personal_details`, `directory_work`, `directory_education`, `directory_activites` *(FB typo, not "activities")*, `directory_interests`, `directory_travel`, `directory_names`
+- **`clickSubsection` three-tier fallback:** (1) `a[href*="skFragment"]` sidebar link, (2) `getByRole('tab', { name })` text match, (3) **direct URL navigation** — sets `?sk=skFragment` on the current About page URL. The URL fallback is critical for fresh accounts where FB doesn't render sidebar links until data exists.
 - Panel buttons (no aria-label): `xpath=//div[@role="button"][.//span[text()="Button Text"]]`
 
 ### Save patterns — three button shapes
@@ -559,6 +562,53 @@ Self-navigates to `/me`. Flow:
 - "Add cover photo" uses direct `.click()` (humanClick offset misses).
 - "Save changes" starts `aria-disabled="true"` while image processes.
 - **FB renders 2 elements matching `[aria-label="Save changes"]`** — one hidden, one visible. Playwright's `waitForSelector` picks the first match (often hidden) and the visibility gate times out. Fix: `page.locator('[aria-label="Save changes"]').count()`, iterate **last to first** until one is `isVisible() && isEnabled()`, then click that.
+
+## `setup_privacy`
+
+Leaf action. Walks the `/settings/bundled` privacy acknowledgment page
+after a fresh signup. Extracted from `facebook_signup` as a standalone
+action so it can be composed via `steps`:
+
+```json
+{ "type": "facebook_signup", "steps": [{ "type": "setup_privacy" }] }
+```
+
+Or run standalone for accounts that skipped the walkthrough.
+
+Flow:
+```
+goto facebook.com/settings/bundled
+  → select "Public" radio (3 attempts, skip if already current)
+  → click Next
+  → click Confirm
+```
+
+No params. No auto-injection.
+
+## Cookie consent popup — EU/IT proxies
+
+FB shows a full-page cookie consent modal on EU proxy IPs before any form
+interaction is possible. Dismissed in two places:
+
+1. **`ensure_login`** — immediately after navigating to `/reg/`
+2. **`facebook_signup`** — before filling the form (catches both paths)
+
+**Selector:** `div[aria-label="Allow all cookies"]:not([aria-hidden="true"])`.
+FB renders TWO matching elements — one with `aria-hidden="true"` /
+`aria-disabled="true"` (decoy) and one real. The `:not()` filter targets
+only the real button. `force: true` is required because FB's
+`data-visualcompletion="ignore"` overlay div with `inset: 0px` covers
+the button (same pattern as `share_posts`).
+
+**Fallback in `fillHuman` and `selectOption`:** if any form field or
+dropdown option times out, the handler tries `dismissCookieConsent` and
+retries — catches the case where the popup appeared after the initial
+dismiss check.
+
+**Failure forensics:** `facebook_signup` wraps its entire form-fill block
+in try/catch. On any throw, dumps HTML + full-page screenshot to the
+profile's run-scoped log folder (`signup-error-<name>-<ts>.{html,png}`)
+before re-throwing.
 
 ## Facebook Page setup — `create_page` + `schedule_posts` + `switch_profile`
 
@@ -1199,8 +1249,9 @@ If logged out (and the task requires FB), `ensure_login` is invoked as a
 synthetic step before any task step runs. Re-auth strategy is **not** the login form — it navigates to
 `https://web.facebook.com/reg/?entry_point=login&next=` and re-runs the
 signup form fill via `facebook_signup` (called with `skipPostSetup: true` so
-it stops at the home href and skips the `/settings/bundled` walk + status
-PATCH). All signup params auto-injected from the user record.
+it stops at the home href — no `/settings/bundled` walk, no status PATCH).
+The bundled-settings walkthrough is now a separate `setup_privacy` action.
+All signup params auto-injected from the user record.
 
 `facebook_signup` detects when the URL already contains `/reg/` and skips its
 own facebook.com nav + "Create new account" click — that's what makes the
@@ -1550,15 +1601,81 @@ logged as-is, not resolved.
 
 POST errors caught + warned. Skipped if `userId`, `note`, or `USER_API_BASE_URL` empty.
 
+## `server.js` — HTTP API for remote task execution
+
+Express server on `PORT` env (default 3000). Designed to be called from the
+7or34.space website backend running on the same machine (`localhost:3000`).
+
+### Endpoints
+
+| Method | Path | Response | Description |
+|--------|------|----------|-------------|
+| `POST` | `/execute` | `202 Accepted` | Validates task, starts `runTask` in background, returns immediately |
+| `GET` | `/status/:taskId` | `200` / `404` | Check task progress: `running`, `done`, or `error` |
+
+### `POST /execute` body
+
+```json
+{
+  "taskId": "onboard-69f358...-1716600000000",
+  "profiles": ["69f3585493738d563ce2182e"],
+  "concurrency": 1,
+  "steps": [
+    { "type": "setup_about" },
+    { "type": "homepage_interaction", "steps": [
+      { "type": "like_posts", "params": { "count": 2 } },
+      { "type": "share_posts", "params": { "count": 1 } }
+    ]}
+  ]
+}
+```
+
+Required: `taskId`, `profiles` (non-empty array of user IDs), `steps`.
+
+### Behavior
+
+- **Fire-and-forget.** `runTask` runs as a detached promise. The HTTP
+  response returns `{ taskId, status: "running", message: "Task started" }`
+  immediately.
+- **Duplicate guard.** A second POST with the same `taskId` while the first
+  is still running returns `409 Conflict`.
+- **Concurrent calls.** Two POSTs with different taskIds/profiles run in
+  parallel — multiple browsers open simultaneously. Limited by the machine's
+  RAM/CPU and the MLX plan's concurrent profile cap.
+- **In-memory state.** Task status lives in a `Map` — lost on server restart.
+  The runner's own `state/{taskId}.json` persistence is unaffected.
+
+### Integration with 7or34.space
+
+Website backend (same machine) calls:
+
+```
+POST http://localhost:3000/execute
+```
+
+No tunnel needed — both processes share `localhost`. The website frontend
+hits its own backend (e.g. `POST /api/profiles/:id/run`), which forwards
+to the bot server.
+
+### Running alongside `run-task.js`
+
+Both can run simultaneously as separate Node processes. Since they target
+different profiles, Multilogin opens separate browsers with no conflict.
+Same-profile collision is not guarded — avoid running the same profile
+from both entry points.
+
 ## Current status
 
-**Done:** server, runner, browserManager (Hidemium + Multilogin), humanBehavior, all actions
-listed in project structure, virtualized-feed pattern, network resilience, retry-all-errors,
-user API integration, `injectUserParams`, `concurrency` + `blockMedia`, Gemini share + post
-caption generation (`generateMessage` + `generatePostCaption`), `publish_post` with
-input-driven modal opening, between-step delays, end-of-task tab cleanup, auto tracker-log,
-NL→JSON, pre-flight + per-step checkpoint detection with HTML/PNG forensic dumps, per-run
-scoped log dirs (`logs/{taskId}-{ts}/profiles/{name}-{shortId}/`).
+**Done:** server (async fire-and-forget + status endpoint, localhost integration
+with 7or34.space), runner, browserManager (Hidemium + Multilogin), humanBehavior,
+all actions listed in project structure, virtualized-feed pattern, network resilience,
+retry-all-errors, user API integration, `injectUserParams`, `concurrency` + `blockMedia`,
+Gemini share + post caption generation (`generateMessage` + `generatePostCaption`),
+`publish_post` with input-driven modal opening, between-step delays, end-of-task tab
+cleanup, auto tracker-log, NL→JSON, pre-flight + per-step checkpoint detection with
+HTML/PNG forensic dumps, per-run scoped log dirs (`logs/{taskId}-{ts}/profiles/{name}-{shortId}/`),
+`setup_privacy` (extracted from `facebook_signup`), EU cookie consent auto-dismiss,
+`facebook_signup` failure dumps, `setup_about` URL-based subsection fallback for fresh accounts.
 
 **TODO:** `comment_post`, `join_group`, `send_message`; comment generation; SQLite task state;
 Web UI for chat; schema validation on generated JSON; Multilogin profile creation in

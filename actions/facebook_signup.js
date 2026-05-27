@@ -26,8 +26,44 @@
  *   password      ← user.facebookPassword
  */
 
+const fs = require('fs');
+const path = require('path');
 const { humanWait, humanClick, humanType } = require('../utils/humanBehavior');
 const { updateProfile } = require('../utils/userApi');
+const { getProfileLogDir } = require('../utils/sessionLog');
+
+async function dumpFailure(page, label) {
+  try {
+    if (!page) return;
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeLabel = String(label || 'failure').replace(/[^a-z0-9_-]+/gi, '_');
+    const profileDir = getProfileLogDir();
+    const targetDir = profileDir || path.join(process.cwd(), 'logs');
+    try { if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true }); } catch (_) {}
+
+    const baseName = `signup-${safeLabel}-${ts}`;
+    let url = '(unknown)';
+    try { url = page.url(); } catch (_) {}
+
+    try {
+      const html = await page.content();
+      const htmlPath = path.join(targetDir, `${baseName}.html`);
+      fs.writeFileSync(htmlPath, `<!-- url: ${url} -->\n${html}`, 'utf8');
+      console.warn(`  [facebook_signup] dumped HTML → ${htmlPath}`);
+    } catch (err) {
+      console.warn(`  [facebook_signup] HTML dump failed: ${err.message}`);
+    }
+    try {
+      const pngPath = path.join(targetDir, `${baseName}.png`);
+      await page.screenshot({ path: pngPath, fullPage: true });
+      console.warn(`  [facebook_signup] dumped screenshot → ${pngPath}`);
+    } catch (err) {
+      console.warn(`  [facebook_signup] screenshot failed: ${err.message}`);
+    }
+  } catch (err) {
+    console.warn(`  [facebook_signup] dumpFailure swallowed: ${err.message}`);
+  }
+}
 
 // FB renders the month options with full names ("January", "February"…) on
 // the current /reg/ form. If a future variant switches back to 3-letter
@@ -95,7 +131,13 @@ async function clickHuman(page, locator, label) {
 }
 
 async function fillHuman(page, locator, value, label) {
-  await locator.waitFor({ state: 'visible', timeout: 20000 });
+  try {
+    await locator.waitFor({ state: 'visible', timeout: 20000 });
+  } catch (err) {
+    // Cookie popup may be overlaying the form — dismiss and retry
+    await dismissCookieConsent(page);
+    await locator.waitFor({ state: 'visible', timeout: 10000 });
+  }
   await locator.scrollIntoViewIfNeeded().catch(() => {});
   const box = await locator.boundingBox();
   if (!box) throw new Error(`facebook_signup: "${label}" has no bounding box`);
@@ -114,59 +156,18 @@ async function selectOption(page, trigger, optionName, label) {
   await humanWait(page, 600, 1200);
 
   const option = page.getByRole('option', { name: optionName, exact: true }).first();
-  await clickHuman(page, option, `${label} option "${optionName}"`);
+  try {
+    await clickHuman(page, option, `${label} option "${optionName}"`);
+  } catch (err) {
+    // Cookie popup may be overlaying the form — dismiss and retry
+    await dismissCookieConsent(page);
+    await clickHuman(page, trigger, `${label} dropdown (retry)`);
+    await humanWait(page, 600, 1200);
+    await clickHuman(page, option, `${label} option "${optionName}" (retry)`);
+  }
   await humanWait(page, 500, 1000);
 }
 
-async function isPublicPrivacyCurrent(page) {
-  const currentLabel = page.getByText(/Public\s*.\s*Your current setting/).first();
-  if (await currentLabel.isVisible({ timeout: 1500 }).catch(() => false)) {
-    return true;
-  }
-
-  const firstRadio = page.locator('input[type="radio"]').first();
-  return firstRadio.evaluate((el) => el.checked || el.hasAttribute('checked')).catch(() => false);
-}
-
-async function selectPublicPrivacy(page) {
-  if (await isPublicPrivacyCurrent(page)) {
-    console.log('  [facebook_signup] Public privacy is already current.');
-    return;
-  }
-
-  const publicRow = page
-    .locator(
-      'xpath=//span[contains(normalize-space(.), "Public")]/ancestor::div[.//input[@type="radio"]][1]'
-    )
-    .first();
-
-  await clickHuman(page, publicRow, 'Public privacy row');
-  await humanWait(page, 1500, 2500);
-
-  if (await isPublicPrivacyCurrent(page)) {
-    console.log('  [facebook_signup] Public privacy selected.');
-    return;
-  }
-
-  throw new Error('facebook_signup: Public privacy did not become current after click');
-}
-
-async function selectPublicPrivacyWithRetry(page) {
-  const maxAttempts = 3;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      console.log(`  [facebook_signup] Public privacy attempt ${attempt}/${maxAttempts}...`);
-      await selectPublicPrivacy(page);
-      return;
-    } catch (err) {
-      if (attempt === maxAttempts) throw err;
-
-      console.warn(`  [facebook_signup] Public privacy attempt ${attempt} failed: ${err.message}`);
-      await humanWait(page, 5000, 10000);
-    }
-  }
-}
 
 async function markNeedSetup(userId) {
   if (!userId) {
@@ -180,6 +181,17 @@ async function markNeedSetup(userId) {
   } catch (err) {
     console.warn(`  [facebook_signup] PATCH status failed (non-fatal): ${err.message}`);
   }
+}
+
+async function dismissCookieConsent(page) {
+  try {
+    const btn = page.locator('div[aria-label="Allow all cookies"]:not([aria-hidden="true"])').first();
+    if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await btn.click({ force: true });
+      console.log('  [facebook_signup] Dismissed cookie consent popup');
+      await humanWait(page, 1500, 2500);
+    }
+  } catch { /* no popup */ }
 }
 
 module.exports = async function facebook_signup(page, params) {
@@ -230,44 +242,51 @@ module.exports = async function facebook_signup(page, params) {
     await humanWait(page, 1500, 2500);
   }
 
-  console.log('  [facebook_signup] First name...');
-  await fillHuman(
-    page,
-    page.getByLabel('First name', { exact: true }).first(),
-    firstName,
-    'First name'
-  );
+  await dismissCookieConsent(page);
 
-  console.log('  [facebook_signup] Last name / Surname...');
-  const lastNameInput = page
-    .getByLabel('Last name', { exact: true })
-    .or(page.getByLabel('Surname', { exact: true }))
-    .first();
-  await fillHuman(page, lastNameInput, lastName, 'Last name / Surname');
+  try {
+    console.log('  [facebook_signup] First name...');
+    await fillHuman(
+      page,
+      page.getByLabel('First name', { exact: true }).first(),
+      firstName,
+      'First name'
+    );
 
-  console.log(`  [facebook_signup] DOB ${dob.monthName} ${dob.day}, ${dob.year}...`);
-  await selectOption(page, page.getByLabel('Select Month').first(), dob.monthName, 'Month');
-  await selectOption(page, page.getByLabel('Select Day').first(), dob.day, 'Day');
-  await selectOption(page, page.getByLabel('Select Year').first(), dob.year, 'Year');
+    console.log('  [facebook_signup] Last name / Surname...');
+    const lastNameInput = page
+      .getByLabel('Last name', { exact: true })
+      .or(page.getByLabel('Surname', { exact: true }))
+      .first();
+    await fillHuman(page, lastNameInput, lastName, 'Last name / Surname');
 
-  console.log(`  [facebook_signup] gender ${genderName}...`);
-  await selectOption(page, page.getByText('Select your gender').first(), genderName, 'Gender');
+    console.log(`  [facebook_signup] DOB ${dob.monthName} ${dob.day}, ${dob.year}...`);
+    await selectOption(page, page.getByLabel('Select Month').first(), dob.monthName, 'Month');
+    await selectOption(page, page.getByLabel('Select Day').first(), dob.day, 'Day');
+    await selectOption(page, page.getByLabel('Select Year').first(), dob.year, 'Year');
 
-  console.log('  [facebook_signup] email/mobile...');
-  await fillHuman(
-    page,
-    page.getByLabel('Mobile number or email').first(),
-    email,
-    'Mobile number or email'
-  );
+    console.log(`  [facebook_signup] gender ${genderName}...`);
+    await selectOption(page, page.getByText('Select your gender').first(), genderName, 'Gender');
 
-  console.log('  [facebook_signup] password...');
-  await fillHuman(page, page.getByLabel('Password').first(), password, 'Password');
+    console.log('  [facebook_signup] email/mobile...');
+    await fillHuman(
+      page,
+      page.getByLabel('Mobile number or email').first(),
+      email,
+      'Mobile number or email'
+    );
 
-  await humanWait(page, 1000, 2000);
+    console.log('  [facebook_signup] password...');
+    await fillHuman(page, page.getByLabel('Password').first(), password, 'Password');
 
-  console.log('  [facebook_signup] submitting...');
-  await clickHuman(page, page.getByText('Submit', { exact: true }).first(), 'Submit');
+    await humanWait(page, 1000, 2000);
+
+    console.log('  [facebook_signup] submitting...');
+    await clickHuman(page, page.getByText('Submit', { exact: true }).first(), 'Submit');
+  } catch (err) {
+    await dumpFailure(page, `error-${firstName || 'unknown'}`);
+    throw err;
+  }
 
   await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
   await humanWait(page, 2500, 4500);
@@ -295,31 +314,5 @@ module.exports = async function facebook_signup(page, params) {
 
   await markNeedSetup(userId);
 
-  // Post-signup: walk the bundled-settings privacy acknowledgment
-  // (Public radio → Next → Confirm). 5-10s pauses between each click —
-  // the page is short and uniformly fast clicks would look bot-shaped.
-  console.log('  [facebook_signup] navigating to /settings/bundled...');
-  await page.goto('https://www.facebook.com/settings/bundled', {
-    waitUntil: 'domcontentloaded',
-  });
-  await page.waitForFunction(() => window.location.href.includes('bundled'), null, {
-    timeout: 30000,
-  });
-  await humanWait(page, 5000, 10000);
-
-  // Updated behavior: selectPublicPrivacy skips this step when Public is
-  // already marked as the current setting.
-  console.log('  [facebook_signup] verifying Public privacy...');
-  await selectPublicPrivacyWithRetry(page);
-  await humanWait(page, 5000, 10000);
-
-  console.log('  [facebook_signup] clicking Next...');
-  await clickHuman(page, page.locator('div[aria-label="Next"]').first(), 'Next');
-  await humanWait(page, 5000, 10000);
-
-  console.log('  [facebook_signup] clicking Confirm...');
-  await clickHuman(page, page.locator('div[aria-label="Confirm"]').first(), 'Confirm');
-  await humanWait(page, 5000, 10000);
-
-  console.log('  [facebook_signup] signup + post-signup confirmation complete.');
+  console.log('  [facebook_signup] signup complete. Chain setup_privacy as a next step for bundled-settings walkthrough.');
 };

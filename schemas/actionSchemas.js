@@ -209,7 +209,11 @@ const actionSchemas = {
         type: 'string',
         enum: ['friends', 'sharers', 'users'],
         description:
-          'Random pick from a named pool: "friends" → config/friend_targets.json, "sharers" → config/share_sources.json, "users" → live DB fetch (5 random Active profiles with non-empty profileUrl)',
+          'Random pick from a named pool: "friends" → config/friend_targets.json, "sharers" → API fetch by user country (GET /api/sharers/by-country/:country), "users" → live DB fetch (5 random Active profiles with non-empty profileUrl)',
+      },
+      country: {
+        type: 'string',
+        description: 'User country code (auto-injected). Used by "sharers" pool to fetch country-specific URLs.',
       },
     },
     hasChildren: true,
@@ -439,6 +443,10 @@ const actionSchemas = {
         description:
           'Optional sender-side skip. When set, the action navigates to /me, reads the sender\'s own current friend count, PATCHes it back to the user record (keeps the DB fresh — sender friend count is otherwise only updated when another bot visits this profile), and if the count exceeds this threshold returns without running the loop. Omit to never skip.',
       },
+      country: {
+        type: 'string',
+        description: 'User country code (auto-injected). Used by "sharers" pool to fetch country-specific URLs.',
+      },
     },
     hasChildren: false,
   },
@@ -500,6 +508,12 @@ const actionSchemas = {
         description: 'Outlook/Microsoft account password. Auto-injected from user.emailPassword when omitted.',
       },
     },
+    hasChildren: false,
+  },
+  setup_privacy: {
+    description:
+      'Leaf: walk the /settings/bundled privacy acknowledgment page. Selects Public privacy (with retry), clicks Next, then Confirm. Designed to run after facebook_signup or standalone for accounts that skipped the walkthrough.',
+    params: {},
     hasChildren: false,
   },
   facebook_signup: {

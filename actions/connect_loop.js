@@ -24,6 +24,7 @@
 const { humanWait, humanClick } = require('../utils/humanBehavior');
 const {
   fetchActiveProfiles,
+  fetchSharerUrls,
   updateProfile,
   recordFriendRequest,
   updateFriendRequestStatus,
@@ -32,7 +33,6 @@ const { detectRateLimit, dismissRateLimit } = require('../utils/fbRateLimit');
 
 const STATIC_POOLS = {
   friends: require('../config/friend_targets.json'),
-  sharers: require('../config/share_sources.json'),
 };
 
 const ADD_FRIEND_SELECTOR =
@@ -42,11 +42,17 @@ const CONFIRM_SELECTOR =
 const CANCEL_REQUEST_SELECTOR =
   'xpath=//div[@role="button"][.//span[normalize-space(text())="Cancel request"]]';
 
-async function pickTarget(pool, { maxFriends } = {}) {
+async function pickTarget(pool, { maxFriends, country } = {}) {
   if (STATIC_POOLS[pool]) {
     const list = STATIC_POOLS[pool];
     if (!list.length) return null;
     return { profileUrl: list[Math.floor(Math.random() * list.length)] };
+  }
+  if (pool === 'sharers') {
+    if (!country) throw new Error('connect_loop: country is required for "sharers" pool');
+    const urls = await fetchSharerUrls(country);
+    if (!urls.length) return null;
+    return { profileUrl: urls[Math.floor(Math.random() * urls.length)] };
   }
   if (pool === 'users') {
     const profiles = await fetchActiveProfiles(5);
@@ -176,6 +182,7 @@ module.exports = async function connect_loop(page, params = {}) {
   const waitMax = Number(params.waitMax ?? 60);
   const senderId = params.userId || '';
   const maxFriends = params.maxFriends != null ? Number(params.maxFriends) : 30;
+  const country = params.country || '';
   const skipIfFriendsAbove =
     params.skipIfFriendsAbove != null ? Number(params.skipIfFriendsAbove) : null;
 
@@ -239,7 +246,7 @@ module.exports = async function connect_loop(page, params = {}) {
     // ── 1. Pick + visit ───────────────────────────────────────────────
     let target;
     try {
-      target = await pickTarget(pool, { maxFriends });
+      target = await pickTarget(pool, { maxFriends, country });
     } catch (err) {
       console.warn(`[connect_loop] pickTarget failed: ${err.message} — stopping.`);
       stopReason = 'pool error';

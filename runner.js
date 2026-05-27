@@ -132,6 +132,7 @@ const handlers = {
   connect_loop: require('./actions/connect_loop'),
   accept_loop: require('./actions/accept_loop'),
   outlook_login: require('./actions/outlook_login'),
+  setup_privacy: require('./actions/setup_privacy'),
   facebook_signup: require('./actions/facebook_signup'),
   facebook_login: require('./actions/facebook_login'),
   ensure_login: require('./actions/ensure_login'),
@@ -367,6 +368,10 @@ function injectUserParams(steps, user) {
         next.userIdentity = user.identityPrompt || '';
       }
 
+      if (!next.country) {
+        next.country = user.country || '';
+      }
+
       s.params = next;
     }
 
@@ -436,10 +441,18 @@ function injectUserParams(steps, user) {
       };
     }
 
-    if (step.type === 'connect_loop' && !(step.params && step.params.userId)) {
+    if (step.type === 'visit_profile') {
       s.params = {
         ...(step.params || {}),
-        userId: user._id || user.id || '',
+        country: step.params?.country || user.country || '',
+      };
+    }
+
+    if (step.type === 'connect_loop') {
+      s.params = {
+        ...(step.params || {}),
+        userId: step.params?.userId || user._id || user.id || '',
+        country: step.params?.country || user.country || '',
       };
     }
 

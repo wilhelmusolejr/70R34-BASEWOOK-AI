@@ -173,6 +173,19 @@ async function clickSubsection(page, skFragment, fallbackText) {
     }
   }
 
+  // Direct URL navigation — fresh accounts may not render sidebar links yet.
+  try {
+    const currentUrl = page.url();
+    const u = new URL(currentUrl);
+    u.searchParams.set('sk', skFragment);
+    await page.goto(u.toString(), { waitUntil: 'domcontentloaded' });
+    await humanWait(page, 2000, 3000);
+    console.log(`  [setup_about] Navigated to subsection via URL: ${skFragment}`);
+    return true;
+  } catch {
+    /* fall through */
+  }
+
   console.log(`  [setup_about] Could not navigate to subsection: ${skFragment}`);
   return false;
 }

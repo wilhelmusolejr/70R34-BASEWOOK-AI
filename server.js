@@ -1,5 +1,7 @@
 /**
  * Express server exposing POST /execute endpoint for task execution.
+ * Tasks run in the background — POST returns 202 immediately.
+ * GET /status/:taskId to check progress.
  */
 
 const express = require('express');
@@ -8,49 +10,70 @@ const { runTask } = require('./runner');
 const app = express();
 app.use(express.json());
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
-/**
- * POST /execute
- *
- * Body: {
- *   taskId: string,
- *   browsers: number,
- *   steps: Array<Step>
- * }
- *
- * Returns: {
- *   taskId: string,
- *   results: Array<{ profileId, status, error? }>
- * }
- */
-app.post('/execute', async (req, res) => {
+const runningTasks = new Map();
+
+app.post('/execute', (req, res) => {
   const task = req.body;
 
-  // Basic validation
   if (!task.taskId) {
     return res.status(400).json({ error: 'taskId is required' });
   }
-  if (!task.browsers || task.browsers < 1) {
-    return res.status(400).json({ error: 'browsers must be >= 1' });
+  if (!Array.isArray(task.profiles) || task.profiles.length < 1) {
+    return res.status(400).json({ error: 'profiles must be a non-empty array of user IDs' });
   }
   if (!task.steps || !Array.isArray(task.steps)) {
     return res.status(400).json({ error: 'steps must be an array' });
   }
 
-  try {
-    const result = await runTask(task);
-    res.json(result);
-  } catch (err) {
-    console.error('Task execution failed:', err);
-    res.status(500).json({
-      taskId: task.taskId,
-      error: err.message,
-    });
+  if (runningTasks.has(task.taskId)) {
+    const existing = runningTasks.get(task.taskId);
+    if (existing.status === 'running') {
+      return res.status(409).json({ error: `Task ${task.taskId} is already running` });
+    }
   }
+
+  const entry = {
+    taskId: task.taskId,
+    profiles: task.profiles,
+    status: 'running',
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    result: null,
+    error: null,
+  };
+  runningTasks.set(task.taskId, entry);
+
+  runTask(task)
+    .then((result) => {
+      entry.status = 'done';
+      entry.completedAt = new Date().toISOString();
+      entry.result = result;
+    })
+    .catch((err) => {
+      entry.status = 'error';
+      entry.completedAt = new Date().toISOString();
+      entry.error = err.message;
+      console.error(`Task ${task.taskId} failed:`, err);
+    });
+
+  res.status(202).json({
+    taskId: task.taskId,
+    status: 'running',
+    message: 'Task started',
+  });
+});
+
+app.get('/status/:taskId', (req, res) => {
+  const entry = runningTasks.get(req.params.taskId);
+  if (!entry) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+  res.json(entry);
 });
 
 app.listen(PORT, () => {
   console.log(`FB Automation server running on http://localhost:${PORT}`);
-  console.log(`POST /execute to run tasks`);
+  console.log(`POST /execute to fire a task, GET /status/:taskId to check progress`);
 });

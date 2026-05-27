@@ -1,9 +1,8 @@
 /**
  * generateAvatarDescription — short caption for a profile-picture update post.
  * Primary path: GitHub Models API in the persona's POV (user.identityPrompt).
- * Fallback: random pick — first a category from DESCRIPTION_POOLS
- * (bible_verses, inspirational_quotes, gratitude, life_mottos, blessings),
- * then a random entry within that category (5 × 20 = 100 total).
+ * Fallback: random pick — first a category, then a random entry within that
+ * category. Pool and language are chosen by country (IT → Italian, default English).
  * Light emoji sprinkle (~40% chance, one symbol) on both paths.
  *
  * Always returns a non-empty string — caller can type directly.
@@ -14,7 +13,7 @@
 
 require('dotenv').config();
 
-const DESCRIPTION_POOLS = {
+const DESCRIPTION_POOLS_EN = {
   bible_verses: [
     'For I know the plans I have for you, declares the Lord. (Jeremiah 29:11)',
     'The Lord is my shepherd, I lack nothing. (Psalm 23:1)',
@@ -131,7 +130,130 @@ const DESCRIPTION_POOLS = {
   ],
 };
 
-const POOL_KEYS = Object.keys(DESCRIPTION_POOLS);
+const DESCRIPTION_POOLS_IT = {
+  citazioni_bibliche: [
+    'Io conosco i progetti che ho per voi, dice il Signore. (Geremia 29:11)',
+    'Il Signore è il mio pastore, non manco di nulla. (Salmo 23:1)',
+    'Tutto posso in colui che mi dà la forza. (Filippesi 4:13)',
+    'Confida nel Signore con tutto il cuore. (Proverbi 3:5)',
+    'Sii forte e coraggioso. Non avere paura. (Giosuè 1:9)',
+    'Questo è il giorno che il Signore ha fatto; rallegriamoci. (Salmo 118:24)',
+    'Gettate su di lui ogni vostra preoccupazione, perché egli ha cura di voi. (1 Pietro 5:7)',
+    'Il Signore è la mia luce e la mia salvezza, di chi avrò timore. (Salmo 27:1)',
+    'L\'amore è paziente, l\'amore è gentile. (1 Corinzi 13:4)',
+    'Ogni cosa che respira lodi il Signore. (Salmo 150:6)',
+    'Fermatevi e sappiate che io sono Dio. (Salmo 46:10)',
+    'Il pianto può durare una notte, ma la gioia viene al mattino. (Salmo 30:5)',
+    'La gioia del Signore è la vostra forza. (Neemia 8:10)',
+    'Camminiamo per fede, non per visione. (2 Corinzi 5:7)',
+    'Fate ogni cosa con amore. (1 Corinzi 16:14)',
+    'Le sue misericordie si rinnovano ogni mattina. (Lamentazioni 3:22-23)',
+    'Rallegratevi sempre nel Signore. (Filippesi 4:4)',
+    'Il Signore combatterà per voi; voi dovete solo stare fermi. (Esodo 14:14)',
+    'Rendete grazie al Signore, perché è buono. (Salmo 107:1)',
+    'La mia grazia ti basta. (2 Corinzi 12:9)',
+  ],
+
+  citazioni_ispirazionali: [
+    'Sii te stesso; tutti gli altri sono già occupati.',
+    'L\'unico modo di fare un grande lavoro è amare quello che fai.',
+    'La vita è quello che ti succede mentre sei impegnato a fare altri progetti.',
+    'Nel mezzo di ogni difficoltà si nasconde un\'opportunità.',
+    'Agisci come se quello che fai facesse la differenza. La fa.',
+    'Il momento migliore per piantare un albero era vent\'anni fa. Il secondo è adesso.',
+    'Fai quello che puoi, con quello che hai, dove sei.',
+    'Qualunque cosa tu sia, sii una versione migliore.',
+    'La felicità dipende da noi stessi.',
+    'Trasforma le tue ferite in saggezza.',
+    'Tieni sempre il viso rivolto verso il sole.',
+    'Un viaggio di mille miglia inizia con un singolo passo.',
+    'Non sei mai troppo vecchio per un nuovo sogno.',
+    'Non contare i giorni, fai che i giorni contino.',
+    'La semplicità è la sofisticatezza suprema.',
+    'Niente funziona se non ti impegni.',
+    'Ben fatto è meglio che ben detto.',
+    'Il futuro dipende da quello che fai oggi.',
+    'Vai con fiducia nella direzione dei tuoi sogni.',
+    'Resta affamato, resta folle.',
+  ],
+
+  gratitudine: [
+    'Grata per un altro giorno bellissimo.',
+    'Conto le benedizioni, non i problemi.',
+    'Grata per le piccole cose di oggi.',
+    'Tanto da essere grati in questa stagione.',
+    'Trovo gioia nelle cose semplici.',
+    'Un cuore pieno di gratitudine è un cuore pieno di pace.',
+    'Grata oltre le parole per questa vita.',
+    'Piccole gioie, grande gratitudine.',
+    'Cuore grato, vita felice.',
+    'Benedetta e grata, sempre.',
+    'Oggi scelgo la gratitudine.',
+    'Tanti motivi per sorridere oggi.',
+    'Il mio cuore è pieno stamattina.',
+    'Ogni giorno è un regalo da scartare.',
+    'Grata per le persone nella mia vita.',
+    'Grata per questo momento, qui e ora.',
+    'Piccoli momenti, grandi benedizioni.',
+    'Conto le mie benedizioni una ad una.',
+    'La gratitudine trasforma ciò che abbiamo in abbastanza.',
+    'Un cuore grato è un cuore felice.',
+  ],
+
+  motti_di_vita: [
+    'Solo buone vibrazioni.',
+    'Solo io, come sono.',
+    'Vivere, ridere, amare.',
+    'Vai avanti, continua a crescere.',
+    'Sii il bene che vuoi vedere.',
+    'Un giorno alla volta.',
+    'Creo ricordi, non scuse.',
+    'Resta umile, lavora con gentilezza.',
+    'Progresso, non perfezione.',
+    'Sii gentile con te stesso oggi.',
+    'Inseguo tramonti e sogni semplici.',
+    'Cuore tenero, spina dorsale forte.',
+    'Scegli la gioia ogni giorno.',
+    'Semplice e autentico.',
+    'Vivi di più, preoccupati di meno.',
+    'Svegliati, presentati, brilla.',
+    'La vita è meglio quando ridi.',
+    'Sii dove sono i tuoi piedi.',
+    'Inspira, espira, vai avanti.',
+    'Piccoli passi, grandi sogni.',
+  ],
+
+  benedizioni: [
+    'Benedetta oltre misura.',
+    'Fede sopra la paura, sempre.',
+    'Il favore segue chi ha fiducia.',
+    'Ogni alba è un dono dall\'alto.',
+    'I suoi piani sono migliori dei miei.',
+    'In piedi sulle promesse, cammino nella fede.',
+    'La grazia mi accompagna ogni giorno.',
+    'Molto favorita e profondamente amata.',
+    'Preghiere sussurrate, fede che cresce.',
+    'Il suo amore non viene mai meno.',
+    'Mi fido di ogni passo di questo cammino.',
+    'Benedetta con una pace che supera ogni comprensione.',
+    'Ringrazio Dio per un altro giorno.',
+    'Adorazione nell\'attesa.',
+    'Ancora in piedi, ancora a credere.',
+    'Piccoli semi di fede, grandi raccolti di speranza.',
+    'Lui è fedele, anche quando io sono debole.',
+    'Benedizioni su benedizioni, grandi e piccole.',
+    'Vivere amata, vivere intera.',
+    'La fede rende tutto possibile.',
+  ],
+};
+
+const COUNTRY_POOLS = {
+  IT: DESCRIPTION_POOLS_IT,
+};
+
+const COUNTRY_LANGUAGES = {
+  IT: 'Italian',
+};
 
 const EMOJIS = ['🙏', '✝️', '💫', '🌿', '☀️', '🕊️', '💛', '✨', '🌻', '❤️'];
 
@@ -139,14 +261,20 @@ function randomPick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-/**
- * Maybe append a single emoji (~40% of the time) to humanize output.
- * Never more than one, never at the start.
- */
 function sprinkleEmoji(text) {
   if (!text) return text;
   if (Math.random() >= 0.4) return text;
   return `${text} ${randomPick(EMOJIS)}`;
+}
+
+function getPoolsForCountry(country) {
+  const code = (country || '').toUpperCase().trim();
+  return COUNTRY_POOLS[code] || DESCRIPTION_POOLS_EN;
+}
+
+function getLanguageForCountry(country) {
+  const code = (country || '').toUpperCase().trim();
+  return COUNTRY_LANGUAGES[code] || 'English';
 }
 
 async function requestGitHubModels(messages, options = {}) {
@@ -188,20 +316,23 @@ async function requestGitHubModels(messages, options = {}) {
   return await response.json();
 }
 
-function fallbackQuote() {
-  const poolKey = randomPick(POOL_KEYS);
-  const quote = randomPick(DESCRIPTION_POOLS[poolKey]);
+function fallbackQuote(country) {
+  const pools = getPoolsForCountry(country);
+  const poolKeys = Object.keys(pools);
+  const poolKey = randomPick(poolKeys);
+  const quote = randomPick(pools[poolKey]);
   const decorated = sprinkleEmoji(quote);
   console.log(`  [generateAvatarDescription] fallback [${poolKey}]: "${decorated}"`);
   return decorated;
 }
 
-async function generateAvatarDescription(userIdentity) {
+async function generateAvatarDescription(userIdentity, country) {
   const persona = String(userIdentity || '').trim();
+  const language = getLanguageForCountry(country);
 
   if (!persona) {
     console.log('  [generateAvatarDescription] no userIdentity — using fallback quote');
-    return fallbackQuote();
+    return fallbackQuote(country);
   }
 
   try {
@@ -213,7 +344,7 @@ async function generateAvatarDescription(userIdentity) {
 
       CONSTRAINTS:
       - POV: Always first person ("I", "me", "my") — the persona is posting their own new pic.
-      - LANGUAGE: Always English regardless of persona location.
+      - LANGUAGE: Always ${language}.
       - TONE: Casual, warm, natural — like a real person captioning a new photo. Match the persona's vibe.
       - LENGTH: 4 to 15 words.
       - EMOJI: At most ONE emoji, and only if it fits naturally. Usually none is better.
@@ -231,7 +362,7 @@ async function generateAvatarDescription(userIdentity) {
     const raw = payload.choices[0]?.message?.content?.trim().replace(/^["']|["']$/g, '') ?? '';
     if (!raw || raw === 'SKIP') {
       console.log('  [generateAvatarDescription] model returned SKIP — using fallback quote');
-      return fallbackQuote();
+      return fallbackQuote(country);
     }
 
     const cleaned = raw
@@ -240,16 +371,16 @@ async function generateAvatarDescription(userIdentity) {
       .trim();
 
     if (!cleaned) {
-      return fallbackQuote();
+      return fallbackQuote(country);
     }
 
     const finalText = sprinkleEmoji(cleaned);
-    console.log(`  [generateAvatarDescription] generated: "${finalText}"`);
+    console.log(`  [generateAvatarDescription] generated (${language}): "${finalText}"`);
     return finalText;
   } catch (err) {
     console.warn(`  [generateAvatarDescription] API error: ${err.message} — using fallback quote`);
-    return fallbackQuote();
+    return fallbackQuote(country);
   }
 }
 
-module.exports = { generateAvatarDescription, DESCRIPTION_POOLS };
+module.exports = { generateAvatarDescription, DESCRIPTION_POOLS: DESCRIPTION_POOLS_EN };

@@ -59,11 +59,14 @@ async function findActionsBtn(page) {
 }
 
 module.exports = async function setup_avatar(page, params) {
-  const { photoUrl, userIdentity = '' } = params;
-  if (!photoUrl) throw new Error('setup_avatar: photoUrl is required');
+  const { photoUrl, userIdentity = '', country = '' } = params;
+  if (!photoUrl) {
+    console.log('[setup_avatar] No photoUrl — user has no avatar image configured. Skipping.');
+    return;
+  }
 
-  // Explicit description wins; otherwise AI-generate from persona, Bible-verse fallback.
-  const description = params.description?.trim() || (await generateAvatarDescription(userIdentity));
+  const description =
+    params.description?.trim() || (await generateAvatarDescription(userIdentity, country));
 
   console.log('Downloading avatar image...');
   const tmpPath = await downloadToTemp(photoUrl);

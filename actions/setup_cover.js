@@ -34,7 +34,10 @@ function downloadToTemp(url) {
 
 module.exports = async function setup_cover(page, params) {
   const { photoUrl } = params;
-  if (!photoUrl) throw new Error('setup_cover: photoUrl is required');
+  if (!photoUrl) {
+    console.log('[setup_cover] No photoUrl — user has no cover image configured. Skipping.');
+    return;
+  }
 
   console.log('Downloading cover image...');
   const tmpPath = await downloadToTemp(photoUrl);

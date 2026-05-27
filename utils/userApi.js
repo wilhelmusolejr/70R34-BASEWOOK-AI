@@ -120,10 +120,22 @@ async function updateFriendRequestStatus(receiverId, senderId, status) {
   );
 }
 
+async function fetchSharerUrls(country) {
+  if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
+  if (!country) throw new Error('fetchSharerUrls: country is required');
+  const { data } = await axios.get(
+    `${BASE_URL}/api/sharers/by-country/${encodeURIComponent(country.toUpperCase())}`,
+    { timeout: 15000 }
+  );
+  const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+  return parsed.urls || [];
+}
+
 module.exports = {
   fetchUser,
   fetchActiveProfiles,
   updateProfile,
   recordFriendRequest,
   updateFriendRequestStatus,
+  fetchSharerUrls,
 };

@@ -24,7 +24,7 @@
  * it rarely needs to appear in tasks.json explicitly.
  */
 
-const { humanWait } = require('../utils/humanBehavior');
+const { humanWait, humanClick } = require('../utils/humanBehavior');
 const facebook_signup = require('./facebook_signup');
 
 const REG_LOGIN_URL = 'https://web.facebook.com/reg/?entry_point=login&next=';
@@ -95,6 +95,15 @@ module.exports = async function ensure_login(page, params) {
   console.log(`  [ensure_login] navigating to reg/login entry: ${REG_LOGIN_URL}`);
   await page.goto(REG_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await humanWait(page, 2500, 4000);
+
+  try {
+    const btn = page.locator('div[aria-label="Allow all cookies"]:not([aria-hidden="true"])').first();
+    if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await btn.click({ force: true });
+      console.log('  [ensure_login] Dismissed cookie consent popup');
+      await humanWait(page, 1500, 2500);
+    }
+  } catch { /* no popup */ }
 
   // Delegate to facebook_signup. The signup handler detects we're already on
   // /reg/ and skips its own facebook.com nav + "Create new account" click.
