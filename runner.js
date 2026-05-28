@@ -136,6 +136,7 @@ const handlers = {
   facebook_signup: require('./actions/facebook_signup'),
   facebook_login: require('./actions/facebook_login'),
   ensure_login: require('./actions/ensure_login'),
+  marketplace_location: require('./actions/marketplace_location'),
   wait: require('./actions/wait'),
 };
 
@@ -207,7 +208,65 @@ async function runWithRetry(fn, profileId, stepType, page) {
     }
   }
 
+  // Final failure dump — safety net for actions that don't dump themselves.
+  // Marker on err prevents double-dumps when the action already captured one.
+  if (lastError && !lastError.dumped) {
+    await dumpStepFailure(page, stepType, lastError);
+    lastError.dumped = true;
+  }
+
   throw lastError;
+}
+
+/**
+ * Generic step-failure dump. Captures HTML + full-page screenshot to the
+ * per-profile run-scoped folder so every failure has forensics, regardless
+ * of whether the action's internal dumpFailure ran. The error message is
+ * embedded in the HTML comment alongside the URL.
+ *
+ * Best-effort — swallows its own errors. Caller throws regardless.
+ */
+async function dumpStepFailure(page, stepType, err) {
+  try {
+    if (!page) return;
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeStep = String(stepType || 'step').replace(/[^a-z0-9_-]+/gi, '_');
+
+    const profileDir = getProfileLogDir();
+    const targetDir = profileDir || path.join(process.cwd(), 'logs');
+    try {
+      if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+    } catch (_) {}
+
+    const baseName = `fail-${safeStep}-${ts}`;
+    const htmlPath = path.join(targetDir, `${baseName}.html`);
+    const pngPath = path.join(targetDir, `${baseName}.png`);
+
+    let url = '(unknown)';
+    try {
+      url = page.url();
+    } catch (_) {}
+
+    const errMsg = (err && err.message) || String(err || 'unknown error');
+    const header = `<!-- step: ${stepType} -->\n<!-- url: ${url} -->\n<!-- error: ${errMsg.replace(/-->/g, '--&gt;')} -->\n`;
+
+    try {
+      const html = await page.content();
+      fs.writeFileSync(htmlPath, header + html, 'utf8');
+      console.warn(`  [fail] dumped HTML → ${htmlPath}`);
+    } catch (e) {
+      console.warn(`  [fail] HTML dump failed: ${e.message}`);
+    }
+
+    try {
+      await page.screenshot({ path: pngPath, fullPage: true });
+      console.warn(`  [fail] dumped screenshot → ${pngPath}`);
+    } catch (e) {
+      console.warn(`  [fail] screenshot failed: ${e.message}`);
+    }
+  } catch (e) {
+    console.warn(`  [fail] dumpStepFailure swallowed: ${e.message}`);
+  }
 }
 
 function safePageUrl(page) {
@@ -414,9 +473,7 @@ function injectUserParams(steps, user) {
         // value (may be empty string) — explicit non-empty in step.params
         // overrides; explicit empty string forces re-creation.
         pageUrl:
-          typeof step.params?.pageUrl === 'string'
-            ? step.params.pageUrl
-            : user.pageUrl || '',
+          typeof step.params?.pageUrl === 'string' ? step.params.pageUrl : user.pageUrl || '',
       };
     }
 
@@ -463,10 +520,19 @@ function injectUserParams(steps, user) {
       };
     }
 
-    if (step.type === 'search' && !(step.params && step.params.city)) {
+    if (step.type === 'search') {
       s.params = {
         ...(step.params || {}),
-        city: user.city || '',
+        ...(!step.params?.city ? { city: user.city || '' } : {}),
+        ...(!step.params?.country ? { country: user.country || '' } : {}),
+      };
+    }
+
+    if (step.type === 'marketplace_location') {
+      s.params = {
+        ...(step.params || {}),
+        ...(!step.params?.city ? { city: user.city || '' } : {}),
+        ...(!step.params?.country ? { country: user.country || '' } : {}),
       };
     }
 
@@ -538,8 +604,7 @@ function injectUserParams(steps, user) {
         userId: step.params?.userId || user._id || user.id || '',
         firstName: step.params?.firstName || user.firstName || '',
         lastName: step.params?.lastName || user.lastName || '',
-        birthdayDate:
-          step.params?.birthdayDate || user.birthdayDate || user.dob || '',
+        birthdayDate: step.params?.birthdayDate || user.birthdayDate || user.dob || '',
         gender: step.params?.gender || user.gender || '',
         email: step.params?.email || selectedEmail,
         password: step.params?.password || user.facebookPassword || '',
@@ -563,8 +628,7 @@ function injectUserParams(steps, user) {
         ...(step.params || {}),
         firstName: step.params?.firstName || user.firstName || '',
         lastName: step.params?.lastName || user.lastName || '',
-        birthdayDate:
-          step.params?.birthdayDate || user.birthdayDate || user.dob || '',
+        birthdayDate: step.params?.birthdayDate || user.birthdayDate || user.dob || '',
         gender: step.params?.gender || user.gender || '',
         email: step.params?.email || selectedEmail,
         password: step.params?.password || user.facebookPassword || '',
@@ -633,10 +697,9 @@ async function runStep(page, step, profileId, user, vaultState) {
     if (Math.random() >= step.chance) {
       console.log(`Skipping: ${step.type} (chance=${step.chance})`);
       if (vaultState) {
-        vaultLog.browser(
-          { browserId: vaultState.browserId },
-          [`Skipped: ${step.type} (chance=${step.chance})`]
-        );
+        vaultLog.browser({ browserId: vaultState.browserId }, [
+          `Skipped: ${step.type} (chance=${step.chance})`,
+        ]);
       }
       return;
     }
@@ -779,9 +842,7 @@ async function runBrowser(session, steps, options = {}) {
           // was a real hard checkpoint or a soft modal variant we didn't
           // recognize. Forensics only — must still throw.
           await dumpCheckpointState(page, 'preflight');
-          const cpErr = new Error(
-            `Checkpoint detected at pre-flight (url=${preFlightUrl})`
-          );
+          const cpErr = new Error(`Checkpoint detected at pre-flight (url=${preFlightUrl})`);
           cpErr.checkpoint = true;
           cpErr.noRetry = true;
           throw cpErr;
@@ -798,9 +859,7 @@ async function runBrowser(session, steps, options = {}) {
         vaultLog.browser({ browserId: vaultState.browserId }, [{ level: 'error', msg }]);
       }
       if (err && err.checkpoint) {
-        console.warn(
-          `Checkpoint hit at pre-flight — skipping all steps for this profile`
-        );
+        console.warn(`Checkpoint hit at pre-flight — skipping all steps for this profile`);
         const userId = user?._id || user?.id || '';
         if (userId) {
           try {
@@ -833,7 +892,13 @@ async function runBrowser(session, steps, options = {}) {
         );
       } else {
         const probeUrl = user?.profileUrl || '';
-        if (await isLoggedOut(page, { profileProbeUrl: probeUrl })) {
+        if (
+          await isLoggedOut(page, {
+            profileProbeUrl: probeUrl,
+            country: user?.country || '',
+            excludeUserId: user?._id || user?.id || '',
+          })
+        ) {
           console.log(`[${profileId}] Session is logged out — attempting re-login via signup...`);
           const selectedEmail =
             user?.emails?.find((e) => e.selected)?.address || user?.emails?.[0]?.address || '';
@@ -1015,6 +1080,7 @@ async function runTask(task) {
   const provider = process.env.BROWSER_PROVIDER || 'hidemium';
   const results = new Array(userIds.length);
   const timingsMs = new Array(userIds.length).fill(0);
+  const displayNames = new Array(userIds.length).fill('');
 
   // Pre-seed results / timings for previously-completed profiles so the
   // end-of-task summary covers the full task, not just this restart's slice.
@@ -1023,7 +1089,10 @@ async function runTask(task) {
     if (!prior) continue;
     results[i] =
       prior.status === 'success'
-        ? { status: 'fulfilled', value: { profileId: userIds[i], status: 'success', resumed: true } }
+        ? {
+            status: 'fulfilled',
+            value: { profileId: userIds[i], status: 'success', resumed: true },
+          }
         : { status: 'rejected', reason: new Error(prior.error || 'previous run errored') };
     timingsMs[i] = Math.round((prior.elapsedSec || 0) * 1000);
   }
@@ -1051,9 +1120,12 @@ async function runTask(task) {
       try {
         userPreview = await fetchUser(userId);
       } catch (err) {
-        console.warn(`[${userId}] Pre-fetch user failed (will fall back to userId): ${err.message}`);
+        console.warn(
+          `[${userId}] Pre-fetch user failed (will fall back to userId): ${err.message}`
+        );
       }
       const displayName = buildDisplayName(userPreview, userId);
+      displayNames[index] = displayName;
 
       await runInSession({ displayName, browserId, idsToStrip: [userId], userId }, async () => {
         let session;
@@ -1071,10 +1143,7 @@ async function runTask(task) {
               online: false,
               currentStepPath: 'done',
             },
-            [
-              { level: 'error', msg: `Failed to open browser: ${err.message}` },
-              'browser:offline',
-            ]
+            [{ level: 'error', msg: `Failed to open browser: ${err.message}` }, 'browser:offline']
           );
           vaultLog.done(userId);
           return;
@@ -1102,7 +1171,11 @@ async function runTask(task) {
       const result = results[index];
       const elapsedSec = Number((timingsMs[index] / 1000).toFixed(1));
       if (result?.status === 'fulfilled') {
-        state.completed[userId] = { status: 'success', completedAt: new Date().toISOString(), elapsedSec };
+        state.completed[userId] = {
+          status: 'success',
+          completedAt: new Date().toISOString(),
+          elapsedSec,
+        };
       } else {
         state.completed[userId] = {
           status: 'error',
@@ -1130,13 +1203,20 @@ async function runTask(task) {
   // detail of the provider.
   const formattedResults = results.map((result, index) => {
     const userId = userIds[index];
+    const displayName = displayNames[index] || userId;
     const elapsedSec = Number((timingsMs[index] / 1000).toFixed(1));
     if (result?.status === 'fulfilled') {
-      return { profileId: userId, status: 'success', elapsedSec };
+      return { profileId: userId, profileName: displayName, status: 'success', elapsedSec };
     } else {
       const msg = result?.reason?.message || 'unknown error';
       console.error(`[${userId}] Error:`, msg);
-      return { profileId: userId, status: 'error', error: msg, elapsedSec };
+      return {
+        profileId: userId,
+        profileName: displayName,
+        status: 'error',
+        error: msg,
+        elapsedSec,
+      };
     }
   });
 
@@ -1162,11 +1242,86 @@ async function runTask(task) {
     console.log('\n  Failures:');
     formattedResults
       .filter((r) => r.status === 'error')
-      .forEach((r) => console.log(`    - ${r.profileId} (${r.elapsedSec}s): ${r.error}`));
+      .forEach((r) =>
+        console.log(`    - ${r.profileName} [${r.profileId}] (${r.elapsedSec}s): ${r.error}`)
+      );
   }
   console.log();
 
+  writeSummaryFile({
+    taskId,
+    runLogDir,
+    formattedResults,
+    successCount,
+    errorCount,
+    totalElapsedSec,
+    avgSec,
+    minSec,
+    maxSec,
+    startedAtMs,
+  });
+
   return { taskId, results: formattedResults };
+}
+
+function writeSummaryFile({
+  taskId,
+  runLogDir,
+  formattedResults,
+  successCount,
+  errorCount,
+  totalElapsedSec,
+  avgSec,
+  minSec,
+  maxSec,
+  startedAtMs,
+}) {
+  if (!runLogDir) return;
+
+  const startedAt = new Date(startedAtMs).toISOString();
+  const finishedAt = new Date().toISOString();
+  const failures = formattedResults.filter((r) => r.status === 'error');
+  const successes = formattedResults.filter((r) => r.status === 'success');
+
+  const lines = [];
+  lines.push(`# Task summary: ${taskId}`);
+  lines.push('');
+  lines.push(`Started:   ${startedAt}`);
+  lines.push(`Finished:  ${finishedAt}`);
+  lines.push(`Duration:  ${totalElapsedSec}s`);
+  lines.push('');
+  lines.push(`Profiles:  ${formattedResults.length}`);
+  lines.push(`Succeeded: ${successCount}`);
+  lines.push(`Failed:    ${errorCount}`);
+  lines.push(`Per profile: avg ${avgSec}s, min ${minSec}s, max ${maxSec}s`);
+  lines.push('');
+
+  if (failures.length > 0) {
+    lines.push(`## Failures (${failures.length})`);
+    lines.push('');
+    for (const r of failures) {
+      lines.push(`- **${r.profileName}** \`${r.profileId}\` (${r.elapsedSec}s)`);
+      lines.push(`  - ${r.error}`);
+    }
+    lines.push('');
+  }
+
+  if (successes.length > 0) {
+    lines.push(`## Successes (${successes.length})`);
+    lines.push('');
+    for (const r of successes) {
+      lines.push(`- ${r.profileName} \`${r.profileId}\` (${r.elapsedSec}s)`);
+    }
+    lines.push('');
+  }
+
+  try {
+    const summaryPath = path.join(runLogDir, 'summary.md');
+    fs.writeFileSync(summaryPath, lines.join('\n'), 'utf8');
+    console.log(`Summary written → ${summaryPath}\n`);
+  } catch (err) {
+    console.warn(`Failed to write summary file: ${err.message}`);
+  }
 }
 
 module.exports = { runTask, runStep };
