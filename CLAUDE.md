@@ -1229,13 +1229,36 @@ If not on facebook.com, `runBrowser` navigates first.
 
 ### Auto re-login
 
-After the nav, `runBrowser` calls `isLoggedOut(page, { profileProbeUrl: user.profileUrl })`
+After the nav, `runBrowser` calls
+`isLoggedOut(page, { profileProbeUrl, country, excludeUserId })`
 (from `ensure_login`). Three detection signals:
 
 1. URL match — current URL contains `/login` or `login.php`
 2. Password field — `input[name="pass"]` visible on the page
-3. Profile probe — if `user.profileUrl` is set, navigate to it; if FB rewrites
-   to `/people/...` or `/pfbid...`, the session is browsing as guest
+3. Profile probe — navigate to a real FB profile URL; if FB rewrites it to
+   `/people/...` or `/pfbid...`, the session is browsing as guest
+
+**Probe URL selection (when quick signals don't fire):**
+
+1. `options.profileProbeUrl` if it starts with `http(s)://` — usually
+   `user.profileUrl`, the account's own canonical URL captured by
+   `setup_about`.
+2. **API fallback** — when `profileProbeUrl` is empty OR doesn't look like
+   a URL (e.g. a stray email pasted into the field by mistake),
+   `pickFallbackProbeUrl(country, excludeUserId)` calls
+   `fetchActiveProfiles(5, country)` and picks a random Active /
+   Need-Setup profile from the same country, excluding the current
+   user's own `_id`. So an IT user gets probed against a random IT
+   profile, a US user against a US one — the proxy region matches the
+   probed URL's expected geo, which keeps FB from flagging the probe as
+   suspicious.
+3. No probe target → skip the probe step; rely on the quick signals only.
+
+The fallback is what saved us from `Cannot navigate to invalid URL`
+crashes when a user record had its email accidentally stored in the
+`profileUrl` field — without it, `isLoggedOut` returned `false` (probe
+failure is non-fatal) and the runner pressed on assuming the session was
+authenticated.
 
 **Gate:** the auto re-login only runs when the task actually touches Facebook.
 `taskNeedsFacebookSession(steps)` walks the (injected) step tree and returns

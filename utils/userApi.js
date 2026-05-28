@@ -31,17 +31,17 @@ async function fetchUser(userId) {
  * @param {number} limit — rows requested per status (default 5; merged list up to 2×limit)
  * @returns {Promise<Object[]>} — list of user objects (each has _id, profileUrl, etc.)
  */
-async function fetchActiveProfiles(limit = 5) {
+async function fetchActiveProfiles(limit = 5, country = '') {
   if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
 
   const STATUSES = ['Active', 'Need Setup'];
 
   const responses = await Promise.allSettled(
-    STATUSES.map((status) =>
-      axios.get(`${BASE_URL}/api/profiles`, {
-        params: { status, limit, random: 1 },
-      })
-    )
+    STATUSES.map((status) => {
+      const params = { status, limit, random: 1 };
+      if (country) params.country = String(country).toUpperCase();
+      return axios.get(`${BASE_URL}/api/profiles`, { params });
+    })
   );
 
   const seen = new Set();

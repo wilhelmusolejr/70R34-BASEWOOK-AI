@@ -26,6 +26,30 @@
 
 const { humanWait, humanClick } = require('../utils/humanBehavior');
 const facebook_signup = require('./facebook_signup');
+const { fetchActiveProfiles } = require('../utils/userApi');
+
+function isUsableProbeUrl(value) {
+  return typeof value === 'string' && /^https?:\/\//i.test(value.trim());
+}
+
+async function pickFallbackProbeUrl(country, excludeUserId) {
+  try {
+    const profiles = await fetchActiveProfiles(5, country);
+    const candidates = profiles.filter(
+      (p) =>
+        isUsableProbeUrl(p?.profileUrl) && (!excludeUserId || (p._id || p.id) !== excludeUserId)
+    );
+    if (!candidates.length) return '';
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    console.log(
+      `  [ensure_login] using fallback probe URL from ${country || 'any country'}: ${pick.profileUrl}`
+    );
+    return pick.profileUrl;
+  } catch (err) {
+    console.warn(`  [ensure_login] fallback probe-URL fetch failed: ${err.message}`);
+    return '';
+  }
+}
 
 const REG_LOGIN_URL = 'https://web.facebook.com/reg/?entry_point=login&next=';
 
@@ -76,12 +100,30 @@ async function probeWithProfileUrl(page, profileProbeUrl) {
 
 /**
  * Combined check. Quick non-destructive signals first; profile probe only
- * if the quick signals say "looks logged in" AND caller provided a probe URL.
+ * if the quick signals say "looks logged in".
+ *
+ * Probe target selection:
+ *   1. options.profileProbeUrl if it looks like an http(s) URL.
+ *   2. Fallback: pick a random active profile from the API filtered by
+ *      options.country (so an IT user is probed against an IT profile).
+ *   3. No probe URL → skip the probe.
  */
 async function isLoggedOut(page, options = {}) {
   if (await quickLoggedOutChecks(page)) return true;
-  if (options.profileProbeUrl) {
-    return await probeWithProfileUrl(page, options.profileProbeUrl);
+
+  let probeUrl = isUsableProbeUrl(options.profileProbeUrl) ? options.profileProbeUrl.trim() : '';
+
+  if (!probeUrl) {
+    if (options.profileProbeUrl) {
+      console.log(
+        `  [ensure_login] user.profileUrl "${options.profileProbeUrl}" is not a usable URL — fetching fallback by country.`
+      );
+    }
+    probeUrl = await pickFallbackProbeUrl(options.country || '', options.excludeUserId || '');
+  }
+
+  if (probeUrl) {
+    return await probeWithProfileUrl(page, probeUrl);
   }
   return false;
 }
