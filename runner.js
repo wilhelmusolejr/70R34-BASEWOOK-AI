@@ -19,6 +19,7 @@ const {
 } = require('./utils/sessionLog');
 const { initRunLogDir } = require('./utils/runLogDir');
 const { loadState, saveState, clearState } = require('./utils/taskState');
+const { tryRecover } = require('./utils/recoverers');
 const { vaultLog } = require('./vault-log');
 
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
@@ -203,8 +204,19 @@ async function runWithRetry(fn, profileId, stepType, page) {
       console.warn(
         `Error on ${stepType} (attempt ${attempt}/${STEP_RETRY_ATTEMPTS}): ${err.message}`
       );
-      console.warn(`Retrying in ${RETRY_WAIT_MS / 1000}s...`);
-      await new Promise((resolve) => setTimeout(resolve, RETRY_WAIT_MS));
+
+      // Recovery chain — walk the registry, try to fix whatever common FB
+      // page state is blocking us (EU cookie consent, soft checkpoint, etc.).
+      // If something recovered, skip the long retry wait — the page is
+      // already in a usable state.
+      const recovered = await tryRecover(page, { stepType });
+      const waitMs = recovered ? 2000 : RETRY_WAIT_MS;
+      if (recovered) {
+        console.log(`Recovered via "${recovered}" — retrying in ${waitMs / 1000}s`);
+      } else {
+        console.warn(`Retrying in ${waitMs / 1000}s...`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
   }
 

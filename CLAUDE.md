@@ -144,6 +144,18 @@ signin → user token + refresh_token
 - Start: `GET /api/v2/profile/f/{folderId}/p/{profileId}/start?automation_type=playwright&headless_mode=false` → `data.data.port`
 - Stop: `GET /api/v1/profile/stop/p/{profileId}` (note: **v1**, while start is v2)
 - Token cached in module memory; on 401 we re-signin once.
+- **Stale-bearer 501 quirk.** MLX's gateway returns the **Python-default
+  501 HTML page** (`<html>...Unsupported method ('POST')...</html>`) when
+  the workspace bearer is invalid/expired — NOT the standard 401. A
+  long-running `server.js` process holding a cached `mlxToken` whose TTL
+  has lapsed will get 501 + HTML on every `/profile/create` (and other
+  authenticated POST). The helper scripts in `multilogin/` never see this
+  because each `node` invocation is a fresh process that signs in once
+  and exits. The `withMlxRetry` wrapper in `utils/browserManager.js`
+  treats **5xx + HTML body** as auth-style failure: nulls `mlxToken`,
+  calls `mlxSignIn()` to get a fresh workspace bearer, then retries.
+  Pure-JSON 5xx (real MLX backend errors) goes through the plain
+  transient retry path without touching the token.
 - `MULTILOGIN_FOLDER_ID` is required (source / "creation" folder); `MULTILOGIN_WORKSPACE_ID` is required for the refresh step.
 - `MULTILOGIN_DELIVERY_FOLDER_ID` is the destination folder used by the `multilogin/move_profiles.js` and `multilogin/export_delivery.js` helpers (the bot itself doesn't read it). The pair lets you separate creation-stage profiles from delivery-ready ones in the MLX UI.
 - `MULTILOGIN_CORE_VERSION` (or `CORE_VERSION` in `multilogin/.env`) — minimum **143** as of 2026-05. MLX rejects older cores with `BAD_REQUEST_BODY: "Can't set core older than 143. Please set higher core version"`. Default in `utils/browserManager.js` is `143`; the `multilogin/.env` template tracks the same floor.
@@ -1165,6 +1177,65 @@ Every handler is wrapped in `runWithRetry(fn, profileId, stepType, page)`:
 
 `err.noRetry = true` opts out — handlers with internal retries (e.g. `create_page`)
 set this so `runWithRetry` won't restart and re-trigger committed side effects.
+
+### Recovery chain — `utils/recoverers.js`
+
+Between attempts, `runWithRetry` calls `tryRecover(page, { stepType })` from
+`utils/recoverers.js`. This is a registry of `(matches, apply)` pairs that
+try to fix the current page state before the next retry. If one fires
+successfully, the retry wait shrinks from 60s to **2s** — the page is
+already usable, no point cooling down.
+
+```js
+{
+  name: 'eu-cookie-consent',
+  matches: (page) => page.url().includes('/privacy/consent/'),
+  apply: async (page) => {
+    // wait → reading delay → click "Allow all cookies"
+    // returns true on success, false on "matched but couldn't fix"
+  },
+}
+```
+
+**Current registry (order matters — first match fires):**
+1. **`eu-cookie-consent`** — FB redirects mid-navigation to
+   `/privacy/consent/?flow=user_cookie_choice_v2&...` and blocks every
+   subsequent navigation until the cookie banner is dismissed. Clicks
+   `div[aria-label="Allow all cookies"]` after a 2.5-4.5s reading delay,
+   waits for the URL to leave `/privacy/consent/`. Without this, steps
+   like `setup_about`, `search`, `open_search_result` would hang on
+   selector waits until the 5-minute step timeout fires.
+2. **`soft-checkpoint`** — URL contains `/checkpoint/`. Clicks the
+   `div[aria-label="Dismiss"][role="button"]` after a 3-5s reading delay.
+   Returns false on hard checkpoints (no Dismiss button — banned /
+   verification required), letting `runner.js`'s checkpoint
+   short-circuit kick in.
+3. **`not-now-modal`** — generic `div[role="button"][aria-label="Not now"]`
+   probe. Catches FB's intermittent upsell modals after a 1.2-2.5s
+   reading delay.
+
+**Reading delays are calibrated to the modal.** A real user reads the
+content before clicking — instant-click is a strong bot tell. Each
+recoverer uses `humanWait(page, min, max)` between detection and click,
+range tuned to the modal's text length.
+
+**`facebook_signup.js` polling integration.** The 5-minute home-button
+wait after submit is **not** a single `waitFor` — it polls in 15s
+windows, calling `tryRecover` each cycle. Catches the EU cookie consent
+screen mid-redirect (a single `waitFor` would just sit on it until the
+5-minute timeout). This is wired into `ensure_login`'s auto re-auth
+path too, since `ensure_login` delegates to `facebook_signup`.
+
+**Adding a new recoverer:**
+1. Append to `RECOVERERS` with `{ name, matches, apply }`.
+2. `matches(page)` should be cheap — URL-based or quick selector probe.
+   Return boolean (sync or async).
+3. `apply(page, ctx)` does the fix. Return `true` if recovered, `false`
+   if matched but couldn't fix (the chain moves on to the next).
+4. Errors inside both `matches` and `apply` are caught and logged in
+   `tryRecover` — never propagated. A buggy recoverer can never break
+   the actual error reporting.
+5. Order matters — list cheapest / most-specific first.
 
 **Checkpoint short-circuit:** FB redirects flagged accounts to
 `/checkpoint/{id}/?next=...` URLs. Retrying any step from that state is

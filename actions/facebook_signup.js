@@ -31,6 +31,7 @@ const path = require('path');
 const { humanWait, humanClick, humanType } = require('../utils/humanBehavior');
 const { updateProfile } = require('../utils/userApi');
 const { getProfileLogDir } = require('../utils/sessionLog');
+const { tryRecover } = require('../utils/recoverers');
 
 async function dumpFailure(page, label) {
   try {
@@ -296,12 +297,37 @@ module.exports = async function facebook_signup(page, params) {
   // href="/" is constant. Long timeout — FB sometimes runs verification or a
   // welcome interstitial before landing on the feed.
   console.log('  [facebook_signup] waiting for Home button to appear (up to 5 min)...');
-  await page
-    .locator('a[href="/"][role="link"]')
-    .first()
-    .waitFor({ state: 'visible', timeout: 300000 });
+  // Poll for the home button instead of one big waitFor — so we can fire the
+  // recovery chain (EU cookie consent, soft checkpoint, etc.) when FB
+  // intercepts mid-redirect. A single 5-minute waitFor would just sit on the
+  // /privacy/consent/ screen until the timeout fires.
+  const home = page.locator('a[href="/"][role="link"]').first();
+  const deadline = Date.now() + 300000;
+  let recoveredOnce = false;
+  while (true) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error('facebook_signup: Home button never appeared (5 min timeout)');
+    }
+    const pollMs = Math.min(15000, remaining);
+    const visible = await home
+      .waitFor({ state: 'visible', timeout: pollMs })
+      .then(() => true)
+      .catch(() => false);
+    if (visible) break;
 
-  console.log('  [facebook_signup] Home button visible — account is logged in.');
+    const recovered = await tryRecover(page, { stepType: 'facebook_signup:home-wait' });
+    if (recovered) {
+      console.log(`  [facebook_signup] recovery "${recovered}" fired — re-polling home button`);
+      recoveredOnce = true;
+    }
+  }
+
+  if (recoveredOnce) {
+    console.log('  [facebook_signup] Home button visible (after recovery) — account is logged in.');
+  } else {
+    console.log('  [facebook_signup] Home button visible — account is logged in.');
+  }
 
   // Re-login mode: ensure_login uses this handler purely as a "fill the reg
   // form and confirm we land on the home feed" routine. Skip the status PATCH

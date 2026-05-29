@@ -599,6 +599,94 @@ async function mlxAuthHeaders() {
 }
 
 /**
+ * Retry wrapper for MLX cloud API calls that can fail with transient errors
+ * (5xx including the occasional Python-default 501 "Unsupported method" HTML
+ * page MLX has been observed returning, plus network errors). On 401/403,
+ * forces a token refresh and retries within the same attempt budget. 4xx
+ * with a JSON error body is deterministic (bad input / quota) and is
+ * re-thrown immediately — no point burning retries.
+ *
+ * Sleeps: 2s, 8s, 20s before attempts 2, 3, 4. After the last attempt's
+ * throw, the error is marked noRetry so runWithRetry doesn't double-retry
+ * the surrounding step.
+ *
+ * Usage:
+ *   await withMlxRetry('profile/create', async () => {
+ *     return await axios.post(`${MLX_API}/profile/create`, body, {
+ *       headers: { ...(await mlxAuthHeaders()), 'Content-Type': 'application/json' },
+ *     });
+ *   });
+ */
+async function withMlxRetry(label, fn, { attempts = 3, backoffsMs = [2000, 8000, 20000] } = {}) {
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const status = err?.response?.status;
+      const body = err?.response?.data;
+      const isJsonBody = body && typeof body === 'object';
+      const isHtmlBody = typeof body === 'string' && /<html|<!DOCTYPE/i.test(body);
+      const code = err?.code || '';
+      const networky = ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED'].includes(code);
+      const transient = networky || (status >= 500 && status <= 599) || isHtmlBody;
+
+      // MLX returns the Python-default 501 HTML page when the bearer is
+      // invalid/expired (instead of the standard 401). A long-running
+      // process holding a stale cached workspace token will get 501 + HTML
+      // on every request until the token is refreshed — so we treat
+      // 5xx-with-HTML as auth-style failure too, force a re-signin once,
+      // then retry. Pure JSON 5xx (MLX's real backend errors) still flow
+      // through the transient retry path without touching the token.
+      const looksLikeStaleAuth = status === 401 || status === 403 || (isHtmlBody && status >= 500);
+      if (looksLikeStaleAuth) {
+        const why = status === 401 || status === 403
+          ? `${status}`
+          : `${status} + HTML body (MLX returns this for stale bearers)`;
+        console.warn(
+          `[browserManager] MLX ${label} got ${why} on attempt ${i}/${attempts} — refreshing token and retrying`
+        );
+        mlxToken = null;
+        try {
+          await mlxSignIn();
+        } catch (signinErr) {
+          console.warn(`[browserManager] MLX re-signin failed: ${signinErr.message}`);
+        }
+      } else if (!transient) {
+        console.warn(
+          `[browserManager] MLX ${label} got deterministic ${status || code} — not retrying. Body: ${
+            isJsonBody ? JSON.stringify(body).slice(0, 300) : String(body || '').slice(0, 300)
+          }`
+        );
+        break;
+      } else {
+        const reason = status ? `HTTP ${status}` : code || err.message;
+        console.warn(
+          `[browserManager] MLX ${label} transient ${reason} on attempt ${i}/${attempts}${
+            i < attempts ? ` — retrying in ${backoffsMs[i - 1] / 1000}s` : ''
+          }`
+        );
+      }
+
+      if (i < attempts) {
+        await new Promise((r) => setTimeout(r, backoffsMs[i - 1] || 5000));
+      }
+    }
+  }
+
+  const finalStatus = lastErr?.response?.status;
+  const wrapped = new Error(
+    `MLX ${label} failed after ${attempts} attempt(s): ${
+      finalStatus ? `HTTP ${finalStatus}` : lastErr?.message || 'unknown error'
+    }`
+  );
+  wrapped.cause = lastErr;
+  wrapped.noRetry = true;
+  throw wrapped;
+}
+
+/**
  * Parse country/region/city from an MLX proxy username. Format:
  *   "<id>_<workspace>_multilogin_com-country-us-region-west_virginia-sid-XXX-filter-medium"
  */
@@ -917,8 +1005,9 @@ async function createMultiloginProfile(user) {
     },
   };
 
-  const { data } = await axios.post(`${MLX_API}/profile/create`, body, {
-    headers: { ...(await mlxAuthHeaders()), 'Content-Type': 'application/json' },
+  const { data } = await withMlxRetry('profile/create', async () => {
+    const headers = { ...(await mlxAuthHeaders()), 'Content-Type': 'application/json' };
+    return axios.post(`${MLX_API}/profile/create`, body, { headers });
   });
 
   const d = data?.data;
@@ -954,21 +1043,24 @@ async function assignCountryProxy(profileId, country, { region, protocol = 'sock
 
   const proxy = await generateMlxProxy({ country: cc.toLowerCase(), region: r, type: protocol });
 
-  await axios.post(
-    `${MLX_API}/profile/partial_update`,
-    {
-      profile_id: profileId,
-      proxy: {
-        host: proxy.host,
-        port: proxy.port,
-        type: proxy.type,
-        username: proxy.username,
-        password: proxy.password,
+  await withMlxRetry('profile/partial_update (proxy)', async () => {
+    const headers = { ...(await mlxAuthHeaders()), 'Content-Type': 'application/json' };
+    return axios.post(
+      `${MLX_API}/profile/partial_update`,
+      {
+        profile_id: profileId,
+        proxy: {
+          host: proxy.host,
+          port: proxy.port,
+          type: proxy.type,
+          username: proxy.username,
+          password: proxy.password,
+        },
+        parameters: { flags: { proxy_masking: 'custom' } },
       },
-      parameters: { flags: { proxy_masking: 'custom' } },
-    },
-    { headers: { ...(await mlxAuthHeaders()), 'Content-Type': 'application/json' } }
-  );
+      { headers }
+    );
+  });
 
   return { region: r, proxy };
 }
