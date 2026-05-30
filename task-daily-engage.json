@@ -1,47 +1,83 @@
 {
   "taskId": "engage-and-add",
-  "profiles": ["69fae777d7f59db2c21aece7","69fca5681e49eec688fcfc6c","69fca9971e49eec688fcfd10","69fd72f01e49eec688fd0551","6a01899c9ceed638ddd6abc2","6a01899c9ceed638ddd6abc6"],
-  "concurrency": 2, 
+  "profiles": ["6a066bab8e2782541fdc32b5","6a066bab8e2782541fdc32b6","6a066bab8e2782541fdc32b7","6a06842e8e2782541fdc3712","6a06842e8e2782541fdc3715","6a0693b658d511b75f9f2318","6a06d97958d511b75f9f37cd","6a06d97958d511b75f9f37cf","6a07d4fd2747a34cb1c7155b","6a07d4fd2747a34cb1c7155c","6a07d4fd2747a34cb1c7155d","6a07d4fd2747a34cb1c7155e","6a07d4fd2747a34cb1c7155f","6a07f0ca40d5374244e08f39","6a0800e714cdafac36ab9b41","6a0800e714cdafac36ab9b44","6a0814809a99600488373f07","6a0814809a99600488373f0a","6a084cca9a996004883744bd","6a084f589a99600488374526","6a084f589a9960048837452b","6a084f589a9960048837452c","6a084f589a9960048837452d","6a0884ba94ca4be700287669","6a0884ba94ca4be70028766a","6a0884ba94ca4be70028766b","6a0965afc68f2c604ba663f1","6a0965afc68f2c604ba663f2","6a0965afc68f2c604ba663f4","6a097438c68f2c604ba66552","6a097481c68f2c604ba66575","6a09ed408b21081266035d9f","6a0a83d7673f917afcff5858","6a0a8576673f917afcff587c","6a0a8576673f917afcff587d","6a0a8576673f917afcff587e","6a13f1d2673f917afcfff265","6a13f1d2673f917afcfff266","6a13f1d2673f917afcfff267","6a15225a9df399293ede62c1","6a16a16a024059deb2244280","6a1936f5024059deb224852c","6a1936f5024059deb224852d","6a1936f5024059deb224852e","6a1936f5024059deb224852f","6a1936f5024059deb2248530","6a1936f5024059deb2248531","6a1936f5024059deb2248532","6a19a0ac024059deb2249390","6a19a0ac024059deb2249391"],
+  "concurrency": 5,
   "blockMedia": true,
   "steps": [
     {
       "type": "homepage_interaction",
       "steps": [
-        { "type": "scroll", "params": { "min": 15, "max": 60 } },
-        { "type": "like_posts", "params": { "min": 0, "max": 4 } }
+        { "type": "scroll", "params": { "min": 20, "max": 40 } },
+        { "type": "like_posts", "params": { "min": 1, "max": 3 } }
       ]
     },
 
-    { "type": "wait", "params": { "min": 30, "max": 60 } },
+    { "type": "wait", "params": { "min": 20, "max": 40 } },
 
     { "type": "accept_loop" },
 
     { "type": "wait", "params": { "min": 30, "max": 60 } },
 
     {
-      "type": "visit_profile",
-      "params": { "pool": "sharers" },
+      "type": "search",
+      "params": { "mode": "general" },
       "steps": [
-        { "type": "scroll", "params": { "min": 15, "max": 60 } },
-        { "type": "like_posts", "params": { "min": 0, "max": 4 } },
-        { "type": "share_posts", "params": { "count": 1 } }
+        { "type": "scroll", "params": { "min": 40, "max": 70 } },
+        { "type": "like_posts", "params": { "min": 1, "max": 3 } }
       ]
     },
 
-    { "type": "wait", "params": { "min": 30, "max": 50 } },
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
 
     {
       "type": "visit_profile",
       "params": { "pool": "sharers" },
       "steps": [
-        { "type": "scroll", "params": { "min": 15, "max": 60 } },
-        { "type": "like_posts", "params": { "min": 0, "max": 4 } },
+        { "type": "connect" },
+        { "type": "scroll", "params": { "min": 30, "max": 60 } },
+        { "type": "like_posts", "params": { "min": 1, "max": 4 } },
         { "type": "share_posts", "params": { "count": 1 } }
       ]
     },
 
     { "type": "wait", "params": { "min": 30, "max": 60 } },
 
-    { "type": "connect_loop", "params": { "count": 5, "skipIfFriendsAbove": 30 } }
+    {
+      "type": "search",
+      "params": { "mode": "page", "filter": "Pages" },
+      "steps": [
+        { "type": "scroll", "params": { "min": 20, "max": 40 } },
+        { "type": "open_search_result" },
+        { "type": "scroll", "params": { "min": 20, "max": 40 } },
+        { "type": "connect" }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "connect" },
+        { "type": "scroll", "params": { "min": 30, "max": 60 } },
+        { "type": "like_posts", "params": { "min": 1, "max": 4 } },
+        { "type": "share_posts", "params": { "count": 1 } }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    { "type": "connect_loop", "params": { "count": 5, "skipIfFriendsAbove": 30 } },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "homepage_interaction",
+      "steps": [
+        { "type": "scroll", "params": { "min": 30, "max": 50 } },
+        { "type": "like_posts", "params": { "min": 0, "max": 2 } }
+      ]
+    }
   ]
 }

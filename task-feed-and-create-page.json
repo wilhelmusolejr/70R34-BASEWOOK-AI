@@ -1,42 +1,9 @@
 {
   "taskId": "full-setup-and-engage",
-  "profiles": ["6a01899c9ceed638ddd6abc2", "69fd22161e49eec688fd02fe", "69fae777d7f59db2c21aece7"],
-  "concurrency": 5,
+  "profiles": ["69fca5681e49eec688fcfc6c","69fca9971e49eec688fcfd10","69fd72f01e49eec688fd0551","6a01899c9ceed638ddd6abc2","6a01899c9ceed638ddd6abc6"],
+  "concurrency": 1,
   "blockMedia": true,
   "steps": [
-    {
-      "type": "homepage_interaction",
-      "steps": [
-        { "type": "scroll", "params": { "min": 15, "max": 30 } },
-        { "type": "like_posts", "params": { "min": 0, "max": 4 } }
-      ]
-    },
-
-    { "type": "wait", "params": { "min": 30, "max": 60 } },
-
-    {
-      "type": "visit_profile",
-      "params": { "pool": "sharers" },
-      "steps": [
-        { "type": "scroll", "params": { "min": 15, "max": 40 } },
-        { "type": "like_posts", "params": { "min": 0, "max": 5 } },
-        { "type": "share_posts", "params": { "count": 1 } }
-      ]
-    },
-
-    { "type": "wait", "params": { "min": 30, "max": 60 } },
-
-    {
-      "type": "visit_profile",
-      "params": { "pool": "sharers" },
-      "steps": [
-        { "type": "scroll", "params": { "min": 15, "max": 40 } },
-        { "type": "like_posts", "params": { "min": 0, "max": 5 } },
-        { "type": "share_posts", "params": { "count": 1 } }
-      ]
-    },
-
-    { "type": "wait", "params": { "min": 30, "max": 60 } },
 
     {
       "type": "create_page",
@@ -48,7 +15,16 @@
 
     { "type": "connect_loop", "params": { "count": 5  }},
 
-    { "type": "scroll", "params": { "min": 15, "max": 40 } },
+    {
+      "type": "search",
+      "params": { "mode": "general" },
+      "steps": [
+        { "type": "scroll", "params": { "min": 50, "max": 60 } },
+        { "type": "like_posts", "params": { "min": 0, "max": 3 } }
+
+      ]
+    },
+
     { "type": "wait", "params": { "min": 60, "max": 120 } }
   ]
 }

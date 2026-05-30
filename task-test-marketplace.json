@@ -1,0 +1,9 @@
+{
+  "taskId": "test-marketplace",
+  "profiles": ["6a0d52c7673f917afcff8eac"],
+  "concurrency": 1,
+  "blockMedia": false,
+  "steps": [
+    { "type": "marketplace_location", "params": { "mode": "auto" } }
+  ]
+}

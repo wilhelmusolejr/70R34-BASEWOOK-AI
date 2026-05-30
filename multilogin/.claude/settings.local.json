@@ -15,7 +15,11 @@
       "WebFetch(domain:www.postman.com)",
       "WebFetch(domain:7or34.space)",
       "Bash(node *)",
-      "WebFetch(domain:help.multilogin.com)"
+      "WebFetch(domain:help.multilogin.com)",
+      "Bash(echo \"exit=$?\")",
+      "PowerShell(Set-Location \"C:\\\\Users\\\\hinatardp\\\\Desktop\\\\70R34-BASEWOOK-AI\\\\multilogin\"; node update_name_notes.js --dry-run; \"EXIT=$LASTEXITCODE\")",
+      "Bash(node update_name_notes.js --dry-run)",
+      "Bash(grep -n \"FB: $\" _dry.out)"
     ]
   }
 }

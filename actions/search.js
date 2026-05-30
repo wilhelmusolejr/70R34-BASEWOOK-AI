@@ -219,6 +219,112 @@ const LAST_NAMES = [
   'Jimenez',
 ];
 
+const IT_FIRST_NAMES = [
+  'Marco',
+  'Giuseppe',
+  'Luca',
+  'Alessandro',
+  'Andrea',
+  'Francesco',
+  'Matteo',
+  'Lorenzo',
+  'Davide',
+  'Simone',
+  'Federico',
+  'Stefano',
+  'Roberto',
+  'Antonio',
+  'Giovanni',
+  'Paolo',
+  'Riccardo',
+  'Nicola',
+  'Fabio',
+  'Alberto',
+  'Daniele',
+  'Massimo',
+  'Vincenzo',
+  'Salvatore',
+  'Emanuele',
+  'Giulia',
+  'Francesca',
+  'Sara',
+  'Valentina',
+  'Chiara',
+  'Alessia',
+  'Martina',
+  'Anna',
+  'Elena',
+  'Silvia',
+  'Federica',
+  'Laura',
+  'Elisa',
+  'Roberta',
+  'Paola',
+  'Claudia',
+  'Maria',
+  'Ilaria',
+  'Giorgia',
+  'Monica',
+  'Cristina',
+  'Serena',
+  'Simona',
+  'Marta',
+  'Arianna',
+];
+
+const IT_LAST_NAMES = [
+  'Rossi',
+  'Russo',
+  'Ferrari',
+  'Esposito',
+  'Bianchi',
+  'Romano',
+  'Colombo',
+  'Ricci',
+  'Marino',
+  'Greco',
+  'Bruno',
+  'Gallo',
+  'Conti',
+  'De Luca',
+  'Mancini',
+  'Costa',
+  'Giordano',
+  'Rizzo',
+  'Lombardi',
+  'Moretti',
+  'Barbieri',
+  'Fontana',
+  'Santoro',
+  'Mariani',
+  'Rinaldi',
+  'Caruso',
+  'Ferrara',
+  'Galli',
+  'Martini',
+  'Leone',
+  'Longo',
+  'Gentile',
+  'Martinelli',
+  'Vitale',
+  'Lombardo',
+  'Serra',
+  'Coppola',
+  'De Santis',
+  "D'Angelo",
+  'Marchetti',
+  'Parisi',
+  'Villa',
+  'Conte',
+  'Ferraro',
+  'Ferri',
+  'Fabbri',
+  'Bianco',
+  'Marini',
+  'Grasso',
+  'Valentini',
+];
+
 const US_STATES = [
   'Alabama',
   'Alaska',
@@ -272,6 +378,29 @@ const US_STATES = [
   'Wyoming',
 ];
 
+const IT_REGIONS = [
+  'Lazio',
+  'Lombardia',
+  'Sicilia',
+  'Toscana',
+  'Emilia-Romagna',
+  'Campania',
+  'Veneto',
+  'Piemonte',
+  'Puglia',
+  'Calabria',
+  'Sardegna',
+  'Liguria',
+  'Marche',
+  'Abruzzo',
+  'Friuli Venezia Giulia',
+  'Umbria',
+  'Basilicata',
+  'Molise',
+  'Trentino-Alto Adige',
+  "Valle d'Aosta",
+];
+
 const NEWS_KEYWORDS = [
   'news',
   'breaking news',
@@ -286,6 +415,144 @@ const NEWS_KEYWORDS = [
   'headlines',
   'update',
 ];
+
+const IT_NEWS_KEYWORDS = [
+  'notizie',
+  'ultime notizie',
+  'cronaca',
+  'meteo',
+  'sport',
+  'eventi',
+  'aggiornamenti',
+  'politica',
+  'calcio',
+  'cultura',
+  'economia',
+  'traffico',
+];
+
+const GENERAL_TOPICS = [
+  'best pizza',
+  'restaurants',
+  'coffee shops',
+  'things to do',
+  'events this weekend',
+  'farmers market',
+  'brunch',
+  'happy hour',
+  'tacos',
+  'ice cream',
+  'thrift stores',
+  'hiking trails',
+  'dog parks',
+  'yoga classes',
+  'gyms',
+  'barber shops',
+  'nail salons',
+  'car wash',
+  'auto repair',
+  'dentist',
+  'used cars for sale',
+  'apartments for rent',
+  'garage sales',
+  'live music',
+  'open mic night',
+  'food trucks',
+  'burgers',
+  'sushi',
+  'chinese food',
+  'mexican food',
+  'italian food',
+  'bakery',
+  'florist',
+  'pet grooming',
+  'daycare',
+  'tutoring',
+  'volunteer',
+  'church',
+  'book clubs',
+  'running clubs',
+  'basketball courts',
+  'swimming pools',
+  'fishing spots',
+  'camping',
+  'beaches',
+  'parks',
+  'flea market',
+  'karaoke',
+  'sports bars',
+  'wings',
+];
+
+const IT_GENERAL_TOPICS = [
+  'pizza',
+  'ristoranti',
+  'bar',
+  'cosa fare',
+  'eventi',
+  'mercato',
+  'brunch',
+  'aperitivo',
+  'trattoria',
+  'gelateria',
+  'mercatini usato',
+  'sentieri trekking',
+  'parchi per cani',
+  'corsi yoga',
+  'palestra',
+  'barbiere',
+  'parrucchiere',
+  'autolavaggio',
+  'officina',
+  'dentista',
+  'auto usate',
+  'appartamenti in affitto',
+  'mercatini',
+  'musica dal vivo',
+  'open mic',
+  'street food',
+  'hamburger',
+  'sushi',
+  'ristorante cinese',
+  'ristorante messicano',
+  'ristorante tipico',
+  'pasticceria',
+  'fiorista',
+  'toelettatura',
+  'asilo nido',
+  'ripetizioni',
+  'volontariato',
+  'chiesa',
+  'club del libro',
+  'gruppo corsa',
+  'campi da basket',
+  'piscina',
+  'pesca',
+  'campeggio',
+  'spiagge',
+  'parchi',
+  'mercato delle pulci',
+  'karaoke',
+  'pub sportivo',
+  'alette di pollo',
+];
+
+const COUNTRY_ALIASES = {
+  us: 'US',
+  usa: 'US',
+  united_states: 'US',
+  'united states': 'US',
+  it: 'IT',
+  ita: 'IT',
+  italy: 'IT',
+  italia: 'IT',
+};
+
+function normalizeCountry(raw) {
+  if (!raw) return 'US';
+  const key = String(raw).trim().toLowerCase();
+  return COUNTRY_ALIASES[key] || key.toUpperCase();
+}
 
 const PAGE_CATEGORIES = [
   'Photography',
@@ -315,6 +582,34 @@ const PAGE_CATEGORIES = [
   'Bakery',
 ];
 
+const IT_PAGE_CATEGORIES = [
+  'Fotografia',
+  'Ristorante',
+  'Notizie locali',
+  'Sport',
+  'Musica',
+  'Palestra',
+  'Immobiliare',
+  'Cucina',
+  'Moda',
+  'Arte',
+  'Videogiochi',
+  'Viaggi',
+  'Salute',
+  'Istruzione',
+  'Tecnologia',
+  'Auto e moto',
+  'Animali',
+  'Libri',
+  'Cinema',
+  'Bar e caffetteria',
+  'Barbiere',
+  'Parrucchiere',
+  'Yoga',
+  'Palestra e fitness',
+  'Pasticceria',
+];
+
 const SEARCH_INPUT_SELECTOR =
   'input[aria-label="Search Facebook"][type="search"], ' +
   'input[placeholder="Search Facebook"][role="combobox"], ' +
@@ -324,25 +619,40 @@ function randomPick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-function generateQuery({ mode, category, city }) {
+function generateQuery({ mode, category, city, country }) {
+  const cc = normalizeCountry(country);
   if (mode === 'name') {
-    return `${randomPick(FIRST_NAMES)} ${randomPick(LAST_NAMES)}`;
+    const firsts = cc === 'IT' ? IT_FIRST_NAMES : FIRST_NAMES;
+    const lasts = cc === 'IT' ? IT_LAST_NAMES : LAST_NAMES;
+    return `${randomPick(firsts)} ${randomPick(lasts)}`;
   }
   if (mode === 'news') {
-    return `${randomPick(US_STATES)} ${randomPick(NEWS_KEYWORDS)}`;
+    const regions = cc === 'IT' ? IT_REGIONS : US_STATES;
+    const keywords = cc === 'IT' ? IT_NEWS_KEYWORDS : NEWS_KEYWORDS;
+    return `${randomPick(regions)} ${randomPick(keywords)}`;
   }
   if (mode === 'page') {
-    const cat = String(category || '').trim() || randomPick(PAGE_CATEGORIES);
+    const categories = cc === 'IT' ? IT_PAGE_CATEGORIES : PAGE_CATEGORIES;
+    const cat = String(category || '').trim() || randomPick(categories);
     const loc = String(city || '').trim();
     return loc ? `${cat} in ${loc}` : cat;
   }
-  throw new Error(`search: unknown mode "${mode}" (expected "name", "news", or "page")`);
+  if (mode === 'general') {
+    const topics = cc === 'IT' ? IT_GENERAL_TOPICS : GENERAL_TOPICS;
+    const topic = randomPick(topics);
+    const loc = String(city || '').trim();
+    const nearMe = cc === 'IT' ? 'vicino a me' : 'near me';
+    if (!loc) return `${topic} ${nearMe}`;
+    return Math.random() < 0.5 ? `${topic} ${nearMe}` : `${topic} in ${loc}`;
+  }
+  throw new Error(`search: unknown mode "${mode}" (expected "name", "news", "page", or "general")`);
 }
 
 module.exports = async function search(page, params) {
-  const { query = '', mode = 'name', filter = '', category = '', city = '' } = params;
+  const { query = '', mode = 'name', filter = '', category = '', city = '', country = '' } = params;
 
-  const searchQuery = String(query || '').trim() || generateQuery({ mode, category, city });
+  const searchQuery =
+    String(query || '').trim() || generateQuery({ mode, category, city, country });
 
   console.log(`  [search] Query: "${searchQuery}" (${query ? 'explicit' : `mode=${mode}`})`);
 

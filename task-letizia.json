@@ -1,23 +1,7 @@
 {
   "taskId": "onboard-letizia",
-  "profiles":  [
-    "6a0884ba94ca4be70028766f",
-    "6a0884ba94ca4be700287670",
-    "6a097438c68f2c604ba66552",
-    "6a097438c68f2c604ba66553",
-    "6a097438c68f2c604ba66554",
-    "6a097481c68f2c604ba66575",
-    "6a097481c68f2c604ba66576",
-    "6a0d52c7673f917afcff8eaa",
-    "6a0d52c7673f917afcff8eab",
-    "6a0d52c7673f917afcff8eac",
-    "6a0d52c7673f917afcff8ead",
-    "6a0d52c7673f917afcff8eae",
-    "6a0d52c7673f917afcff8eaf",
-    "6a0d52c7673f917afcff8eb0",
-    "6a0d52c7673f917afcff8eb1"
-  ],
-  "concurrency": 2,
+  "profiles": ["6a06842e8e2782541fdc3714","6a06d97958d511b75f9f37cc","6a0800e714cdafac36ab9b43","6a0965afc68f2c604ba663f2","6a13f1d2673f917afcfff264","6a13f1d2673f917afcfff265","6a13f1d2673f917afcfff266","6a13f1d2673f917afcfff267","6a16a16a024059deb2244280"],
+  "concurrency": 3,
   "blockMedia": true,
   "steps": [
     { "type": "setup_privacy" },

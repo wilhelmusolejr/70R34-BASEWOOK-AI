@@ -34,10 +34,11 @@ runs in background). `GET /status/:taskId` to check progress.
 │   ├── connect.js               connect_loop.js   accept_loop.js
 │   ├── setup_about.js           setup_avatar.js   setup_cover.js
 │   ├── setup_privacy.js         schedule_posts.js switch_profile.js
-│   ├── wait.js
+│   ├── marketplace_location.js  wait.js
 │   ├── facebook_signup.js       facebook_login.js ensure_login.js
 │   ├── outlook_login.js
 │   └── check_ip.js
+├── update-post-captions.js      # Batch regen user.posts[].caption via Gemini + PATCH
 ├── utils/
 │   ├── browserManager.js        # ONLY file aware of Hidemium / Multilogin
 │   ├── userApi.js               # 3rd-party user fetch
@@ -282,10 +283,26 @@ via `resolveSetupPageImages()` (`linkedPage.assets[0]` → profile, `[1]` → co
 | `identityPrompt` | share-message generation, `publish_post` caption generation |
 | `images[0]` (face annotation) | `setup_avatar` |
 | `images[1]` | `setup_cover` |
-| `posts[].{images[],context,caption?}` | `publish_post` (random pick; `images[].filename` resolved via `buildImageUrl`; `context` seeds `postContext` for AI caption; `caption` is **not** auto-injected — captions are AI-generated) |
+| `posts[].{_id,images[],context,caption?}` | `publish_post` (random pick; `images[].filename` resolved via `buildImageUrl`; `context` seeds `postContext`; `caption` seeds `postCaption` for `captionSource: "post"`) |
 | `linkedPage.{pageName,bio,assets[0..1],posts}` | `create_page`, `schedule_posts` |
 | `browsers[]` | `browserManager` (matched by `provider`) |
 | `pageUrl` | PATCHed back after `create_page` |
+
+**Post captions live in their own collection — PATCH endpoint footgun.**
+`user.posts[]` is populated on read but **NOT** updatable via
+`PATCH /api/profiles/:id` — the profile PATCH runs the body through
+`normalizeProfilePayload`'s allow-list, which silently drops `posts`
+(returns 200 OK with no actual update — easy to miss). To update a post's
+caption:
+
+```js
+await axios.patch(
+  `${USER_API_BASE_URL}/api/posts/${postId}`,    // one post at a time
+  { caption: 'new caption' }
+);
+```
+
+`update-post-captions.js` uses this endpoint for batch caption regen.
 
 ## Playwright conventions (anti-detection)
 
@@ -744,6 +761,70 @@ record.
 | `schedule_posts` | `posts` | `user.linkedPage.posts` |
 | `switch_profile` | `userName` | `firstName + lastName` |
 
+## `marketplace_location` — Set FB Marketplace location
+
+Leaf action. Opens the FB Marketplace "Change location" dialog and sets the
+location for that account. Two modes:
+
+| Mode | Behavior |
+|------|----------|
+| `auto` (default) | Clicks the **geolocation picker** button inside the dialog. Browser resolves coordinates from the proxy IP via the Geolocation API. No typing. |
+| `manual` | Clicks the Location field, types `params.city`, picks the first suggestion. |
+
+### Flow (both modes)
+
+```
+sidebar Marketplace link → /marketplace/   (fallback: direct goto + crash-page reload)
+  → read current location from div[aria-label^="Location:"] (sidebar)
+  → click location → "Change location" dialog opens
+  → [auto]   click div[aria-label="Marketplace geolocation picker"][role="button"]
+  → [manual] click Location field → type city → pick suggestion
+  → wait for input value to actually change (poll up to 30s)
+  → click div[aria-label="Apply"][role="button"]
+  → reload marketplace → verify location text
+```
+
+### Guards (auto mode)
+
+- **Old value captured first** before clicking the picker, then polled — only
+  clicks Apply once the input value actually changed from the old one.
+- **Philippines fallback detection** — if geolocation resolves to a Philippines
+  city (proxy down → browser fell back to host IP, where most accounts were
+  signed up), throws with the unchanged value so the run doesn't mark success
+  on a no-op.
+- **Permission popup** — `page.context().grantPermissions(['geolocation'], { origin: 'https://www.facebook.com' })` runs before the picker click. Falls
+  back to `Browser.grantPermissions` over CDP if Playwright's version fails.
+  Multilogin's CDP wrapping sometimes ignores both — when that happens, the
+  unchanged-value guard catches it cleanly instead of false-success.
+
+### Key selectors (from real DOM dump)
+
+```
+sidebar location:       div[aria-label^="Location:"]
+dialog (scoped):        xpath=//div[@role="dialog"][.//span[text()="Change location"]]
+location input:         input[aria-label="Location"][role="combobox"]
+geolocation picker:     div[aria-label="Marketplace geolocation picker"][role="button"]
+apply button:           div[aria-label="Apply"][role="button"]
+crash page banner:      "Sorry, something went wrong" + div[role="button"][.//span[text()="Reload Page"]]
+```
+
+`div[role="dialog"]` alone is unsafe — FB renders multiple hidden dialogs
+(Notifications, etc.). Always scope by the Change location title text.
+
+### Crash page handling
+
+Some accounts hit FB's `"Sorry, something went wrong"` error page on
+`/marketplace/`. The action tries `Reload Page` once; if still broken,
+throws with `err.noRetry = true` so the runner short-circuits instead of
+burning 3 minutes on retries.
+
+### Auto-injected params
+
+| Param | Source |
+|-------|--------|
+| `city` | `user.city` (used in manual mode + as country check in auto mode) |
+| `country` | `user.country` (controls IT-vs-US match detection) |
+
 ## `visit_profile` + `add_friend`
 
 - `visit_profile` — navigator. `url` for specific target, `pool` for random pick. `url` wins.
@@ -779,9 +860,19 @@ container, deterministic). Per target: presence → visibility → scroll → bb
 
 | Mode | Generation |
 |------|------------|
-| `name` (default) | `{first} {last}` from 100×100 pools |
-| `news` | `{US state} {keyword}` — 50 states × 12 keywords |
-| `page` | `{category} in {city}` — 25 categories; `city` from `user.city` |
+| `name` (default) | `{first} {last}` from country-matched 50×50 pools |
+| `news` | `{region} {keyword}` — country-matched |
+| `page` | `{category} in {city}` — country-matched categories; `city` from `user.city` |
+| `general` | Country-matched local-topic phrase; randomly suffixed with `"near me"` / `"vicino a me"` OR `in {city}` (50/50). Falls back to `near me` alone when city is empty. |
+
+**Country-aware** — `country` auto-injected from `user.country`. Per-country pools:
+
+| Country | name pool | news regions | news keywords | page categories | general topics |
+|---------|-----------|--------------|---------------|-----------------|----------------|
+| `US` (default) | 100 first × 100 last, US names | 50 US states | 12 English keywords | 25 English categories | 50 English local-topic phrases ("best pizza", "thrift stores", ...) |
+| `IT` | 50 first × 50 last, Italian names | 20 Italian regions | 12 Italian keywords | 25 Italian categories ("Ristorante", "Palestra", ...) | 50 Italian local-topic phrases ("pizza", "ristoranti", "aperitivo", ...) |
+
+`normalizeCountry()` accepts loose forms (`it/ita/italy/italia` → `IT`, `us/usa/united_states` → `US`). To add another country, add the pools + alias mapping in `actions/search.js`.
 
 Optional `filter`: `"People"`, `"Pages"`, `"Posts"`, `"Videos"`, `"Groups"` —
 clicks results tab. Matched against visible `<span>` in `a[role="link"]`.
@@ -958,19 +1049,33 @@ goto facebook.com/me  ← unconditional, /me is the known-good landing page
   → unlink all tmp files in finally
 ```
 
-### Caption — AI-generated via Gemini
+### Caption sources — `captionSource` param
 
-Captions are produced by `utils/generatePostCaption.js` using
-`system_prompt_post.txt` at the repo root. Priority:
+Three modes, in priority order:
 
-1. Explicit `params.caption` wins (lets a task hardcode test text).
-2. `generatePostCaption(userIdentity, postContext)` — voice-matched caption.
-3. Empty (post goes captionless).
+1. **Explicit `params.caption`** — always wins (used for testing or hardcoded text).
+2. **`captionSource: "post"`** — uses the picked entry's `user.posts[].caption`
+   (auto-injected as `postCaption` by `injectUserParams`). Falls back to AI if the
+   field is empty. Use this when captions are pre-generated and stored in the DB.
+3. **`captionSource: "ai"` (default)** — `generatePostCaption(userIdentity, postContext)`
+   generates a fresh voice-matched caption each call.
+4. Empty (post goes captionless).
 
-The system prompt does the heavy lifting: persona matching from `userIdentity`,
-50-reasons-people-post-on-Facebook fallback when `postContext` is vague,
-emoji/hashtag restraint, no AI tells. **`pick.caption` from `user.posts[]` is
-deliberately NOT auto-injected** — the AI generates fresh per call.
+```json
+{ "type": "publish_post" }                                              // ai (default)
+{ "type": "publish_post", "params": { "captionSource": "post" } }       // use DB caption
+{ "type": "publish_post", "params": { "caption": "hardcoded text" } }   // explicit
+```
+
+The Gemini system prompt (`system_prompt_post.txt`) does the heavy lifting for AI
+mode: persona matching from `userIdentity`, 50-reasons-people-post-on-Facebook
+fallback when `postContext` is vague, emoji/hashtag restraint, no AI tells.
+
+**Pre-generating + storing captions** (use `captionSource: "post"` to consume):
+`update-post-captions.js` regenerates `user.posts[].caption` for a list of user IDs
+using the same Gemini path, then PATCHes them via the `/api/posts/:postId` endpoint
+(see [User API → post caption updates](#utilsuserapijs) — `posts` are stored in
+their own collection, NOT updatable via `PATCH /api/profiles/:id`).
 
 ### Composer modal-vs-inline — why we skip every click
 
@@ -1177,6 +1282,46 @@ Every handler is wrapped in `runWithRetry(fn, profileId, stepType, page)`:
 
 `err.noRetry = true` opts out — handlers with internal retries (e.g. `create_page`)
 set this so `runWithRetry` won't restart and re-trigger committed side effects.
+
+### Generic step-failure dump — safety net
+
+After the retry loop exhausts, `runWithRetry` calls `dumpStepFailure(page, stepType, err)`
+to capture HTML + full-page PNG into the per-profile run-scoped folder:
+
+```
+logs/{taskId}-{ts}/profiles/{Name}-{shortId}/
+  fail-{stepType}-{ISO-ts}.html  ← <!-- step: ... --> <!-- url: ... --> <!-- error: ... -->
+  fail-{stepType}-{ISO-ts}.png   ← fullPage screenshot
+```
+
+This fires for **every** step failure, regardless of whether the action's own
+internal `dumpFailure` ran. The error message is embedded in the HTML comment
+alongside the URL — open any `fail-*.html` standalone and you immediately know
+what step failed, where, and why.
+
+To avoid double-dumps, the runner sets `err.dumped = true` after writing — if
+both the runner and an action's internal dump fire, only the first runs.
+Actions that need an action-specific dump (e.g. `marketplace_location` capturing
+the dialog state mid-flow) can still dump WITHIN the catch; the runner-level
+dump on the same error is then skipped.
+
+### Summary log — `summary.md`
+
+After every `runTask` invocation, the runner writes `summary.md` to the
+run-scoped log directory alongside `tasks-logs.log`:
+
+```
+logs/engage-and-add-20260528-XXXXXX/
+  tasks-logs.log
+  summary.md           ← per-run summary
+  profiles/...
+```
+
+Contents: started/finished timestamps, total duration, success/fail counts,
+per-profile avg/min/max, and **profile name + ID + elapsed time + error message**
+for every failure. Successes are listed too (name + ID + elapsed). Console output
+also includes the profile name now (`- Rocco Pellegrini [6a0d52c7...]`), not just
+the ID — easier triage at a glance.
 
 ### Recovery chain — `utils/recoverers.js`
 
@@ -1522,10 +1667,11 @@ Walks step tree before execution, fills missing params from user record.
 | `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId` |
 | `schedule_posts` | `posts` from `linkedPage.posts` |
 | `switch_profile` | `userName` from `firstName + lastName` |
-| `search` | `city` from `user.city` (page mode) |
+| `search` | `city` from `user.city` (page/general modes), `country` from `user.country` (all modes — IT vs US pool selection) |
+| `marketplace_location` | `city` from `user.city`, `country` from `user.country` |
 | `check_ip` | `userId` |
 | `share_posts` / `share_post` | `userIdentity` |
-| `publish_post` | `imageUrls` (random pick from `user.posts[].images`, resolved via `buildImageUrl`), `postContext` (picked entry's `context`), `userIdentity` |
+| `publish_post` | `imageUrls` (random pick from `user.posts[].images`, resolved via `buildImageUrl`), `postContext` (picked entry's `context`), `postCaption` (picked entry's `caption` — used when `captionSource: "post"`), `userIdentity` |
 | `facebook_signup` / `ensure_login` | `firstName`, `lastName`, `birthdayDate` (or `dob`), `gender`, `email` (selected or `[0]`), `password` from `user.facebookPassword` |
 | `facebook_login` | `email` (selected or `[0]`), `password` from `user.facebookPassword` |
 | `outlook_login` | `email` (selected or `[0]`), `password` from `user.emailPassword` |
@@ -1765,11 +1911,16 @@ with 7or34.space), runner, browserManager (Hidemium + Multilogin), humanBehavior
 all actions listed in project structure, virtualized-feed pattern, network resilience,
 retry-all-errors, user API integration, `injectUserParams`, `concurrency` + `blockMedia`,
 Gemini share + post caption generation (`generateMessage` + `generatePostCaption`),
-`publish_post` with input-driven modal opening, between-step delays, end-of-task tab
-cleanup, auto tracker-log, NL→JSON, pre-flight + per-step checkpoint detection with
-HTML/PNG forensic dumps, per-run scoped log dirs (`logs/{taskId}-{ts}/profiles/{name}-{shortId}/`),
+`publish_post` with input-driven modal opening + `captionSource` (ai|post) toggle,
+`marketplace_location` (auto via geolocation picker + manual via city typing),
+country-aware `search` (US + IT pools: names, regions, page categories, general topics)
+with `general` mode mixing `near me` / `in {city}` randomly, between-step delays,
+end-of-task tab cleanup, auto tracker-log, NL→JSON, pre-flight + per-step checkpoint
+detection with HTML/PNG forensic dumps + generic step-failure dump safety net,
+per-run `summary.md` + per-run scoped log dirs (`logs/{taskId}-{ts}/profiles/{name}-{shortId}/`),
 `setup_privacy` (extracted from `facebook_signup`), EU cookie consent auto-dismiss,
-`facebook_signup` failure dumps, `setup_about` URL-based subsection fallback for fresh accounts.
+`facebook_signup` failure dumps, `setup_about` URL-based subsection fallback for fresh
+accounts, `update-post-captions.js` batch caption regen (PATCHes `/api/posts/:postId`).
 
 **TODO:** `comment_post`, `join_group`, `send_message`; comment generation; SQLite task state;
 Web UI for chat; schema validation on generated JSON; Multilogin profile creation in

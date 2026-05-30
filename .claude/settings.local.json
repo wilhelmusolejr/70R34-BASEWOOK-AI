@@ -45,7 +45,27 @@
       "Bash(grep -nA 25 \"step.type === 'create_page'\" runner.js)",
       "Bash(grep -nA 15 \"async function setPanelPrivacyPublic\\\\|async function clickPanelButton\" actions/setup_about.js)",
       "Bash(grep -nA 25 \"async function waitForSaveComplete\" actions/setup_about.js)",
-      "PowerShell(Get-WinEvent *)"
+      "PowerShell(Get-WinEvent *)",
+      "PowerShell(Test-Path *)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:v for k,v in d.items\\(\\) if not isinstance\\(v,list\\) and not isinstance\\(v,dict\\)}, indent=2\\)\\)\")",
+      "Bash(tee logs/_signup-share-run.log)",
+      "Bash(DRY_RUN=true node *)",
+      "Bash(tee logs/_signup-share-run2.log)",
+      "Bash(tee logs/_signup-share-run3.log)",
+      "Bash(tee logs/_signup-share-run4.log)",
+      "PowerShell(pm2 *)",
+      "PowerShell(Invoke-RestMethod -Uri 'http://localhost:3000/status/onboard-6a084f589a9960048837452d-retry' -Method GET)",
+      "PowerShell(node run-task.js task-letizia.json)",
+      "PowerShell(node -e \"require\\('dotenv'\\).config\\(\\); const axios = require\\('axios'\\); const BASE = process.env.USER_API_BASE_URL; axios.patch\\(BASE + '/api/profiles/6a084f589a9960048837452d', { browsers: [] }\\).then\\(\\(\\) => console.log\\('Cleared browsers for Letizia'\\)\\).catch\\(e => console.error\\(e.message\\)\\)\")",
+      "Bash(grep -oP '.{0,200}Allow all cookies.{0,200}' \"C:\\\\Users\\\\hinatardp\\\\Desktop\\\\70R34-BASEWOOK-AI\\\\logs\\\\onboard-letizia-20260525-053446\\\\profiles\\\\Letizia Vitale-6a084f58\\\\signup-error-Letizia-2026-05-25T12-36-04-509Z.html\")",
+      "Bash(grep -oP '.{0,100}Decline optional.{0,100}' \"C:\\\\Users\\\\hinatardp\\\\Desktop\\\\70R34-BASEWOOK-AI\\\\logs\\\\onboard-letizia-20260525-053446\\\\profiles\\\\Letizia Vitale-6a084f58\\\\signup-error-Letizia-2026-05-25T12-36-04-509Z.html\")",
+      "WebFetch(domain:7or34.space)",
+      "Bash(npx prettier *)",
+      "Bash(n)",
+      "Bash(65.km)",
+      "Bash(Within)",
+      "Bash('location -Context 2,2 | Select-Object -First 40 | ForEach-Object { $_.Line.Substring\\(0, [Math]::Min\\($_.Line.Length, 300\\)\\) }')",
+      "Bash(del \"C:\\\\Users\\\\hinatardp\\\\Desktop\\\\70R34-BASEWOOK-AI\\\\task-test-marketplace.json\")"
     ]
   }
 }

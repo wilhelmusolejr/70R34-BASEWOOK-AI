@@ -591,6 +591,11 @@ function injectUserParams(steps, user) {
           if (!next.postContext && typeof pick.context === 'string') {
             next.postContext = pick.context;
           }
+          // Inject the picked entry's caption so captionSource="post" can use it.
+          // captionSource="ai" (default) ignores this field.
+          if (!next.postCaption && typeof pick.caption === 'string') {
+            next.postCaption = pick.caption;
+          }
         }
       }
 

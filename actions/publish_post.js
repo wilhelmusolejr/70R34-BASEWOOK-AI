@@ -143,6 +143,8 @@ module.exports = async function publish_post(page, params) {
   const {
     imageUrls = [],
     caption = '',
+    postCaption = '',
+    captionSource = 'ai',
     userIdentity = '',
     postContext = '',
     audience = 'public',
@@ -156,19 +158,31 @@ module.exports = async function publish_post(page, params) {
 
   // Caption priority:
   //   1. explicit `caption` param wins (lets a task hardcode test text)
-  //   2. AI-generated via generatePostCaption(userIdentity, postContext) —
-  //      uses system_prompt_post.txt, falls back to the 50-reasons list when
-  //      postContext is vague. Returns '' on API failure or SKIP.
-  //   3. empty (post goes captionless)
-  // generatePostCaption swallows its own errors.
+  //   2. captionSource="post" → use the picked entry's caption (auto-injected
+  //      as `postCaption` from user.posts[].caption by injectUserParams)
+  //   3. captionSource="ai" (default) → AI-generated via generatePostCaption
+  //      (userIdentity + postContext). Uses system_prompt_post.txt, falls back
+  //      to the 50-reasons list when postContext is vague. Returns '' on
+  //      API failure or SKIP.
+  //   4. empty (post goes captionless)
   let resolvedCaption = String(caption || '').trim();
-  if (!resolvedCaption && userIdentity) {
+
+  if (!resolvedCaption && captionSource === 'post') {
+    resolvedCaption = String(postCaption || '').trim();
+    if (resolvedCaption) {
+      console.log(`  [publish_post] Using captionSource=post (from user.posts[].caption)`);
+    } else {
+      console.warn(
+        `  [publish_post] captionSource=post but no caption on the picked entry — posting captionless`
+      );
+    }
+  }
+
+  if (!resolvedCaption && captionSource === 'ai' && userIdentity) {
     try {
       resolvedCaption = (await generatePostCaption(userIdentity, postContext)) || '';
     } catch (err) {
-      console.warn(
-        `  [publish_post] caption generation failed (non-fatal): ${err.message}`
-      );
+      console.warn(`  [publish_post] caption generation failed (non-fatal): ${err.message}`);
       resolvedCaption = '';
     }
   }
@@ -213,9 +227,7 @@ module.exports = async function publish_post(page, params) {
     await page.goto('https://www.facebook.com/me', { waitUntil: 'domcontentloaded' });
     await humanWait(page, 2500, 4000);
 
-    const fileInput = page
-      .locator('input[type="file"][multiple][accept*="image"]')
-      .first();
+    const fileInput = page.locator('input[type="file"][multiple][accept*="image"]').first();
 
     // 2. Set files on the hidden input. Fires FB's React change handler
     // which auto-opens the Create post modal with previews loaded.
@@ -244,9 +256,7 @@ module.exports = async function publish_post(page, params) {
       .first()
       .waitFor({ state: 'visible', timeout: 45000 })
       .catch(() => {
-        console.warn(
-          '  [publish_post] Preview img didn\'t appear in 45s — proceeding anyway'
-        );
+        console.warn("  [publish_post] Preview img didn't appear in 45s — proceeding anyway");
       });
     await humanWait(page, 2500, 4000);
 
@@ -274,10 +284,9 @@ module.exports = async function publish_post(page, params) {
     // 8. Click Post
     const postBtn = page
       .locator(
-        [
-          'div[role="button"][aria-label="Post"]',
-          'div[aria-label="Post"][role="button"]',
-        ].join(', ')
+        ['div[role="button"][aria-label="Post"]', 'div[aria-label="Post"][role="button"]'].join(
+          ', '
+        )
       )
       .first();
     await postBtn.waitFor({ state: 'visible', timeout: 15000 });
@@ -288,7 +297,7 @@ module.exports = async function publish_post(page, params) {
     // overlay; the detach wait subsumes both cases (overlay → real close).
     await dialog.waitFor({ state: 'detached', timeout: 60000 }).catch(() => {
       console.warn(
-        '  [publish_post] Create post dialog didn\'t detach in 60s — post may still have succeeded'
+        "  [publish_post] Create post dialog didn't detach in 60s — post may still have succeeded"
       );
     });
     await humanWait(page, 3000, 5000);

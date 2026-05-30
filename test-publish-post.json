@@ -1,6 +1,11 @@
 {
   "taskId": "test-publish-post",
-  "profiles": ["69fca5681e49eec688fcfc6d","69fd22161e49eec688fd02fe","6a0161869ceed638ddd6a849","6a01fcb69ceed638ddd6c3eb","6a02943a9ceed638ddd6d90f","6a03d4b076c1dbb6df141b1f","6a03d4b076c1dbb6df141b20","6a03d4b076c1dbb6df141b22","6a03d4b076c1dbb6df141b24"],
+  "profiles": [
+    "69fae777d7f59db2c21aece7",
+    "69fca5681e49eec688fcfc6c",
+    "69fd72f01e49eec688fd0551",
+    "6a03d4b076c1dbb6df141b1e"
+  ],
   "concurrency": 3,
   "blockMedia": true,
   "steps": [
@@ -12,13 +17,26 @@
       ]
     },
 
+    { "type": "setup_about" },
+
     { "type": "accept_loop" },
 
     { "type": "wait", "params": { "min": 10, "max": 30 } },
 
-    { "type": "publish_post" },
+    { "type": "publish_post", "params": { "captionSource": "post" } },
 
-    { "type": "wait", "params": { "min": 10, "max": 30 } }
+    { "type": "wait", "params": { "min": 60, "max": 120 } },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "connect" },
+        { "type": "scroll", "params": { "min": 20, "max": 40 } },
+        { "type": "like_posts", "params": { "min": 0, "max": 3 } },
+        { "type": "share_posts", "params": { "count": 1 } }
+      ]
+    }
 
   ]
 }
