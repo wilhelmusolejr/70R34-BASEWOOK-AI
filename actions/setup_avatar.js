@@ -58,8 +58,10 @@ async function findActionsBtn(page) {
   }
 }
 
+const { setOnboarding } = require('../utils/userApi');
+
 module.exports = async function setup_avatar(page, params) {
-  const { photoUrl, userIdentity = '', country = '' } = params;
+  const { photoUrl, userIdentity = '', country = '', userId = '' } = params;
   if (!photoUrl) {
     console.log('[setup_avatar] No photoUrl — user has no avatar image configured. Skipping.');
     return;
@@ -148,6 +150,8 @@ module.exports = async function setup_avatar(page, params) {
 
     await humanWait(page, 2000, 3500);
     console.log('Avatar upload complete');
+
+    if (userId) await setOnboarding(userId, 'profileImageSetAt');
   } finally {
     fs.unlink(tmpPath, () => {});
   }

@@ -14,6 +14,7 @@
 const { humanWait, humanType, humanDelay } = require('../utils/humanBehavior');
 const { generateMessage } = require('../utils/generateMessage');
 const { resolveCount } = require('../utils/randomCount');
+const { setOnboarding } = require('../utils/userApi');
 
 // Anchor on FB's own marker `<div data-ad-rendering-role="share_button">` —
 // stable across feed/Page timelines and locale-independent. We then walk up
@@ -35,6 +36,7 @@ module.exports = async function sharePosts(page, params) {
 
   const staticMessage = params.message ?? '';
   const userIdentity = params.userIdentity ?? '';
+  const userId = params.userId ?? '';
   const useApi = !staticMessage && !!userIdentity;
 
   const vp = page.viewportSize() || { width: 1280, height: 800 };
@@ -198,4 +200,6 @@ module.exports = async function sharePosts(page, params) {
   }
 
   console.log(`  Share complete: ${shared}/${targetCount} posts shared`);
+
+  if (shared > 0 && userId) await setOnboarding(userId, 'lastSharedAt');
 };

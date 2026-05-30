@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const { humanClick, humanWait, humanType } = require('../utils/humanBehavior');
 const { getProfileLogDir } = require('../utils/sessionLog');
+const { setOnboarding } = require('../utils/userApi');
 
 async function dumpFailure(page, label) {
   try {
@@ -457,7 +458,7 @@ async function updateLocation(page, city) {
 }
 
 module.exports = async function marketplace_location(page, params) {
-  const { city = '', country = '', mode = 'auto' } = params;
+  const { city = '', country = '', mode = 'auto', userId = '' } = params;
 
   if (mode === 'manual' && !city) {
     console.warn('  [marketplace_location] no city set on user record — skipping.');
@@ -513,15 +514,20 @@ module.exports = async function marketplace_location(page, params) {
     const updatedText = await readCurrentLocationText(page);
     console.log(`  [marketplace_location] updated location text: "${updatedText}"`);
 
+    let success = false;
     if (mode === 'manual' && locationMatches(updatedText, city, country)) {
       console.log('  [marketplace_location] location updated successfully.');
+      success = true;
     } else if (mode === 'auto' && updatedText && !locationMatches(updatedText, '', '')) {
       console.log(`  [marketplace_location] auto location set to: "${updatedText}"`);
+      success = true;
     } else {
       console.warn(
         `  [marketplace_location] could not verify update — text: "${updatedText}". May need manual check.`
       );
     }
+
+    if (success && userId) await setOnboarding(userId, 'marketplaceSetAt');
   } catch (err) {
     await dumpFailure(page, `error-${(city || 'auto').replace(/[^a-z0-9]+/gi, '_')}`);
     throw err;

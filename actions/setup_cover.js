@@ -8,6 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { humanWait } = require('../utils/humanBehavior');
+const { setOnboarding } = require('../utils/userApi');
 
 function downloadToTemp(url) {
   return new Promise((resolve, reject) => {
@@ -33,7 +34,7 @@ function downloadToTemp(url) {
 }
 
 module.exports = async function setup_cover(page, params) {
-  const { photoUrl } = params;
+  const { photoUrl, userId = '' } = params;
   if (!photoUrl) {
     console.log('[setup_cover] No photoUrl — user has no cover image configured. Skipping.');
     return;
@@ -141,6 +142,8 @@ module.exports = async function setup_cover(page, params) {
     await humanWait(page, 3000, 5000);
 
     console.log('✅ Cover photo upload complete');
+
+    if (userId) await setOnboarding(userId, 'coverImageSetAt');
   } finally {
     fs.unlink(tmpPath, () => {});
   }

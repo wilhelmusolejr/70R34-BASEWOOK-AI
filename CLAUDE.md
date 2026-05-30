@@ -304,6 +304,38 @@ await axios.patch(
 
 `update-post-captions.js` uses this endpoint for batch caption regen.
 
+### Onboarding stamps — `setOnboarding(userId, key, value?)`
+
+Each setup-style action stamps a completion timestamp on the profile's
+`onboarding` subdocument when it succeeds. Endpoint:
+`PATCH /api/profiles/:id/onboarding/:key` with body `{ value: "<ISO date>" }`
+(or `null`/`""` to clear). Returns 200 + full profile, 400 on bad id/key/date,
+404 if profile missing.
+
+| Action | Stamps key | When |
+|--------|------------|------|
+| `setup_privacy` | `privacyPublicAt` | After Confirm on /settings/bundled |
+| `setup_avatar` | `profileImageSetAt` | After Save closes the avatar modal |
+| `setup_cover` | `coverImageSetAt` | After Save changes wins |
+| `setup_about` | `aboutSetAt` | After every section completes + markProfileSetup PATCH |
+| `marketplace_location` | `marketplaceSetAt` | After Apply + verification succeeds |
+| `publish_post` | `publishPostAt` | After the Create-post dialog detaches |
+| `share_post` | `lastSharedAt` | After "Share now" click |
+| `share_posts` | `lastSharedAt` | After loop completes with at least 1 share |
+
+Other supported keys not currently stamped (future work):
+`groupJoinedAt`, `highlightsSetAt`, `recoveryEmailSetAt`.
+
+**Best-effort, non-throwing.** `setOnboarding` swallows axios errors and warns —
+a transient PATCH hiccup never fails the action that just succeeded. `userId` is
+auto-injected via `injectUserParams` for every action that stamps. When `userId`
+is empty (test rigs without a real user record), the stamp is silently skipped.
+
+`lastSharedAt` is the only key that's expected to *change* over time
+(latest-share marker). The rest are first-completion markers that re-stamp
+to the latest successful run — harmless re-state, useful for "ran-recently"
+queries against the DB.
+
 ## Playwright conventions (anti-detection)
 
 - **Feed scroll:** `page.mouse.wheel(0, 500)`. NEVER `window.scrollTo` or `element.scrollIntoView` on the feed.
@@ -1662,16 +1694,17 @@ Walks step tree before execution, fills missing params from user record.
 | Step | Injected |
 |------|----------|
 | `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `travel`, `userId`, `profileUrl` (current value — empty triggers capture+PATCH) |
-| `setup_avatar` | `photoUrl`, `userIdentity` |
-| `setup_cover` | `photoUrl` |
+| `setup_avatar` | `photoUrl`, `userIdentity`, `userId` |
+| `setup_cover` | `photoUrl`, `userId` |
+| `setup_privacy` | `userId` |
 | `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId` |
 | `schedule_posts` | `posts` from `linkedPage.posts` |
 | `switch_profile` | `userName` from `firstName + lastName` |
 | `search` | `city` from `user.city` (page/general modes), `country` from `user.country` (all modes — IT vs US pool selection) |
-| `marketplace_location` | `city` from `user.city`, `country` from `user.country` |
+| `marketplace_location` | `city` from `user.city`, `country` from `user.country`, `userId` |
 | `check_ip` | `userId` |
-| `share_posts` / `share_post` | `userIdentity` |
-| `publish_post` | `imageUrls` (random pick from `user.posts[].images`, resolved via `buildImageUrl`), `postContext` (picked entry's `context`), `postCaption` (picked entry's `caption` — used when `captionSource: "post"`), `userIdentity` |
+| `share_posts` / `share_post` | `userIdentity`, `userId` |
+| `publish_post` | `imageUrls` (random pick from `user.posts[].images`, resolved via `buildImageUrl`), `postContext` (picked entry's `context`), `postCaption` (picked entry's `caption` — used when `captionSource: "post"`), `userIdentity`, `userId` |
 | `facebook_signup` / `ensure_login` | `firstName`, `lastName`, `birthdayDate` (or `dob`), `gender`, `email` (selected or `[0]`), `password` from `user.facebookPassword` |
 | `facebook_login` | `email` (selected or `[0]`), `password` from `user.facebookPassword` |
 | `outlook_login` | `email` (selected or `[0]`), `password` from `user.emailPassword` |

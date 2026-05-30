@@ -11,6 +11,7 @@
  */
 
 const { humanWait, humanClick } = require('../utils/humanBehavior');
+const { setOnboarding } = require('../utils/userApi');
 
 async function clickHuman(page, locator, label) {
   await locator.waitFor({ state: 'visible', timeout: 20000 });
@@ -71,6 +72,7 @@ async function selectPublicPrivacyWithRetry(page) {
 }
 
 module.exports = async function setup_privacy(page, params) {
+  const { userId = '' } = params || {};
   console.log('  [setup_privacy] navigating to /settings/bundled...');
   await page.goto('https://www.facebook.com/settings/bundled', {
     waitUntil: 'domcontentloaded',
@@ -93,4 +95,6 @@ module.exports = async function setup_privacy(page, params) {
   await humanWait(page, 5000, 10000);
 
   console.log('  [setup_privacy] privacy setup complete.');
+
+  if (userId) await setOnboarding(userId, 'privacyPublicAt');
 };

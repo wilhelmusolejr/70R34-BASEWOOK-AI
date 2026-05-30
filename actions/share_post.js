@@ -7,9 +7,16 @@
 const { humanWait, humanClick, humanType } = require('../utils/humanBehavior');
 const { extractPostContext } = require('../utils/claudeApi');
 const { generateMessage } = require('../utils/generateMessage');
+const { setOnboarding } = require('../utils/userApi');
 
 module.exports = async function share_post(page, params) {
-  const { url, message: staticMessage = '', userIdentity = '', instruction = '' } = params;
+  const {
+    url,
+    message: staticMessage = '',
+    userIdentity = '',
+    instruction = '',
+    userId = '',
+  } = params;
   if (!url) throw new Error('share_post: url is required');
 
   const useApi = !staticMessage && !!userIdentity;
@@ -59,4 +66,6 @@ module.exports = async function share_post(page, params) {
   console.log('Post shared');
 
   await humanWait(page, 2000, 3500);
+
+  if (userId) await setOnboarding(userId, 'lastSharedAt');
 };

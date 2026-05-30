@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { humanWait, humanClick, humanType } = require('../utils/humanBehavior');
+const { setOnboarding } = require('../utils/userApi');
 
 const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
 
@@ -72,29 +73,32 @@ async function clickAboutTab(page) {
   // Polled in-page so React render delays (Multilogin's slower stack) are tolerated.
   let elHandle;
   try {
-    const jsHandle = await page.waitForFunction(() => {
-      const anchors = Array.from(document.querySelectorAll('a[role="tab"], a[href]'));
-      for (const a of anchors) {
-        const href = a.getAttribute('href') || '';
-        const aria = a.getAttribute('aria-label') || '';
-        // textContent — not innerText — so this works before layout is computed
-        const text = (a.textContent || '').replace(/\s+/g, ' ').trim();
-        const role = a.getAttribute('role') || '';
+    const jsHandle = await page.waitForFunction(
+      () => {
+        const anchors = Array.from(document.querySelectorAll('a[role="tab"], a[href]'));
+        for (const a of anchors) {
+          const href = a.getAttribute('href') || '';
+          const aria = a.getAttribute('aria-label') || '';
+          // textContent — not innerText — so this works before layout is computed
+          const text = (a.textContent || '').replace(/\s+/g, ' ').trim();
+          const role = a.getAttribute('role') || '';
 
-        const hrefMatch =
-          href.includes('sk=about') ||         // ?sk=about query style
-          /\/about(?:\/|\?|$)/.test(href);     // /<username>/about path style
+          const hrefMatch =
+            href.includes('sk=about') || // ?sk=about query style
+            /\/about(?:\/|\?|$)/.test(href); // /<username>/about path style
 
-        const ariaMatch = aria === 'About';
+          const ariaMatch = aria === 'About';
 
-        // Only accept the text fallback when the element is clearly a tab,
-        // so we don't pick up a footer "About" link on the same page.
-        const textMatch = role === 'tab' && text === 'About';
+          // Only accept the text fallback when the element is clearly a tab,
+          // so we don't pick up a footer "About" link on the same page.
+          const textMatch = role === 'tab' && text === 'About';
 
-        if (hrefMatch || ariaMatch || textMatch) return a;
-      }
-      return null;
-    }, { timeout: 30000 });
+          if (hrefMatch || ariaMatch || textMatch) return a;
+        }
+        return null;
+      },
+      { timeout: 30000 }
+    );
     elHandle = jsHandle.asElement();
   } catch (_) {
     throw new Error('[setup_about] About tab not found on profile page');
@@ -1237,4 +1241,6 @@ module.exports = async function setupAbout(page, params) {
   }
 
   await markProfileSetup(userId);
+
+  if (userId) await setOnboarding(userId, 'aboutSetAt');
 };

@@ -120,6 +120,54 @@ async function updateFriendRequestStatus(receiverId, senderId, status) {
   );
 }
 
+/**
+ * Stamp a single onboarding step's timestamp on a profile. Atomic — sets
+ * one key on profile.onboarding.<key>. Pass `null`/`""`/`undefined` to clear.
+ *
+ * Valid keys (see server/src/models/Profile.js):
+ *   privacyPublicAt, profileImageSetAt, coverImageSetAt, aboutSetAt,
+ *   marketplaceSetAt, groupJoinedAt, highlightsSetAt, publishPostAt,
+ *   recoveryEmailSetAt, lastSharedAt
+ *
+ * Best-effort: logs warnings on failure but never throws — a transient
+ * onboarding-PATCH hiccup must NOT fail the action that succeeded.
+ *
+ * @param {string} userId
+ * @param {string} key — one of the onboarding keys
+ * @param {string|Date|null} [value=new Date()] — ISO string / Date / null to clear
+ */
+async function setOnboarding(userId, key, value = new Date()) {
+  if (!BASE_URL) {
+    console.warn('  [onboarding] USER_API_BASE_URL not set — skipping PATCH');
+    return;
+  }
+  if (!userId) {
+    console.warn(`  [onboarding] no userId — skipping ${key} PATCH`);
+    return;
+  }
+  if (!key) {
+    console.warn('  [onboarding] no key — skipping PATCH');
+    return;
+  }
+
+  let isoValue = value;
+  if (value instanceof Date) isoValue = value.toISOString();
+  else if (value && typeof value !== 'string') isoValue = String(value);
+
+  try {
+    await axios.patch(
+      `${BASE_URL}/api/profiles/${userId}/onboarding/${key}`,
+      { value: isoValue },
+      { timeout: 10000 }
+    );
+    console.log(`  [onboarding] stamped ${key} = ${isoValue || 'cleared'}`);
+  } catch (err) {
+    const status = err.response?.status;
+    const detail = err.response?.data?.message || err.message;
+    console.warn(`  [onboarding] PATCH ${key} failed (${status || 'no-status'}): ${detail}`);
+  }
+}
+
 async function fetchSharerUrls(country) {
   if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
   if (!country) throw new Error('fetchSharerUrls: country is required');
@@ -138,4 +186,5 @@ module.exports = {
   recordFriendRequest,
   updateFriendRequestStatus,
   fetchSharerUrls,
+  setOnboarding,
 };

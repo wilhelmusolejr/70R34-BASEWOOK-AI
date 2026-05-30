@@ -32,6 +32,7 @@ const { humanWait, humanClick, humanType } = require('../utils/humanBehavior');
 const { downloadToTemp } = require('../utils/pageSetupHelpers');
 const { generatePostCaption } = require('../utils/generatePostCaption');
 const { getProfileLogDir } = require('../utils/sessionLog');
+const { setOnboarding } = require('../utils/userApi');
 
 const AUDIENCE_LABELS = {
   public: 'Public',
@@ -148,6 +149,7 @@ module.exports = async function publish_post(page, params) {
     userIdentity = '',
     postContext = '',
     audience = 'public',
+    userId = '',
   } = params || {};
 
   if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
@@ -303,6 +305,8 @@ module.exports = async function publish_post(page, params) {
     await humanWait(page, 3000, 5000);
 
     console.log('  [publish_post] Done.');
+
+    if (userId) await setOnboarding(userId, 'publishPostAt');
   } catch (err) {
     await dumpFailure(page, `error-${imageUrls.length}img`);
     throw err;

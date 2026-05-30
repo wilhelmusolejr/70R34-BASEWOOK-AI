@@ -443,17 +443,26 @@ function injectUserParams(steps, user) {
         next.country = user.country || '';
       }
 
+      if (!next.userId) next.userId = user._id || user.id || '';
+
       s.params = next;
     }
 
-    if (step.type === 'setup_cover' && !(step.params && step.params.photoUrl)) {
-      const img = user.images && user.images[1];
-      if (img) {
-        s.params = {
-          ...(step.params || {}),
-          photoUrl: `${IMAGE_SERVER_BASE_URL}${img.imageId.filename}`,
-        };
+    if (step.type === 'setup_cover') {
+      const next = { ...(step.params || {}) };
+      if (!next.photoUrl) {
+        const img = user.images && user.images[1];
+        if (img) next.photoUrl = `${IMAGE_SERVER_BASE_URL}${img.imageId.filename}`;
       }
+      if (!next.userId) next.userId = user._id || user.id || '';
+      s.params = next;
+    }
+
+    if (step.type === 'setup_privacy' && !(step.params && step.params.userId)) {
+      s.params = {
+        ...(step.params || {}),
+        userId: user._id || user.id || '',
+      };
     }
 
     if (step.type === 'create_page') {
@@ -545,16 +554,15 @@ function injectUserParams(steps, user) {
         ...(step.params || {}),
         ...(!step.params?.city ? { city: user.city || '' } : {}),
         ...(!step.params?.country ? { country: user.country || '' } : {}),
+        ...(!step.params?.userId ? { userId: user._id || user.id || '' } : {}),
       };
     }
 
-    if (
-      (step.type === 'share_posts' || step.type === 'share_post') &&
-      !(step.params && step.params.userIdentity)
-    ) {
+    if (step.type === 'share_posts' || step.type === 'share_post') {
       s.params = {
         ...(step.params || {}),
-        userIdentity: user.identityPrompt || '',
+        ...(!step.params?.userIdentity ? { userIdentity: user.identityPrompt || '' } : {}),
+        ...(!step.params?.userId ? { userId: user._id || user.id || '' } : {}),
       };
     }
 
@@ -600,6 +608,7 @@ function injectUserParams(steps, user) {
       }
 
       if (!next.userIdentity) next.userIdentity = user.identityPrompt || '';
+      if (!next.userId) next.userId = user._id || user.id || '';
       s.params = next;
     }
 

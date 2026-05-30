@@ -49,7 +49,7 @@ const actionSchemas = {
   },
   share_posts: {
     description:
-      'Share posts from the current page. Provide message for static text, or userIdentity + instruction for Claude API-generated message (fallback: empty).',
+      'Share posts from the current page. Provide message for static text, or userIdentity + instruction for Claude API-generated message (fallback: empty). On at least one successful share, stamps onboarding.lastSharedAt.',
     params: {
       count: { type: 'number', default: 1, description: 'Number of posts to share' },
       message: {
@@ -67,12 +67,18 @@ const actionSchemas = {
         default: '',
         description: 'Tone/style instruction for API generation',
       },
+      userId: {
+        type: 'string',
+        default: '',
+        description:
+          'User id for the onboarding stamp PATCH. Auto-injected from user._id when omitted.',
+      },
     },
     hasChildren: false,
   },
   share_post: {
     description:
-      'Share a specific Facebook post by URL. Provide message for static text, or userIdentity + instruction for Claude API-generated message.',
+      'Share a specific Facebook post by URL. Provide message for static text, or userIdentity + instruction for Claude API-generated message. On success, stamps onboarding.lastSharedAt.',
     params: {
       url: { type: 'string', description: 'Full URL of the Facebook post to share' },
       message: {
@@ -89,6 +95,12 @@ const actionSchemas = {
         type: 'string',
         default: '',
         description: 'Tone/style instruction for API generation',
+      },
+      userId: {
+        type: 'string',
+        default: '',
+        description:
+          'User id for the onboarding stamp PATCH. Auto-injected from user._id when omitted.',
       },
     },
     hasChildren: false,
@@ -141,6 +153,12 @@ const actionSchemas = {
         enum: ['public', 'friends', 'only-me', 'skip'],
         description:
           'Audience for the post. "skip" leaves FB\'s current default untouched. Audience widget failures are non-fatal (warned, not thrown).',
+      },
+      userId: {
+        type: 'string',
+        default: '',
+        description:
+          'User id for the onboarding stamp PATCH (publishPostAt). Auto-injected from user._id when omitted.',
       },
     },
     hasChildren: false,
@@ -239,15 +257,22 @@ const actionSchemas = {
     hasChildren: false,
   },
   setup_cover: {
-    description: 'Upload a cover photo from a URL. Self-navigates to /me — no profileUrl needed.',
+    description:
+      'Upload a cover photo from a URL. Self-navigates to /me — no profileUrl needed. On success, stamps onboarding.coverImageSetAt.',
     params: {
       photoUrl: { type: 'string', description: 'Public URL of the image to upload as cover photo' },
+      userId: {
+        type: 'string',
+        default: '',
+        description:
+          'User id for the onboarding stamp PATCH. Auto-injected from user._id when omitted.',
+      },
     },
     hasChildren: false,
   },
   setup_avatar: {
     description:
-      'Upload a profile picture from a URL. Probes the current page for the "Profile picture actions" trigger; navigates to /me only on miss. Caption priority: explicit description → AI-generated from userIdentity → random Bible verse fallback.',
+      'Upload a profile picture from a URL. Probes the current page for the "Profile picture actions" trigger; navigates to /me only on miss. Caption priority: explicit description → AI-generated from userIdentity → random Bible verse fallback. On success, stamps onboarding.profileImageSetAt.',
     params: {
       photoUrl: {
         type: 'string',
@@ -263,6 +288,12 @@ const actionSchemas = {
         default: '',
         description:
           'Persona POV for AI caption. Auto-injected from user.identityPrompt when omitted.',
+      },
+      userId: {
+        type: 'string',
+        default: '',
+        description:
+          'User id for the onboarding stamp PATCH. Auto-injected from user._id when omitted.',
       },
     },
     hasChildren: false,
@@ -415,6 +446,12 @@ const actionSchemas = {
         description:
           'Country code for location matching (e.g. "US", "IT"). Auto-injected from user.country when omitted.',
       },
+      userId: {
+        type: 'string',
+        default: '',
+        description:
+          'User id for the onboarding stamp PATCH (marketplaceSetAt). Auto-injected from user._id when omitted.',
+      },
     },
     hasChildren: false,
   },
@@ -560,8 +597,15 @@ const actionSchemas = {
   },
   setup_privacy: {
     description:
-      'Leaf: walk the /settings/bundled privacy acknowledgment page. Selects Public privacy (with retry), clicks Next, then Confirm. Designed to run after facebook_signup or standalone for accounts that skipped the walkthrough.',
-    params: {},
+      'Leaf: walk the /settings/bundled privacy acknowledgment page. Selects Public privacy (with retry), clicks Next, then Confirm. Designed to run after facebook_signup or standalone for accounts that skipped the walkthrough. On success, stamps onboarding.privacyPublicAt.',
+    params: {
+      userId: {
+        type: 'string',
+        default: '',
+        description:
+          'User id for the onboarding stamp PATCH. Auto-injected from user._id when omitted.',
+      },
+    },
     hasChildren: false,
   },
   facebook_signup: {
