@@ -83,10 +83,14 @@ async function runStep(page, step) {
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `taskId` | yes | — | Unique id |
-| `profiles` | yes | — | List of user IDs |
+| `profiles` | * | — | Explicit list of user IDs. Wins when non-empty. |
+| `profilesFromStatus` | * | — | Dynamic fetch: `GET /api/profiles?status=<value>&limit=500`. Used when `profiles[]` is missing/empty. |
+| `cooldown.shareHours` | no | — | Skip profile if `user.onboarding.lastSharedAt` is within this many hours. |
 | `concurrency` | no | all | Max parallel browsers |
 | `blockMedia` | no | `true` | Block images/video/audio/fonts |
 | `steps` | yes | — | Array of steps |
+
+\* One of `profiles[]` (non-empty) OR `profilesFromStatus` is required. Both missing/empty → throws at task start.
 
 ```json
 {
@@ -102,7 +106,52 @@ async function runStep(page, step) {
 }
 ```
 
+```json
+{
+  "taskId": "engage-and-add",
+  "profilesFromStatus": "Active",
+  "cooldown": { "shareHours": 24 },
+  "concurrency": 5,
+  "steps": [ ... ]
+}
+```
+
 `setup_*` params are auto-injected from the user API; explicit values win.
+
+### Profile-list resolution
+
+`resolveProfileList(task)` in `runner.js` returns `{ source, userIds, prefetched }`:
+
+| `profiles` | `profilesFromStatus` | Outcome |
+|---|---|---|
+| `["a","b"]` (non-empty) | anything | source = `explicit`, uses `profiles[]` |
+| `[]` / missing | `"Active"` | source = `api`, fetches via `fetchProfilesByStatus` |
+| `["abc",""]` (only empties after filter) | `"Active"` | source = `api` (the empty string is stripped, length=0) |
+| `[]` / missing | `""` / missing | **Throws** with explanatory message |
+
+The `.filter(Boolean)` on `profiles[]` strips empty strings before the length check, so a stray `""` doesn't masquerade as "explicit list set". When the API path is used, the full profile records are returned and stored in a `prefetched` Map by id — the worker reuses them for the cooldown gate AND for display-name resolution, avoiding a second `fetchUser` round-trip per profile.
+
+API source caps at **500 profiles per status** (server limit). If a status ever grows past 500, this needs pagination (currently the API doesn't support `skip` on `/profiles`).
+
+### Cooldown gate
+
+`checkCooldown(user, task.cooldown)` in `runner.js`, called inside each worker **before `launchBrowsers`** so a skip costs ~0s instead of the ~15s browser-open overhead.
+
+Current gate keys (the shape is extensible):
+
+| Key | What it checks |
+|---|---|
+| `shareHours` | `user.onboarding.lastSharedAt` — skip if shared within N hours |
+
+Decisions and the underlying timestamp:
+
+- **Missing config**, **missing `lastSharedAt`**, **invalid date**, or **`shareHours ≤ 0`** → never skip.
+- **`elapsedHours >= shareHours`** → not skipped, run normally.
+- **`elapsedHours < shareHours`** → **SKIPPED**. The worker posts a tracker-log entry `SKIPPED (cooldown): last shared X.Xh ago (cooldown 24h, Y.Yh remaining)`, marks the profile `status: 'skipped'` in `state/{taskId}.json`, and moves on without opening a browser.
+
+Skipped profiles count as "done" for this run, so the auto-clear behavior at task end still fires (next manual run starts fresh and re-evaluates cooldown — by then most skipped profiles will have aged past the threshold and become eligible).
+
+The end-of-task summary and `summary.md` get a dedicated `Skipped` section listing each gated profile with its reason. Folder-rename does NOT fire for skipped profiles (they never opened a browser, no folder to tag).
 
 ## Browser providers — Hidemium **or** Multilogin
 

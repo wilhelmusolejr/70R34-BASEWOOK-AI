@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const { launchBrowsers, closeBrowsers } = require('./utils/browserManager');
-const { fetchUser, updateProfile } = require('./utils/userApi');
+const { fetchUser, updateProfile, fetchProfilesByStatus } = require('./utils/userApi');
 const presets = require('./config/presets.json');
 const { buildPageAddress } = require('./utils/pageAddressData');
 const {
@@ -1160,8 +1160,90 @@ async function runBrowser(session, steps, options = {}) {
  * Run a complete task across multiple browsers with a concurrency limit.
  * Browsers are opened lazily — only concurrency-many are open at once.
  */
+/**
+ * Resolve a task's profile list. Two sources, with explicit-wins precedence:
+ *
+ *   1. `task.profiles[]` — explicit list. Wins when non-empty (after filtering
+ *      out empty strings).
+ *   2. `task.profilesFromStatus` — dynamic fetch via GET /api/profiles?status=X.
+ *      Used when `profiles` is missing or empty (or only contains empties).
+ *
+ * Throws when both are missing/empty. Returns { source, userIds, prefetched }
+ * where `prefetched` is the array of full user records when the source was
+ * the API (re-used downstream for the cooldown gate to skip a second fetch).
+ */
+async function resolveProfileList(task) {
+  const explicit = Array.isArray(task.profiles) ? task.profiles.filter(Boolean) : [];
+  if (explicit.length > 0) {
+    return { source: 'explicit', userIds: explicit, prefetched: null };
+  }
+
+  const status = String(task.profilesFromStatus || '').trim();
+  if (!status) {
+    throw new Error(
+      'Task must specify either profiles[] (non-empty) or profilesFromStatus (e.g. "Active")'
+    );
+  }
+
+  console.log(`[task] Fetching profiles by status=${status} from API...`);
+  const profiles = await fetchProfilesByStatus(status);
+  const userIds = profiles.map((p) => p._id || p.id).filter(Boolean);
+  console.log(`[task] API returned ${userIds.length} profile(s) with status=${status}`);
+
+  // Index by id so the worker's cooldown check can look up the prefetched
+  // record without a second fetchUser call.
+  const prefetched = new Map();
+  for (const u of profiles) {
+    const id = u._id || u.id;
+    if (id) prefetched.set(String(id), u);
+  }
+
+  return { source: 'api', userIds, prefetched };
+}
+
+/**
+ * Cooldown gate — returns { skipped, reason, elapsedHours } for the per-
+ * profile worker. Currently only `cooldown.shareHours` is implemented; the
+ * shape leaves room for additional gates (e.g. minHoursSinceLastConnect).
+ *
+ * Behavior:
+ *   - no cooldown config        → not skipped (legacy task configs work as-is)
+ *   - lastSharedAt missing/null → not skipped (never shared, allow)
+ *   - lastSharedAt < threshold  → SKIPPED with elapsed-hours reason
+ *   - lastSharedAt >= threshold → not skipped, run normally
+ */
+function checkCooldown(user, cooldownConfig) {
+  if (!cooldownConfig || typeof cooldownConfig !== 'object') {
+    return { skipped: false };
+  }
+  const shareHours = Number(cooldownConfig.shareHours);
+  if (!Number.isFinite(shareHours) || shareHours <= 0) {
+    return { skipped: false };
+  }
+  const lastSharedAt = user?.onboarding?.lastSharedAt;
+  if (!lastSharedAt) return { skipped: false };
+
+  const last = new Date(lastSharedAt);
+  if (Number.isNaN(last.getTime())) return { skipped: false };
+
+  const elapsedMs = Date.now() - last.getTime();
+  const elapsedHours = elapsedMs / 3_600_000;
+  if (elapsedHours >= shareHours) return { skipped: false };
+
+  const remaining = (shareHours - elapsedHours).toFixed(1);
+  return {
+    skipped: true,
+    elapsedHours,
+    reason: `last shared ${elapsedHours.toFixed(1)}h ago (cooldown ${shareHours}h, ${remaining}h remaining)`,
+  };
+}
+
 async function runTask(task) {
-  const { taskId, profiles: userIds, concurrency, blockMedia, steps } = task;
+  const { taskId, concurrency, blockMedia, steps, cooldown } = task;
+
+  // Resolve profile list — explicit `profiles[]` wins, falls back to
+  // `profilesFromStatus` API fetch. Throws if both are missing/empty.
+  const { source: profileSource, userIds, prefetched } = await resolveProfileList(task);
   const limit = concurrency && concurrency > 0 ? concurrency : userIds.length;
   const options = { blockMedia: blockMedia !== false };
   const startedAtMs = Date.now();
@@ -1204,13 +1286,22 @@ async function runTask(task) {
   for (let i = 0; i < userIds.length; i++) {
     const prior = state.completed[userIds[i]];
     if (!prior) continue;
-    results[i] =
-      prior.status === 'success'
-        ? {
-            status: 'fulfilled',
-            value: { profileId: userIds[i], status: 'success', resumed: true },
-          }
-        : { status: 'rejected', reason: new Error(prior.error || 'previous run errored') };
+    if (prior.status === 'success') {
+      results[i] = {
+        status: 'fulfilled',
+        value: { profileId: userIds[i], status: 'success', resumed: true },
+      };
+    } else if (prior.status === 'skipped') {
+      results[i] = {
+        status: 'fulfilled',
+        value: { profileId: userIds[i], status: 'skipped', reason: prior.reason || '' },
+      };
+    } else {
+      results[i] = {
+        status: 'rejected',
+        reason: new Error(prior.error || 'previous run errored'),
+      };
+    }
     timingsMs[i] = Math.round((prior.elapsedSec || 0) * 1000);
   }
 
@@ -1233,16 +1324,44 @@ async function runTask(task) {
       const [index, userId] = queue.shift();
       const profileStartedAt = Date.now();
 
-      let userPreview = null;
-      try {
-        userPreview = await fetchUser(userId);
-      } catch (err) {
-        console.warn(
-          `[${userId}] Pre-fetch user failed (will fall back to userId): ${err.message}`
-        );
+      let userPreview = prefetched?.get(String(userId)) || null;
+      if (!userPreview) {
+        try {
+          userPreview = await fetchUser(userId);
+        } catch (err) {
+          console.warn(
+            `[${userId}] Pre-fetch user failed (will fall back to userId): ${err.message}`
+          );
+        }
       }
       const displayName = buildDisplayName(userPreview, userId);
       displayNames[index] = displayName;
+
+      // Cooldown gate — check BEFORE opening the browser so a skip costs ~0s
+      // instead of the ~15s browser-open overhead. lastSharedAt comes off the
+      // user record's onboarding subdocument.
+      const cd = checkCooldown(userPreview, cooldown);
+      if (cd.skipped) {
+        console.log(`[${displayName}] SKIPPED (cooldown): ${cd.reason}`);
+        await persistTrackerLog(
+          userPreview?._id || userPreview?.id || userId,
+          `SKIPPED (cooldown): ${cd.reason}`
+        );
+        const completedAt = new Date().toISOString();
+        results[index] = {
+          status: 'fulfilled',
+          value: { profileId: userId, status: 'skipped', reason: cd.reason },
+        };
+        timingsMs[index] = 0;
+        state.completed[userId] = {
+          status: 'skipped',
+          completedAt,
+          elapsedSec: 0,
+          reason: cd.reason,
+        };
+        saveState(taskId, userIds, state);
+        continue; // next userId from the queue
+      }
 
       await runInSession({ displayName, browserId, idsToStrip: [userId], userId }, async () => {
         let session;
@@ -1305,7 +1424,8 @@ async function runTask(task) {
 
       // Tag the per-profile folder with SUCCESS/FAIL so the profiles/ listing
       // shows outcomes at a glance. Runs after runInSession has exited (no
-      // more file handles into the folder), best-effort on Windows.
+      // more file handles into the folder), best-effort on Windows. Skipped
+      // profiles never opened a browser so there's no folder to rename.
       renameProfileFolderWithStatus({
         runLogDir,
         displayName,
@@ -1333,6 +1453,16 @@ async function runTask(task) {
     const displayName = displayNames[index] || userId;
     const elapsedSec = Number((timingsMs[index] / 1000).toFixed(1));
     if (result?.status === 'fulfilled') {
+      // Skipped profiles (cooldown gate) carry a sentinel on the value object.
+      if (result.value?.status === 'skipped') {
+        return {
+          profileId: userId,
+          profileName: displayName,
+          status: 'skipped',
+          reason: result.value.reason || '',
+          elapsedSec,
+        };
+      }
       return { profileId: userId, profileName: displayName, status: 'success', elapsedSec };
     } else {
       const msg = result?.reason?.message || 'unknown error';
@@ -1348,7 +1478,8 @@ async function runTask(task) {
   });
 
   const successCount = formattedResults.filter((r) => r.status === 'success').length;
-  const errorCount = formattedResults.length - successCount;
+  const skippedCount = formattedResults.filter((r) => r.status === 'skipped').length;
+  const errorCount = formattedResults.filter((r) => r.status === 'error').length;
   const totalElapsedSec = ((Date.now() - startedAtMs) / 1000).toFixed(1);
 
   const perProfileMs = timingsMs.filter((ms) => ms > 0);
@@ -1359,8 +1490,9 @@ async function runTask(task) {
   const maxSec = perProfileMs.length ? (Math.max(...perProfileMs) / 1000).toFixed(1) : '0.0';
 
   console.log(`\n=== Task ${taskId}: Completed ===`);
-  console.log(`  Profiles:    ${formattedResults.length}`);
+  console.log(`  Profiles:    ${formattedResults.length} (source: ${profileSource})`);
   console.log(`  Succeeded:   ${successCount}`);
+  if (skippedCount > 0) console.log(`  Skipped:     ${skippedCount} (cooldown)`);
   console.log(`  Failed:      ${errorCount}`);
   console.log(`  Total time:  ${totalElapsedSec}s`);
   console.log(`  Per profile: avg ${avgSec}s, min ${minSec}s, max ${maxSec}s`);
@@ -1373,6 +1505,12 @@ async function runTask(task) {
         console.log(`    - ${r.profileName} [${r.profileId}] (${r.elapsedSec}s): ${r.error}`)
       );
   }
+  if (skippedCount > 0) {
+    console.log('\n  Skipped:');
+    formattedResults
+      .filter((r) => r.status === 'skipped')
+      .forEach((r) => console.log(`    - ${r.profileName} [${r.profileId}]: ${r.reason}`));
+  }
   console.log();
 
   writeSummaryFile({
@@ -1380,12 +1518,14 @@ async function runTask(task) {
     runLogDir,
     formattedResults,
     successCount,
+    skippedCount,
     errorCount,
     totalElapsedSec,
     avgSec,
     minSec,
     maxSec,
     startedAtMs,
+    profileSource,
   });
 
   return { taskId, results: formattedResults };
@@ -1396,18 +1536,21 @@ function writeSummaryFile({
   runLogDir,
   formattedResults,
   successCount,
+  skippedCount = 0,
   errorCount,
   totalElapsedSec,
   avgSec,
   minSec,
   maxSec,
   startedAtMs,
+  profileSource,
 }) {
   if (!runLogDir) return;
 
   const startedAt = new Date(startedAtMs).toISOString();
   const finishedAt = new Date().toISOString();
   const failures = formattedResults.filter((r) => r.status === 'error');
+  const skipped = formattedResults.filter((r) => r.status === 'skipped');
   const successes = formattedResults.filter((r) => r.status === 'success');
 
   const lines = [];
@@ -1417,8 +1560,9 @@ function writeSummaryFile({
   lines.push(`Finished:  ${finishedAt}`);
   lines.push(`Duration:  ${totalElapsedSec}s`);
   lines.push('');
-  lines.push(`Profiles:  ${formattedResults.length}`);
+  lines.push(`Profiles:  ${formattedResults.length}${profileSource ? ` (source: ${profileSource})` : ''}`);
   lines.push(`Succeeded: ${successCount}`);
+  if (skippedCount > 0) lines.push(`Skipped:   ${skippedCount} (cooldown)`);
   lines.push(`Failed:    ${errorCount}`);
   lines.push(`Per profile: avg ${avgSec}s, min ${minSec}s, max ${maxSec}s`);
   lines.push('');
@@ -1429,6 +1573,15 @@ function writeSummaryFile({
     for (const r of failures) {
       lines.push(`- **${r.profileName}** \`${r.profileId}\` (${r.elapsedSec}s)`);
       lines.push(`  - ${r.error}`);
+    }
+    lines.push('');
+  }
+
+  if (skipped.length > 0) {
+    lines.push(`## Skipped (${skipped.length})`);
+    lines.push('');
+    for (const r of skipped) {
+      lines.push(`- ${r.profileName} \`${r.profileId}\` — ${r.reason}`);
     }
     lines.push('');
   }

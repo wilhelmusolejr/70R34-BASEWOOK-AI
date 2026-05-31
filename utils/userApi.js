@@ -168,6 +168,40 @@ async function setOnboarding(userId, key, value = new Date()) {
   }
 }
 
+/**
+ * Fetch ALL profiles matching a status — for dynamic task population
+ * (`profilesFromStatus` in task config). Returns the full populated profile
+ * records, not just ids, so callers can do downstream filtering (e.g.
+ * cooldown gate on onboarding.lastSharedAt) without a second round-trip.
+ *
+ * Server caps `limit` at 500; we pass 500 explicitly. If a status ever grows
+ * past 500 profiles the call will need pagination (server doesn't currently
+ * support `skip` on /profiles, only on /proxies).
+ *
+ * @param {string} status — must be one of the server's PROFILE_STATUSES
+ *                          (Available, Need Setup, Pending Profile, Active,
+ *                          Flagged, Banned, Ready, Delivered). Invalid → 400.
+ * @returns {Promise<Object[]>} full profile records
+ */
+async function fetchProfilesByStatus(status) {
+  if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
+  if (!status || typeof status !== 'string') {
+    throw new Error('fetchProfilesByStatus: status (string) is required');
+  }
+  const { data } = await axios.get(`${BASE_URL}/api/profiles`, {
+    params: { status, limit: 500 },
+    timeout: 30000,
+  });
+  const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+  const list = parsed.data || parsed;
+  if (!Array.isArray(list)) {
+    throw new Error(
+      `fetchProfilesByStatus: expected array, got ${typeof list} — body: ${JSON.stringify(parsed).slice(0, 200)}`
+    );
+  }
+  return list;
+}
+
 async function fetchSharerUrls(country) {
   if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
   if (!country) throw new Error('fetchSharerUrls: country is required');
@@ -182,6 +216,7 @@ async function fetchSharerUrls(country) {
 module.exports = {
   fetchUser,
   fetchActiveProfiles,
+  fetchProfilesByStatus,
   updateProfile,
   recordFriendRequest,
   updateFriendRequestStatus,
