@@ -698,6 +698,14 @@ function injectUserParams(steps, user) {
         gender: step.params?.gender || user.gender || '',
         email: step.params?.email || selectedEmail,
         password: step.params?.password || user.facebookPassword || '',
+        // Pass the current accountCreated value so the action knows whether
+        // to stamp (empty → stamp on home-feed landing; non-empty → never
+        // overwrite). String-or-explicit handling means an empty string in
+        // step.params forces a re-stamp on this run only.
+        accountCreated:
+          typeof step.params?.accountCreated === 'string'
+            ? step.params.accountCreated
+            : user.accountCreated || '',
       };
     }
 
@@ -716,12 +724,17 @@ function injectUserParams(steps, user) {
         user.emails?.find((e) => e.selected)?.address || user.emails?.[0]?.address || '';
       s.params = {
         ...(step.params || {}),
+        userId: step.params?.userId || user._id || user.id || '',
         firstName: step.params?.firstName || user.firstName || '',
         lastName: step.params?.lastName || user.lastName || '',
         birthdayDate: step.params?.birthdayDate || user.birthdayDate || user.dob || '',
         gender: step.params?.gender || user.gender || '',
         email: step.params?.email || selectedEmail,
         password: step.params?.password || user.facebookPassword || '',
+        accountCreated:
+          typeof step.params?.accountCreated === 'string'
+            ? step.params.accountCreated
+            : user.accountCreated || '',
       };
     }
 
@@ -771,11 +784,96 @@ function emitVaultStepStart(vaultState, step, path) {
 }
 
 /**
+ * Evaluate per-step `guard` block against the user record. Runs BEFORE the
+ * `chance` roll so an ineligible profile never wastes a probability slot.
+ * Returns { pass, reason }.
+ *
+ * Supported guards (all optional, all must pass when set):
+ *
+ *   ifOnboardingMissing: "<key>"
+ *     Skip when user.onboarding.<key> is truthy. Used to guard idempotent
+ *     setup steps: ifOnboardingMissing="profileImageSetAt" means "only run
+ *     setup_avatar if the avatar onboarding stamp is null".
+ *
+ *   ifFieldEmpty: "<top-level field>"
+ *     Skip when user.<field> is truthy. Top-level only — does not look
+ *     inside subdocuments. Used for things like ifFieldEmpty="pageUrl"
+ *     to guard create_page on the user not yet having a Page.
+ *
+ *   minAccountAgeDays: N
+ *     Skip when (now - user.accountCreated) < N days. Empty/invalid
+ *     accountCreated is treated as "age unknown" → guard fails (safe
+ *     default — don't run age-gated actions until we know the age).
+ *     facebook_signup stamps accountCreated on home-feed landing so new
+ *     signups get tracked; existing profiles need a backfill via
+ *     `backfill-account-created.js`.
+ */
+function evaluateStepGuards(step, user) {
+  const guard = step.guard;
+  if (!guard || typeof guard !== 'object') return { pass: true };
+
+  if (guard.ifOnboardingMissing) {
+    const v = user?.onboarding?.[guard.ifOnboardingMissing];
+    if (v) {
+      return {
+        pass: false,
+        reason: `onboarding.${guard.ifOnboardingMissing} already stamped (${v})`,
+      };
+    }
+  }
+
+  if (guard.ifFieldEmpty) {
+    const v = user?.[guard.ifFieldEmpty];
+    if (v !== '' && v != null && !(Array.isArray(v) && v.length === 0)) {
+      const shown = typeof v === 'string' ? v.slice(0, 60) : JSON.stringify(v).slice(0, 60);
+      return { pass: false, reason: `${guard.ifFieldEmpty} is not empty (${shown})` };
+    }
+  }
+
+  if (Number.isFinite(guard.minAccountAgeDays) && guard.minAccountAgeDays > 0) {
+    const accountCreated = user?.accountCreated;
+    if (!accountCreated || typeof accountCreated !== 'string' || !accountCreated.trim()) {
+      return {
+        pass: false,
+        reason: `accountCreated empty (need >=${guard.minAccountAgeDays}d age)`,
+      };
+    }
+    const created = new Date(accountCreated);
+    if (Number.isNaN(created.getTime())) {
+      return { pass: false, reason: `accountCreated invalid (${accountCreated})` };
+    }
+    const ageDays = (Date.now() - created.getTime()) / 86_400_000;
+    if (ageDays < guard.minAccountAgeDays) {
+      return {
+        pass: false,
+        reason: `account age ${ageDays.toFixed(1)}d < required ${guard.minAccountAgeDays}d`,
+      };
+    }
+  }
+
+  return { pass: true };
+}
+
+/**
  * Execute a single step and recurse into child steps.
  */
 async function runStep(page, step, profileId, user, vaultState) {
   if (step.type === 'random_preset') {
     await runRandomPreset(page, step, profileId, user, vaultState);
+    return;
+  }
+
+  // Per-step `guard` — onboarding-set / field-set / age-too-young checks.
+  // Runs BEFORE the chance roll so an ineligible profile never wastes a
+  // probability slot. Skipped guards also skip the nested steps[] subtree.
+  const gate = evaluateStepGuards(step, user);
+  if (!gate.pass) {
+    console.log(`Skipping: ${step.type} (guard: ${gate.reason})`);
+    if (vaultState) {
+      vaultLog.browser({ browserId: vaultState.browserId }, [
+        `Skipped: ${step.type} (guard: ${gate.reason})`,
+      ]);
+    }
     return;
   }
 
@@ -1001,8 +1099,13 @@ async function runBrowser(session, steps, options = {}) {
             email: selectedEmail,
             password: user?.facebookPassword || '',
           };
+          // userId + accountCreated are passed separately — they're allowed
+          // to be empty (accountCreated empty means "stamp on success") so
+          // they're excluded from the required-field check below.
+          reloginParams.userId = user?._id || user?.id || '';
+          reloginParams.accountCreated = user?.accountCreated || '';
           const missing = Object.entries(reloginParams)
-            .filter(([_, v]) => !v)
+            .filter(([k, v]) => !v && k !== 'accountCreated')
             .map(([k]) => k);
           if (missing.length) {
             const err = new Error(`missing signup fields on user record: ${missing.join(', ')}`);

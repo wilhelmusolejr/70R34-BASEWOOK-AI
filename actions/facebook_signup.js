@@ -329,6 +329,23 @@ module.exports = async function facebook_signup(page, params) {
     console.log('  [facebook_signup] Home button visible — account is logged in.');
   }
 
+  // Stamp accountCreated on the user record the first time an FB session
+  // confirms via home-feed landing. Idempotent — `params.accountCreated`
+  // carries the current DB value (injected by `injectUserParams`); if it's
+  // already non-empty we never overwrite. Covers both the fresh-signup
+  // path (facebook_signup as a top-level step) AND the re-login path
+  // (ensure_login → facebook_signup with skipPostSetup) so any FB-side
+  // confirmation tracks the account's first-seen time. Best-effort —
+  // PATCH errors are warned, never thrown.
+  if (!params.accountCreated && userId) {
+    try {
+      await updateProfile(userId, { accountCreated: new Date().toISOString() });
+      console.log('  [facebook_signup] stamped user.accountCreated');
+    } catch (err) {
+      console.warn(`  [facebook_signup] accountCreated PATCH failed: ${err.message}`);
+    }
+  }
+
   // Re-login mode: ensure_login uses this handler purely as a "fill the reg
   // form and confirm we land on the home feed" routine. Skip the status PATCH
   // and the post-signup /settings/bundled walk so we don't disturb an existing

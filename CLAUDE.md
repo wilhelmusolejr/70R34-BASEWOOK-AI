@@ -133,6 +133,70 @@ The `.filter(Boolean)` on `profiles[]` strips empty strings before the length ch
 
 API source caps at **500 profiles per status** (server limit). If a status ever grows past 500, this needs pagination (currently the API doesn't support `skip` on `/profiles`).
 
+### Per-step guards (`step.guard`)
+
+Each step can declare a `guard` block in the task JSON. The runner evaluates
+it in `runStep` **BEFORE** the existing `chance` roll — so an ineligible
+profile never wastes a probability slot. A skipped step also skips its
+nested `steps[]` subtree (same semantics as `chance`).
+
+Supported guard keys (all optional, all must pass when set):
+
+| Key | Pass condition |
+|---|---|
+| `ifOnboardingMissing: "<key>"` | `user.onboarding.<key>` is falsy. Used for idempotent setup steps — e.g. `setup_avatar` with `ifOnboardingMissing: "profileImageSetAt"` only runs when the avatar hasn't been stamped yet. |
+| `ifFieldEmpty: "<top-level field>"` | `user.<field>` is empty string / null / undefined / empty array. Used for things like `create_page` with `ifFieldEmpty: "pageUrl"` to skip when the user already has a Page. |
+| `minAccountAgeDays: N` | `(now - user.accountCreated) >= N days`. Empty / invalid `accountCreated` is treated as "age unknown" → guard FAILS (safe default — don't run age-gated actions until we can verify the age). |
+
+Order of evaluation per step:
+1. **`guard`** — skip with reason if any condition fails
+2. **`chance`** — if guard passed, roll the probability dice
+3. **Handler** — if both passed, run
+
+Console output on skip looks like:
+```
+Skipping: setup_avatar (guard: account age 1.4d < required 3d)
+Skipping: setup_about (guard: onboarding.aboutSetAt already stamped (2026-05-30T...))
+Skipping: create_page (chance=0.3)
+```
+
+Example task config combining all three:
+```json
+{
+  "type": "setup_avatar",
+  "guard": { "ifOnboardingMissing": "profileImageSetAt", "minAccountAgeDays": 3 },
+  "chance": 0.3
+}
+```
+Means: run only if avatar onboarding stamp is null AND the FB account is at least 3 days old AND a 30% dice roll passes.
+
+### `accountCreated` — the source for `minAccountAgeDays`
+
+`user.accountCreated` (top-level ISO string) is the canonical "FB account
+exists and we know when it was first confirmed" timestamp. Populated by:
+
+- **`facebook_signup`** — stamps `accountCreated` on home-feed landing
+  whenever the current value is empty. Covers both fresh-signup runs AND
+  the `ensure_login` re-auth path (which delegates to `facebook_signup`
+  with `skipPostSetup: true`). Idempotent — non-empty values are never
+  overwritten. The current value comes through as `params.accountCreated`
+  via `injectUserParams`; the action's check is purely local (no
+  pre-fetch).
+
+- **`backfill-account-created.js`** — for existing profiles whose
+  `accountCreated` was empty before the stamping was wired up. Walks
+  Active / Need Setup / Need Checking / Ready / Delivered profiles and
+  sets `accountCreated` to the **earliest** known FB-side timestamp:
+  `onboarding.privacyPublicAt` > `aboutSetAt` > `profileImageSetAt` >
+  `coverImageSetAt` > `lastSharedAt` > `user.createdAt` (last resort).
+  Profiles with none of those are skipped — no signal the FB account
+  exists. Dry-run by default; `--apply` to write. `--status=<name>` to
+  limit to one status.
+
+`accountCreated` is exposed as a top-level field on the user record
+(NOT inside `onboarding`) because it's "the account exists" rather than
+"a specific onboarding step succeeded".
+
 ### Cooldown gate
 
 `checkCooldown(user, task.cooldown)` in `runner.js`, called inside each worker **before `launchBrowsers`** so a skip costs ~0s instead of the ~15s browser-open overhead.
