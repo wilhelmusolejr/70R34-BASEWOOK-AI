@@ -82,34 +82,52 @@ module.exports = async function sharePosts(page, params) {
       await btn.click({ force: true });
       await humanWait(page, 1500, 2500);
 
-      // FB serves the share UI in two A/B-tested flows now:
-      //   (a) modal-direct: clicking the share button immediately opens the
-      //       "Send this to friends or post it on your profile" modal with
-      //       a [aria-label="Share now"] commit button.
-      //   (b) dropdown-first: clicking the share button opens a small menu
-      //       (Share to Feed / Share to your story / Send in Messenger /
-      //       More options / Copy link / Embed / Share via...). Picking
-      //       "Share to Feed" lands on the same modal as flow (a).
-      // Selector for the dropdown's "Share to Feed" row: the menu items
-      // are div[role="button"] with the visible label in a nested <span>.
-      // Poll both routes — whichever surfaces first wins this session.
-      const MODAL_SELECTOR = '[aria-label="Share now"]';
+      // FB serves the share UI in MULTIPLE A/B-tested variants. After
+      // clicking the share button, one of three things shows up:
+      //   (a) old-modal: a small "Send this to friends or post it on your
+      //       profile" modal with a [aria-label="Share now"] commit button.
+      //       Legacy UI, still served to some sessions.
+      //   (b) new-modal: FB's full "Write post" composer dialog
+      //       (aria-modal="true" + a Lexical editor + post preview +
+      //       "Add to your post" icons). Commit button is
+      //       [aria-label="Share"] (no "now") scoped inside the modal.
+      //   (c) dropdown-first: a small menu (Share to Feed / Share to
+      //       your story / Send in Messenger / More options / Copy link
+      //       / Embed / Share via...). Picking "Share to Feed" then
+      //       lands on EITHER (a) or (b) depending on the session.
+      // Poll all three — whichever surfaces first decides the path.
+      // Selectors are kept separate so adding a future variant only
+      // needs another row in the poll loop.
+      const OLD_MODAL_BTN = '[aria-label="Share now"]';
+      const NEW_MODAL_BTN =
+        'div[aria-modal="true"] div[role="button"][aria-label="Share"]';
       const SHARE_TO_FEED_XPATH =
         'xpath=//div[@role="button"][.//span[normalize-space(text())="Share to Feed"]]';
 
-      let route = null;
-      const deadlineMs = Date.now() + 8000;
-      while (Date.now() < deadlineMs && !route) {
-        if (await page.locator(MODAL_SELECTOR).first().isVisible().catch(() => false)) {
-          route = 'modal';
-          break;
+      // Helper: probe the three landing states; returns 'old' | 'new' |
+      // 'dropdown' | null. Used twice — once on the first click, and
+      // again after dropdown's "Share to Feed" click (which only opens
+      // a modal, not another dropdown).
+      const probeRoute = async (deadline, includeDropdown) => {
+        while (Date.now() < deadline) {
+          if (await page.locator(OLD_MODAL_BTN).first().isVisible().catch(() => false)) {
+            return 'old';
+          }
+          if (await page.locator(NEW_MODAL_BTN).first().isVisible().catch(() => false)) {
+            return 'new';
+          }
+          if (
+            includeDropdown &&
+            (await page.locator(SHARE_TO_FEED_XPATH).first().isVisible().catch(() => false))
+          ) {
+            return 'dropdown';
+          }
+          await new Promise((r) => setTimeout(r, 200));
         }
-        if (await page.locator(SHARE_TO_FEED_XPATH).first().isVisible().catch(() => false)) {
-          route = 'dropdown';
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 200));
-      }
+        return null;
+      };
+
+      let route = await probeRoute(Date.now() + 8000, true);
 
       if (route === 'dropdown') {
         console.log(`  Post ${shared + 1}: dropdown opened, picking "Share to Feed"`);
@@ -120,14 +138,18 @@ module.exports = async function sharePosts(page, params) {
           .click({ force: true })
           .catch(() => {});
         await humanWait(page, 800, 1500);
+        // After the "Share to Feed" click only a modal can appear next,
+        // so we don't re-probe for dropdown.
+        route = await probeRoute(Date.now() + 8000, false);
       }
 
-      // Final fetch of the modal's Share-now button handle — the downstream
-      // code uses .boundingBox() + .click() on it. Modal-direct flow gives
-      // it immediately; dropdown flow gives it shortly after the click above.
-      const modalShareBtn = await page
-        .waitForSelector(MODAL_SELECTOR, { timeout: 8000 })
-        .catch(() => null);
+      // Resolve the commit-button selector for the detected modal flavor.
+      // If neither modal showed (route === null), we skip the post.
+      const commitSelector =
+        route === 'old' ? OLD_MODAL_BTN : route === 'new' ? NEW_MODAL_BTN : null;
+      const modalShareBtn = commitSelector
+        ? await page.waitForSelector(commitSelector, { timeout: 3000 }).catch(() => null)
+        : null;
 
       if (!modalShareBtn) {
         console.log(`  Post ${shared + 1}: modal didn't open, skipping`);
@@ -136,6 +158,7 @@ module.exports = async function sharePosts(page, params) {
         attempts++;
         continue;
       }
+      console.log(`  Post ${shared + 1}: ${route}-modal opened`);
 
       // Walk up from the share button to find a post container, then extract
       // text/image from multiple known shapes. The closest('[aria-posinset]')
@@ -207,7 +230,17 @@ module.exports = async function sharePosts(page, params) {
       if (useApi) message = await generateMessage(userIdentity, postContext);
 
       if (message) {
-        const textInput = await page.$('[aria-placeholder="Say something about this..."]');
+        // Old modal uses a plain textarea with placeholder "Say something
+        // about this...". New "Write post" modal uses a Lexical editor
+        // (data-lexical-editor="true") with a dynamic per-user placeholder
+        // like "What's on your mind, Renzo?". Scoped to the modal dialog
+        // so we don't accidentally type into FB's sidebar composer that
+        // can also mount a Lexical editor in the background.
+        const textInput =
+          (await page.$('[aria-placeholder="Say something about this..."]')) ||
+          (await page.$(
+            'div[aria-modal="true"] div[role="textbox"][data-lexical-editor="true"]'
+          ));
         if (textInput) {
           await textInput.click();
           await humanWait(page, 300, 600);
