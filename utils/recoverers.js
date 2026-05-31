@@ -38,6 +38,60 @@ function safeUrl(page) {
   }
 }
 
+/**
+ * Wait for a `div[role="button"]` whose visible span text matches `text`
+ * exactly (after trim), then click it. Returns true on success, false if
+ * the button never appears within `waitMs`. Adds a reading delay between
+ * detection and click — instant-clicking is a bot tell.
+ *
+ * `text` is the visible label (e.g. "Continue", "Agree", "Accept and continue").
+ * XPath uses normalize-space + a contains() fallback so trailing whitespace
+ * or wrapper elements don't defeat the match.
+ */
+async function waitClickByText(page, text, { waitMs = 15000, readMin = 2000, readMax = 3500 } = {}) {
+  const xpath =
+    `xpath=//div[@role="button"][.//span[normalize-space(text())="${text}"]] | ` +
+    `//div[@role="button"][.//span[contains(normalize-space(text()),"${text}")]]`;
+  const btn = page.locator(xpath).first();
+  const visible = await btn.isVisible({ timeout: waitMs }).catch(() => false);
+  if (!visible) {
+    console.log(`  [recovery] button with text "${text}" not found within ${waitMs}ms`);
+    return false;
+  }
+  await humanWait(page, readMin, readMax);
+  try {
+    await btn.click({ force: true });
+    console.log(`  [recovery] clicked "${text}"`);
+    return true;
+  } catch (err) {
+    console.warn(`  [recovery] click on "${text}" threw: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Wait + click a `div[aria-label="..."]` (typically with role="button").
+ * Same reading-delay semantics as `waitClickByText`. Used for buttons that
+ * FB labels via aria-label rather than visible text (e.g. "Get started").
+ */
+async function waitClickByLabel(page, label, { waitMs = 15000, readMin = 2000, readMax = 3500 } = {}) {
+  const btn = page.locator(`div[aria-label="${label}"][role="button"]`).first();
+  const visible = await btn.isVisible({ timeout: waitMs }).catch(() => false);
+  if (!visible) {
+    console.log(`  [recovery] button with aria-label="${label}" not found within ${waitMs}ms`);
+    return false;
+  }
+  await humanWait(page, readMin, readMax);
+  try {
+    await btn.click({ force: true });
+    console.log(`  [recovery] clicked aria-label="${label}"`);
+    return true;
+  } catch (err) {
+    console.warn(`  [recovery] click on aria-label="${label}" threw: ${err.message}`);
+    return false;
+  }
+}
+
 const RECOVERERS = [
   // --------------------------------------------------------------------------
   // EU cookie-consent screen. FB redirects mid-navigation to
@@ -81,21 +135,19 @@ const RECOVERERS = [
   },
 
   // --------------------------------------------------------------------------
-  // EU "pay-or-consent" ad-free subscription upsell. FB intercepts every
-  // navigation with `/privacy/consent/?flow=ad_free_subscription` until the
-  // profile completes a 2-step click sequence (Get started → Use Facebook
-  // with ads). We don't yet implement that walk, so for now the matcher
-  // returns 'unfixable' to signal the runner: skip remaining retries on
-  // this step, soft-fail immediately, move on. Without this, every step
-  // after the redirect burns 3×60s of retry before giving up.
+  // EU "pay-or-consent" ad-free subscription funnel. FB intercepts every
+  // navigation with `/privacy/consent/?flow=ad_free_subscription` until
+  // the profile completes a 4-step click sequence. Per-profile this only
+  // needs to fire ONCE — FB remembers the choice indefinitely.
   //
-  // TODO: implement the multi-step click sequence:
-  //   1. Click div[aria-label="Get started"]
-  //   2. Wait for next page
-  //   3. Click the "Use Facebook with ads" / Italian "Continua con annunci"
-  //      button (selector TBD — needs HTML capture)
-  //   4. Wait for redirect off /privacy/consent/
-  // Per-profile this only needs to fire ONCE — FB remembers the choice.
+  // Click sequence (captured from real session HTML in /fix on 2026-05-31):
+  //   1. aria-label="Get started"
+  //   2. Pick the "Use free of charge with ads" option → "Continue"
+  //   3. "Agree" (ads-data-processing info screen)
+  //   4. "OK" (ad-experience review)
+  // Then FB redirects either back to the original target OR straight into
+  // the second consent funnel (data-settings-review below). The 3-attempt
+  // retry budget handles both back-to-back.
   // --------------------------------------------------------------------------
   {
     name: 'ad-free-subscription',
@@ -103,11 +155,82 @@ const RECOVERERS = [
       const u = safeUrl(page);
       return u.includes('/privacy/consent/') && u.includes('flow=ad_free_subscription');
     },
-    apply: async () => {
-      console.log(
-        '  [recovery:ad-free-subscription] EU pay-or-consent modal — no click sequence implemented yet, flagging unfixable'
-      );
-      return 'unfixable';
+    apply: async (page) => {
+      // Step 1 — "Get started"
+      if (!(await waitClickByLabel(page, 'Get started', { readMin: 2500, readMax: 4500 }))) {
+        return false;
+      }
+
+      // Step 2 — pick "Use free of charge with ads" then "Continue"
+      // FB renders the radio with the option label as a child <span>. Clicking
+      // the visible row label triggers the radio selection.
+      await waitClickByText(page, 'Use free of charge with ads', {
+        waitMs: 15000,
+        readMin: 3000,
+        readMax: 5000,
+      });
+      if (!(await waitClickByText(page, 'Continue', { readMin: 1500, readMax: 2500 }))) {
+        return false;
+      }
+
+      // Step 3 — "Agree" on the data-processing info screen
+      if (!(await waitClickByText(page, 'Agree', { readMin: 3000, readMax: 5000 }))) {
+        return false;
+      }
+
+      // Step 4 — "OK" on the ad-experience review
+      if (!(await waitClickByText(page, 'OK', { readMin: 2000, readMax: 3500 }))) {
+        return false;
+      }
+
+      // Wait for the URL to leave ad_free_subscription. FB may chain into
+      // consent_next_3pd (handled by the next recoverer on the next retry),
+      // OR redirect back to the original target. Either way is success.
+      try {
+        await page.waitForURL((u) => !String(u).includes('flow=ad_free_subscription'), {
+          timeout: 30000,
+        });
+      } catch (_) {}
+      await humanWait(page, 1500, 2500);
+      return true;
+    },
+  },
+
+  // --------------------------------------------------------------------------
+  // GDPR "Required: Review Your Data Settings" funnel — FB's second consent
+  // that often appears right after ad-free-subscription. URL has
+  // `/privacy/consent/?flow=consent_next_3pd`. 3-step click sequence:
+  //   1. aria-label="Get started"
+  //   2. "Accept and continue"
+  //   3. "Done"
+  // After this FB returns to normal navigation. Like ad-free, fires only
+  // once per profile lifetime.
+  // --------------------------------------------------------------------------
+  {
+    name: 'data-settings-review',
+    matches: (page) => {
+      const u = safeUrl(page);
+      return u.includes('/privacy/consent/') && u.includes('flow=consent_next_3pd');
+    },
+    apply: async (page) => {
+      if (!(await waitClickByLabel(page, 'Get started', { readMin: 2500, readMax: 4500 }))) {
+        return false;
+      }
+      if (
+        !(await waitClickByText(page, 'Accept and continue', { readMin: 3000, readMax: 5000 }))
+      ) {
+        return false;
+      }
+      if (!(await waitClickByText(page, 'Done', { readMin: 1500, readMax: 2500 }))) {
+        return false;
+      }
+      try {
+        await page.waitForURL((u) => !String(u).includes('flow=consent_next_3pd'), {
+          timeout: 30000,
+        });
+      } catch (_) {}
+      await humanWait(page, 1500, 2500);
+      return true;
     },
   },
 

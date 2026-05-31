@@ -1538,23 +1538,49 @@ retry behavior:
    waits for the URL to leave `/privacy/consent/`. Matcher requires
    `flow=user_cookie_choice_v2` explicitly so it doesn't bleed into the
    ad-free flow below.
-2. **`ad-free-subscription`** — EU "pay-or-consent" landing page at
-   `/privacy/consent/?flow=ad_free_subscription`. The visible CTA is
-   "Get started" which begins a multi-step funnel to either pay for
-   ad-free or "Use Facebook with ads". We don't yet implement that
-   click sequence, so the recoverer returns `'unfixable'` — runner
-   skips remaining retries and the step soft-fails fast (≈5s instead
-   of 3×60s burn per step). When the click sequence is later
-   implemented, change the return to `true`. Per-profile this only
-   needs to fire ONCE — FB remembers the choice indefinitely.
-3. **`soft-checkpoint`** — URL contains `/checkpoint/`. Clicks the
+2. **`ad-free-subscription`** — EU "pay-or-consent" funnel at
+   `/privacy/consent/?flow=ad_free_subscription`. 4-step click sequence
+   captured from real session HTML:
+   1. `aria-label="Get started"`
+   2. Select "Use free of charge with ads" → `Continue`
+   3. `Agree` (data-processing info screen)
+   4. `OK` (ad-experience review)
+   Then waits for the URL to leave `flow=ad_free_subscription`. Each
+   click has its own reading delay (1.5-5s) calibrated to the modal
+   text length. Per-profile this fires ONCE — FB remembers the choice
+   indefinitely.
+3. **`data-settings-review`** — GDPR "Required: Review Your Data
+   Settings" funnel at `/privacy/consent/?flow=consent_next_3pd`.
+   Often appears right after `ad-free-subscription` finishes; the
+   3-attempt step-retry budget handles both back-to-back. 3-step
+   click sequence:
+   1. `aria-label="Get started"`
+   2. `Accept and continue`
+   3. `Done`
+   Then waits for the URL to leave `flow=consent_next_3pd`. Fires
+   once per profile lifetime.
+4. **`soft-checkpoint`** — URL contains `/checkpoint/`. Clicks the
    `div[aria-label="Dismiss"][role="button"]` after a 3-5s reading delay.
    Returns false on hard checkpoints (no Dismiss button — banned /
    verification required), letting `runner.js`'s checkpoint
    short-circuit kick in.
-4. **`not-now-modal`** — generic `div[role="button"][aria-label="Not now"]`
+5. **`not-now-modal`** — generic `div[role="button"][aria-label="Not now"]`
    probe. Catches FB's intermittent upsell modals after a 1.2-2.5s
    reading delay.
+
+**Multi-step recoverers use two helpers** (`utils/recoverers.js`):
+
+- `waitClickByLabel(page, ariaLabel, { waitMs, readMin, readMax })` —
+  for buttons FB labels via aria-label (e.g. "Get started").
+- `waitClickByText(page, visibleSpanText, { waitMs, readMin, readMax })` —
+  for buttons FB renders as `div[role="button"]` with a child `<span>`
+  bearing the visible label (e.g. "Continue", "Agree", "Accept and
+  continue"). XPath uses `normalize-space + contains()` fallback so
+  trailing whitespace doesn't defeat the match.
+
+Both add a reading delay between detection and click, log a clear
+no-match line on timeout, and never throw — return false on miss so
+the caller can decide whether to abort the recovery or continue.
 
 **Reading delays are calibrated to the modal.** A real user reads the
 content before clicking — instant-click is a strong bot tell. Each

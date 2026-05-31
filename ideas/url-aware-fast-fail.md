@@ -102,22 +102,18 @@ attempts × 60s on every step until end-of-task.
 
 ## Future companion: multi-step ad-free-subscription recovery
 
-When we want to actually handle this consent flow (not just fast-fail):
+**Done 2026-05-31 — see commit history for `utils/recoverers.js`.** Two
+multi-step recoverers landed once we captured the real flow HTML:
 
-```
-1. URL matches /privacy/consent/?flow=ad_free_subscription
-2. Click "Get started"  (aria-label="Get started", confirmed from dump)
-3. Wait for next page to load
-4. Look for "Use Facebook with ads" / Italian "Continua con gli annunci"
-   (selector TBD — need to capture HTML once we click through)
-5. Click it
-6. Wait for redirect off /privacy/consent/
-7. Return true (recovered, retry the original step)
-```
+- `ad-free-subscription` — 4 clicks: Get started → "Use free of charge
+  with ads" → Continue → Agree → OK
+- `data-settings-review` — 3 clicks: Get started → Accept and continue →
+  Done (covers the second consent funnel that often chains after the
+  first)
 
-Per-profile this only needs to fire ONCE — FB remembers the choice
-indefinitely. So a fleet run on the first day would consume ~10s per
-profile for this dance, then never again.
+Per-profile both fire ONCE — FB remembers the choices indefinitely. A
+fleet run on the first day consumes ~15-20s per affected profile, then
+never again.
 
 ## Related observation
 
