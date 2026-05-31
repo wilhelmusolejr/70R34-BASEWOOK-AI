@@ -31,6 +31,21 @@ async function isPublicPrivacyCurrent(page) {
   return firstRadio.evaluate((el) => el.checked || el.hasAttribute('checked')).catch(() => false);
 }
 
+/**
+ * Pre-flight check: is the account ALREADY on Public privacy?
+ *
+ * Uses ONLY the "Public · Your current setting" text — that's the one signal
+ * that reflects the user's stored setting. The first-radio-checked fallback
+ * used by `isPublicPrivacyCurrent` would false-positive here because FB's
+ * walkthrough defaults the radio to Public regardless of the current value
+ * (you can see this when the page labels "Custom · Your current setting" on
+ * a different row while Public's radio is highlighted).
+ */
+async function isAlreadyPublic(page) {
+  const currentLabel = page.getByText(/Public\s*.\s*Your current setting/).first();
+  return currentLabel.isVisible({ timeout: 2000 }).catch(() => false);
+}
+
 async function selectPublicPrivacy(page) {
   if (await isPublicPrivacyCurrent(page)) {
     console.log('  [setup_privacy] Public privacy is already current.');
@@ -72,7 +87,20 @@ async function selectPublicPrivacyWithRetry(page) {
 }
 
 module.exports = async function setup_privacy(page, params) {
-  const { userId = '' } = params || {};
+  const { userId = '', privacyPublicAt = '' } = params || {};
+
+  // Pre-flight skip: if the profile's onboarding already has a privacyPublicAt
+  // timestamp, this action has run successfully before. Don't waste the 1-2
+  // minutes navigating the bundled walkthrough — just move on. The runner's
+  // setup_privacy injector pulls this value from the user record so the check
+  // reflects current DB state, not stale params.
+  if (privacyPublicAt) {
+    console.log(
+      `  [setup_privacy] privacyPublicAt already stamped (${privacyPublicAt}) — skipping.`
+    );
+    return;
+  }
+
   console.log('  [setup_privacy] navigating to /settings/bundled...');
   await page.goto('https://www.facebook.com/settings/bundled', {
     waitUntil: 'domcontentloaded',
@@ -82,17 +110,49 @@ module.exports = async function setup_privacy(page, params) {
   });
   await humanWait(page, 5000, 10000);
 
+  // Skip walkthrough if the account is already on Public. Walking it anyway
+  // hits the Next/Confirm flow variance that fails ~half the time on already-
+  // configured accounts (FB renders a different layout). Still stamps the
+  // onboarding so downstream "did this account complete setup?" queries get
+  // a positive answer — re-stamps are documented as harmless.
+  if (await isAlreadyPublic(page)) {
+    console.log('  [setup_privacy] Public privacy is already current — skipping walkthrough.');
+    if (userId) await setOnboarding(userId, 'privacyPublicAt');
+    return;
+  }
+
+  // Public radio click is the strict step — this is what actually changes the
+  // stored privacy. If it fails, throw and skip the onboarding stamp so the
+  // profile gets retried tomorrow instead of being marked "done" with stale
+  // privacy state.
   console.log('  [setup_privacy] verifying Public privacy...');
   await selectPublicPrivacyWithRetry(page);
   await humanWait(page, 5000, 10000);
 
+  // Next + Confirm are best-effort acknowledgment UI. FB's bundled walkthrough
+  // renders these inconsistently — sometimes a 2-page Public→Next→Confirm
+  // flow, sometimes a different layout where these buttons don't appear in
+  // the shape we expect. If either is missing after a short timeout, log a
+  // warning and continue — the Public click above already applied the change.
   console.log('  [setup_privacy] clicking Next...');
-  await clickHuman(page, page.locator('div[aria-label="Next"]').first(), 'Next');
-  await humanWait(page, 5000, 10000);
+  try {
+    await clickHuman(page, page.locator('div[aria-label="Next"]').first(), 'Next');
+    await humanWait(page, 5000, 10000);
+  } catch (err) {
+    console.warn(
+      `  [setup_privacy] Next button not actionable — continuing (Public radio already selected): ${err.message}`
+    );
+  }
 
   console.log('  [setup_privacy] clicking Confirm...');
-  await clickHuman(page, page.locator('div[aria-label="Confirm"]').first(), 'Confirm');
-  await humanWait(page, 5000, 10000);
+  try {
+    await clickHuman(page, page.locator('div[aria-label="Confirm"]').first(), 'Confirm');
+    await humanWait(page, 5000, 10000);
+  } catch (err) {
+    console.warn(
+      `  [setup_privacy] Confirm button not actionable — continuing (Public radio already selected): ${err.message}`
+    );
+  }
 
   console.log('  [setup_privacy] privacy setup complete.');
 

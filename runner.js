@@ -15,6 +15,7 @@ const {
   runInSession,
   addStripId,
   buildDisplayName,
+  buildProfileFolderName,
   getProfileLogDir,
 } = require('./utils/sessionLog');
 const { initRunLogDir } = require('./utils/runLogDir');
@@ -66,21 +67,34 @@ function formatElapsed(ms) {
 
 /**
  * Build the tracker-log note body.
- * On success: "SUCCESS (8m 44s)\n1. <chain>\n2. <chain>..."
- * On failure: "FAIL at <type> (1m 27s): <message>\n1. <completed chain>..."
- * Elapsed is omitted if elapsedMs is falsy.
+ *   failure       — abort-level failure (checkpoint / credentials rejected /
+ *                   pre-flight / ensure_login). Whole session aborted.
+ *   softFailures  — non-fatal step failures the runner continued past.
+ *
+ * Header: FAIL > PARTIAL > SUCCESS (abort wins). Completed chains listed,
+ * then per-step soft-failure messages so triage can see what got skipped.
  */
-function buildTrackerNote(completed, failure, elapsedMs) {
+function buildTrackerNote(completed, { failure, softFailures = [] } = {}, elapsedMs) {
   const lines = [];
   const elapsed = elapsedMs ? ` (${formatElapsed(elapsedMs)})` : '';
   if (failure) {
     const where = failure.step?.type ? ` at ${failure.step.type}` : '';
     const msg = failure.error?.message || String(failure.error || 'unknown error');
     lines.push(`FAIL${where}${elapsed}: ${msg}`);
+  } else if (softFailures.length > 0) {
+    lines.push(`PARTIAL (${softFailures.length} failed)${elapsed}`);
   } else {
     lines.push(`SUCCESS${elapsed}`);
   }
   completed.forEach((chain, i) => lines.push(`${i + 1}. ${chain}`));
+  if (softFailures.length > 0) {
+    lines.push('');
+    lines.push('Failed steps:');
+    softFailures.forEach(({ step, error }) => {
+      const msg = error?.message || String(error || 'unknown error');
+      lines.push(`- ${step?.type || 'unknown'}: ${msg}`);
+    });
+  }
   return lines.join('\n');
 }
 
@@ -172,6 +186,16 @@ async function runWithRetry(fn, profileId, stepType, page) {
     } catch (err) {
       lastError = err;
 
+      // Capture the actual broken-state forensics BEFORE checkpoint detection
+      // or tryRecover mutates the page (dismissing modals, navigating off the
+      // failure URL, etc.). One dump per error — `err.dumped` survives across
+      // retry attempts so we never write the same incident twice. Centralizing
+      // here means individual actions don't need their own try/catch+dump.
+      if (!err.dumped) {
+        await dumpStepFailure(page, stepType, err, attempt);
+        err.dumped = true;
+      }
+
       // Checkpoint detection — FB has flagged this profile (login challenge,
       // ID verification, etc.). Retrying won't help and burns cooldown time.
       // Mark the error so runBrowser can short-circuit the whole task.
@@ -220,25 +244,22 @@ async function runWithRetry(fn, profileId, stepType, page) {
     }
   }
 
-  // Final failure dump — safety net for actions that don't dump themselves.
-  // Marker on err prevents double-dumps when the action already captured one.
-  if (lastError && !lastError.dumped) {
-    await dumpStepFailure(page, stepType, lastError);
-    lastError.dumped = true;
-  }
-
   throw lastError;
 }
 
 /**
  * Generic step-failure dump. Captures HTML + full-page screenshot to the
- * per-profile run-scoped folder so every failure has forensics, regardless
- * of whether the action's internal dumpFailure ran. The error message is
- * embedded in the HTML comment alongside the URL.
+ * per-profile run-scoped folder so every failure has forensics. Called from
+ * runWithRetry's catch on the FIRST throw (before tryRecover mutates the
+ * page) so the dump is the actual broken state, not a post-recovery view.
+ *
+ * `attempt` (optional) is folded into the filename so concurrent retries on
+ * the same step don't overwrite each other — though in practice only the
+ * first attempt dumps (err.dumped flag).
  *
  * Best-effort — swallows its own errors. Caller throws regardless.
  */
-async function dumpStepFailure(page, stepType, err) {
+async function dumpStepFailure(page, stepType, err, attempt) {
   try {
     if (!page) return;
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -250,7 +271,8 @@ async function dumpStepFailure(page, stepType, err) {
       if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
     } catch (_) {}
 
-    const baseName = `fail-${safeStep}-${ts}`;
+    const attemptTag = attempt ? `-attempt${attempt}` : '';
+    const baseName = `fail-${safeStep}${attemptTag}-${ts}`;
     const htmlPath = path.join(targetDir, `${baseName}.html`);
     const pngPath = path.join(targetDir, `${baseName}.png`);
 
@@ -260,7 +282,7 @@ async function dumpStepFailure(page, stepType, err) {
     } catch (_) {}
 
     const errMsg = (err && err.message) || String(err || 'unknown error');
-    const header = `<!-- step: ${stepType} -->\n<!-- url: ${url} -->\n<!-- error: ${errMsg.replace(/-->/g, '--&gt;')} -->\n`;
+    const header = `<!-- step: ${stepType} -->\n<!-- attempt: ${attempt || '?'} -->\n<!-- url: ${url} -->\n<!-- error: ${errMsg.replace(/-->/g, '--&gt;')} -->\n`;
 
     try {
       const html = await page.content();
@@ -286,6 +308,40 @@ function safePageUrl(page) {
     return page.url();
   } catch (_) {
     return '';
+  }
+}
+
+/**
+ * Rename the per-profile log folder after the session ends so scanning the
+ * `profiles/` dir at a glance shows which ones passed and which didn't:
+ *
+ *   profiles/SUCCESS - Marco Rossi - 6a020462/
+ *   profiles/FAIL - Anna Bianchi - 6a02943a/
+ *
+ * Best-effort — swallows errors so a Windows file-lock or already-renamed
+ * collision can never break the run. The original folder name format is
+ * `{Name}-{shortId}` from buildProfileFolderName; we expand to spaces and
+ * prefix the status.
+ */
+function renameProfileFolderWithStatus({ runLogDir, displayName, userId, status }) {
+  try {
+    if (!runLogDir || !displayName) return;
+    const oldName = buildProfileFolderName(displayName, userId);
+    const oldPath = path.join(runLogDir, 'profiles', oldName);
+    if (!fs.existsSync(oldPath)) return;
+
+    const safeName = String(displayName).replace(/[\\/:*?"<>|]/g, '_').trim() || 'unknown';
+    const shortId = userId ? String(userId).slice(0, 8) : '';
+    const newName =
+      shortId && safeName !== String(userId)
+        ? `${status} - ${safeName} - ${shortId}`
+        : `${status} - ${safeName}`;
+    const newPath = path.join(runLogDir, 'profiles', newName);
+    if (oldPath === newPath) return;
+
+    fs.renameSync(oldPath, newPath);
+  } catch (err) {
+    console.warn(`Failed to rename profile folder to "${status}": ${err.message}`);
   }
 }
 
@@ -458,10 +514,18 @@ function injectUserParams(steps, user) {
       s.params = next;
     }
 
-    if (step.type === 'setup_privacy' && !(step.params && step.params.userId)) {
+    if (step.type === 'setup_privacy') {
+      // Inject userId AND the current onboarding.privacyPublicAt stamp so the
+      // action can short-circuit when this profile is already marked done.
+      // Explicit params win for both — handy for testing the walkthrough on
+      // an already-stamped account.
       s.params = {
         ...(step.params || {}),
-        userId: user._id || user.id || '',
+        userId: step.params?.userId || user._id || user.id || '',
+        privacyPublicAt:
+          step.params?.privacyPublicAt !== undefined
+            ? step.params.privacyPublicAt
+            : user.onboarding?.privacyPublicAt || '',
       };
     }
 
@@ -849,6 +913,7 @@ async function runBrowser(session, steps, options = {}) {
 
   const injectedSteps = user ? injectUserParams(steps, user) : steps;
   const completed = [];
+  const softFailures = [];
   let failure = null;
 
   try {
@@ -952,6 +1017,14 @@ async function runBrowser(session, steps, options = {}) {
     } catch (err) {
       err.noRetry = true;
       failure = { step: { type: 'ensure_login' }, error: err };
+      // ensure_login is called directly (not via runWithRetry) so the central
+      // dump in runWithRetry never sees it — fire one manually to keep this
+      // path's forensics on par. `err.dumped` guards against double-dumps if
+      // an inner action (facebook_signup) already captured one.
+      if (!err.dumped) {
+        await dumpStepFailure(page, 'ensure_login', err);
+        err.dumped = true;
+      }
       if (vaultState) {
         vaultLog.browser({ browserId: vaultState.browserId }, [
           { level: 'error', msg: `Auto re-login failed: ${err.message}` },
@@ -971,15 +1044,21 @@ async function runBrowser(session, steps, options = {}) {
         await runStep(page, step, profileId, user, vaultState);
         completed.push(describeStepChain(step));
       } catch (err) {
-        failure = { step, error: err };
+        const isCheckpoint = !!(err && err.checkpoint);
+        const isCredRejected = !!(err && err.credentialsRejected);
+        const isAbort = isCheckpoint || isCredRejected;
+
         if (vaultState) {
-          const msg =
-            err && err.checkpoint
-              ? `Checkpoint hit during ${step.type} — aborting profile`
-              : `Step ${step.type} failed: ${err.message}`;
+          const msg = isCheckpoint
+            ? `Checkpoint hit during ${step.type} — aborting profile`
+            : isCredRejected
+              ? `Credentials rejected during ${step.type} — aborting profile`
+              : `Step ${step.type} failed: ${err.message} — continuing to next step`;
           vaultLog.browser({ browserId: vaultState.browserId }, [{ level: 'error', msg }]);
         }
-        if (err && err.checkpoint) {
+
+        if (isCheckpoint) {
+          failure = { step, error: err };
           console.warn(
             `Checkpoint hit during ${step.type} — skipping remaining steps for this profile`
           );
@@ -998,6 +1077,7 @@ async function runBrowser(session, steps, options = {}) {
               );
             }
           }
+          throw err;
         }
 
         // Credential rejection (e.g. outlook_login got "That password is
@@ -1006,7 +1086,8 @@ async function runBrowser(session, steps, options = {}) {
         // "Need Checking" — same status the checkpoint branch sets — because
         // that value is whitelisted server-side. The tracker-log entry written
         // in the finally block carries the specific reason for triage.
-        if (err && err.credentialsRejected) {
+        if (isCredRejected) {
+          failure = { step, error: err };
           console.warn(
             `Credentials rejected during ${step.type} — flagging profile and skipping remaining steps`
           );
@@ -1021,14 +1102,22 @@ async function runBrowser(session, steps, options = {}) {
               );
             }
           }
+          throw err;
         }
-        throw err;
+
+        // Non-abort failure: record + carry on to the next top-level step.
+        // The step's own retry budget already exhausted inside runWithRetry;
+        // a single failure shouldn't waste the rest of the session.
+        console.warn(
+          `Step ${step.type} failed (non-fatal): ${err.message} — continuing to next step`
+        );
+        softFailures.push({ step, error: err });
       }
     }
   } finally {
     const userId = user?._id || user?.id || '';
     const elapsedMs = Date.now() - browserStartedAt;
-    const note = buildTrackerNote(completed, failure, elapsedMs);
+    const note = buildTrackerNote(completed, { failure, softFailures }, elapsedMs);
     await persistTrackerLog(userId, note);
 
     // Per log.md "Ending a profile" — final /browser MUST fire on both success
@@ -1037,7 +1126,9 @@ async function runBrowser(session, steps, options = {}) {
     if (vaultState) {
       const endLogs = failure
         ? ['profile failed', 'browser:offline']
-        : ['profile complete', 'browser:offline'];
+        : softFailures.length > 0
+          ? [`profile complete (${softFailures.length} non-fatal failure(s))`, 'browser:offline']
+          : ['profile complete', 'browser:offline'];
       vaultLog.browser(
         { browserId: vaultState.browserId, online: false, currentStepPath: 'done' },
         endLogs
@@ -1211,6 +1302,16 @@ async function runTask(task) {
         };
       }
       saveState(taskId, userIds, state);
+
+      // Tag the per-profile folder with SUCCESS/FAIL so the profiles/ listing
+      // shows outcomes at a glance. Runs after runInSession has exited (no
+      // more file handles into the folder), best-effort on Windows.
+      renameProfileFolderWithStatus({
+        runLogDir,
+        displayName,
+        userId,
+        status: result?.status === 'fulfilled' ? 'SUCCESS' : 'FAIL',
+      });
     }
   }
 

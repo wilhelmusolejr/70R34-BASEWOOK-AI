@@ -336,6 +336,15 @@ is empty (test rigs without a real user record), the stamp is silently skipped.
 to the latest successful run — harmless re-state, useful for "ran-recently"
 queries against the DB.
 
+**Backfill script — `backfill-onboarding.js`.** One-shot utility that
+walks every Active profile's `trackerLog` and stamps missing
+`onboarding.*` keys based on which top-level steps appear in the
+numbered list of any past entry (the list shows COMPLETED steps even
+on FAIL entries — FAIL just means a later step crashed). Use after
+wiring a new onboarding key so existing profiles don't appear "not yet
+done" forever. Idempotent — re-running doesn't re-stamp already-set
+keys.
+
 ## Playwright conventions (anti-detection)
 
 - **Feed scroll:** `page.mouse.wheel(0, 500)`. NEVER `window.scrollTo` or `element.scrollIntoView` on the feed.
@@ -639,12 +648,39 @@ Or run standalone for accounts that skipped the walkthrough.
 Flow:
 ```
 goto facebook.com/settings/bundled
-  → select "Public" radio (3 attempts, skip if already current)
-  → click Next
-  → click Confirm
+  → if "Public · Your current setting" label visible → stamp + return
+  → else: select "Public" radio (3 attempts, throws if all fail)
+  → try Next  (soft — warn + continue if missing)
+  → try Confirm (soft — warn + continue if missing)
+  → stamp privacyPublicAt
 ```
 
-No params. No auto-injection.
+**Pre-flight skip via onboarding.** `injectUserParams` reads
+`user.onboarding.privacyPublicAt` and passes it as `params.privacyPublicAt`.
+When the value is set, the action logs `privacyPublicAt already stamped
+(<ts>) — skipping` and returns immediately — no /settings/bundled nav, no
+walkthrough, ~90s saved per re-run. Pass an explicit empty string in the
+step's params to force re-run on a stamped account.
+
+**Strict-vs-soft step boundaries.** The Public-radio click is the only
+strict step (throws on failure — it's what actually changes the stored
+privacy). Next + Confirm are best-effort acknowledgment UI; FB renders
+them inconsistently across account states, so missing them is logged as a
+warning and execution continues. The `setOnboarding('privacyPublicAt')`
+stamp fires only after the radio click + (soft) acknowledgments — so
+re-running an action that crashed on the radio still gets retried
+tomorrow instead of being marked "done" with stale privacy state.
+
+**Already-public short-circuit.** Detects "Public · Your current setting"
+label on the bundled page — this is the ONLY signal of the stored value.
+The first-radio-checked fallback that `selectPublicPrivacy` uses internally
+would false-positive here because FB's walkthrough defaults the radio to
+Public regardless of the current setting (you can see this when the page
+labels "Custom · Your current setting" on a different row while Public's
+radio is highlighted). On match, stamps `privacyPublicAt` and returns —
+already-configured accounts skip the buggy Next/Confirm flow entirely.
+
+Auto-injected: `userId`, `privacyPublicAt`.
 
 ## Cookie consent popup — EU/IT proxies
 
@@ -1867,12 +1903,83 @@ POST /api/profiles/{userId}/tracker
 { "date": "YYYY-MM-DD", "note": "<multiline>" }
 ```
 
-`note` first line: `SUCCESS` or `FAIL at <stepType>: <msg>`. Then numbered list of
-completed top-level steps with child chains flattened via ` - ` (e.g.
-`search - open_search_result - connect - scroll - share_posts`). `random_preset`
-logged as-is, not resolved.
+**Header is one of three outcomes** (severity descending — abort wins):
+
+- `FAIL at <stepType> (<elapsed>): <msg>` — abort-level failure
+  (checkpoint, credentials rejected, pre-flight, ensure_login). The whole
+  session was aborted at that step; remaining steps were never attempted.
+- `PARTIAL (<N> failed) (<elapsed>)` — at least one non-fatal step failure,
+  but the session continued past it and ran the rest. Triage can see what
+  worked and what didn't.
+- `SUCCESS (<elapsed>)` — every top-level step completed (whether or not
+  it took retries to get there).
+
+After the header: numbered list of completed top-level steps with child
+chains flattened via ` - ` (e.g. `search - open_search_result - connect -
+scroll - share_posts`). `random_preset` logged as-is, not resolved.
+
+When PARTIAL fires, a `Failed steps:` block follows the completed list
+with one line per soft failure: `- <stepType>: <message>`.
 
 POST errors caught + warned. Skipped if `userId`, `note`, or `USER_API_BASE_URL` empty.
+
+### Soft-failure semantics — what aborts vs. continues
+
+`runBrowser`'s per-step error handler splits errors into two camps:
+
+| Camp | Triggered by | Behavior |
+|------|--------------|----------|
+| **Abort** | `err.checkpoint` or `err.credentialsRejected` | PATCHes user to `status: "Need Checking"`, fires the tracker-log with `FAIL`, **skips all remaining steps**. |
+| **Soft** | any other error after `runWithRetry` exhausted its 3 attempts | Logged + collected in `softFailures[]`, runner **continues to the next top-level step**. |
+
+This is the post-2026-05-30 design — a single mid-session failure no
+longer wastes the rest of the run. A profile that fails `search` can
+still complete `connect_loop`, `accept_loop`, `homepage_interaction`,
+and stamp the onboarding keys for the steps that succeeded. Vault-log
+"profile complete" line carries the soft-failure count
+(`profile complete (2 non-fatal failure(s))`) so the dashboard can
+distinguish clean vs. partial sessions at a glance.
+
+The only special cases that still abort are FB-flagged accounts
+(checkpoint) and rejected credentials (e.g. outlook_login's
+`incorrect password`) — both genuinely poison the rest of the session.
+
+### Per-step failure forensics — dump on first throw
+
+`runWithRetry`'s catch block calls `dumpStepFailure(page, stepType, err,
+attempt)` **on the FIRST throw**, before the checkpoint short-circuit or
+`tryRecover` can mutate the page (dismissing modals, navigating off the
+failure URL). One dump per error — `err.dumped` survives across retry
+attempts so the same incident never gets re-written. Filename includes
+the attempt number (`fail-<step>-attempt1-<ts>.{html,png}`) so
+concurrent retries on the same step never overwrite each other, though
+in practice only attempt 1 dumps.
+
+The synthetic `ensure_login` call from `runBrowser` is NOT wrapped in
+`runWithRetry`, so it has its own inline `dumpStepFailure` in the catch
+to keep that path on par. `err.dumped` guards against double-dumps when
+an inner action (e.g. `facebook_signup`) already captured one.
+
+### Per-profile folder rename — SUCCESS / FAIL prefix
+
+After each profile's session ends (in `runTask`'s per-worker `finally`),
+`renameProfileFolderWithStatus` renames the profile's run-scoped folder
+from `{Name}-{shortId}/` to `{STATUS} - {Name} - {shortId}/` where
+STATUS is SUCCESS or FAIL. Scanning the `profiles/` listing at a glance
+shows outcomes without opening tracker logs:
+
+```
+logs/engage-and-add-20260530-...
+  profiles/
+    SUCCESS - Marco Rossi - 6a020462/
+    SUCCESS - Anna Bianchi - 6a02943a/
+    FAIL - Giorgia Gentile - 6a066bab/
+    ...
+```
+
+Best-effort — swallows errors so a Windows file-lock or already-renamed
+collision can never break the run. The rename runs AFTER `runInSession`
+has exited (no more file handles into the folder).
 
 ## `server.js` — HTTP API for remote task execution
 
