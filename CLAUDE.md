@@ -1508,17 +1508,24 @@ the ID — easier triage at a glance.
 
 Between attempts, `runWithRetry` calls `tryRecover(page, { stepType })` from
 `utils/recoverers.js`. This is a registry of `(matches, apply)` pairs that
-try to fix the current page state before the next retry. If one fires
-successfully, the retry wait shrinks from 60s to **2s** — the page is
-already usable, no point cooling down.
+try to fix the current page state before the next retry. `tryRecover`
+returns `{ recovered, unfixable }` — three possible outcomes drive the
+retry behavior:
+
+| Outcome | Recovery `apply()` returned | Runner behavior |
+|---|---|---|
+| **recovered** | `true` | Retry wait shrinks from 60s → 2s; next attempt fires on the now-usable page |
+| **unfixable** | `'unfixable'` | URL/state is a known dead-end (e.g. consent flow we don't yet handle). Remaining retries SKIPPED — step soft-fails immediately. Burning 3×60s on a deterministic block is waste. |
+| **neither** | `false` from every matched recoverer (or none matched) | Normal 60s wait + retry |
 
 ```js
 {
   name: 'eu-cookie-consent',
-  matches: (page) => page.url().includes('/privacy/consent/'),
+  matches: (page) => /* tight URL check, NOT loose substring */,
   apply: async (page) => {
-    // wait → reading delay → click "Allow all cookies"
-    // returns true on success, false on "matched but couldn't fix"
+    // wait → reading delay → click button
+    // returns true on success, false on "matched but couldn't fix",
+    // or 'unfixable' on "this URL has no resolution today"
   },
 }
 ```
@@ -1528,15 +1535,24 @@ already usable, no point cooling down.
    `/privacy/consent/?flow=user_cookie_choice_v2&...` and blocks every
    subsequent navigation until the cookie banner is dismissed. Clicks
    `div[aria-label="Allow all cookies"]` after a 2.5-4.5s reading delay,
-   waits for the URL to leave `/privacy/consent/`. Without this, steps
-   like `setup_about`, `search`, `open_search_result` would hang on
-   selector waits until the 5-minute step timeout fires.
-2. **`soft-checkpoint`** — URL contains `/checkpoint/`. Clicks the
+   waits for the URL to leave `/privacy/consent/`. Matcher requires
+   `flow=user_cookie_choice_v2` explicitly so it doesn't bleed into the
+   ad-free flow below.
+2. **`ad-free-subscription`** — EU "pay-or-consent" landing page at
+   `/privacy/consent/?flow=ad_free_subscription`. The visible CTA is
+   "Get started" which begins a multi-step funnel to either pay for
+   ad-free or "Use Facebook with ads". We don't yet implement that
+   click sequence, so the recoverer returns `'unfixable'` — runner
+   skips remaining retries and the step soft-fails fast (≈5s instead
+   of 3×60s burn per step). When the click sequence is later
+   implemented, change the return to `true`. Per-profile this only
+   needs to fire ONCE — FB remembers the choice indefinitely.
+3. **`soft-checkpoint`** — URL contains `/checkpoint/`. Clicks the
    `div[aria-label="Dismiss"][role="button"]` after a 3-5s reading delay.
    Returns false on hard checkpoints (no Dismiss button — banned /
    verification required), letting `runner.js`'s checkpoint
    short-circuit kick in.
-3. **`not-now-modal`** — generic `div[role="button"][aria-label="Not now"]`
+4. **`not-now-modal`** — generic `div[role="button"][aria-label="Not now"]`
    probe. Catches FB's intermittent upsell modals after a 1.2-2.5s
    reading delay.
 
@@ -1555,13 +1571,37 @@ path too, since `ensure_login` delegates to `facebook_signup`.
 **Adding a new recoverer:**
 1. Append to `RECOVERERS` with `{ name, matches, apply }`.
 2. `matches(page)` should be cheap — URL-based or quick selector probe.
-   Return boolean (sync or async).
-3. `apply(page, ctx)` does the fix. Return `true` if recovered, `false`
-   if matched but couldn't fix (the chain moves on to the next).
+   Return boolean (sync or async). Tight matchers are mandatory — a loose
+   substring like `/privacy/consent/` will bleed into multiple FB flows
+   (cookie banner vs ad-free upsell) and trigger the wrong fix.
+3. `apply(page, ctx)` returns one of THREE values:
+   - `true` → page is fixed, runner retries with 2s wait
+   - `false` → matched but couldn't fix this time (e.g. button not
+     visible yet); chain moves to the next recoverer AND runner
+     continues its normal 60s-wait retry path
+   - `'unfixable'` → URL/state is a known dead-end with no resolution
+     today (e.g. a consent flow we don't yet implement). Runner SKIPS
+     remaining retries — step soft-fails immediately. Use this when
+     the page is identifiable but the fix is non-trivial work for
+     later.
 4. Errors inside both `matches` and `apply` are caught and logged in
    `tryRecover` — never propagated. A buggy recoverer can never break
    the actual error reporting.
 5. Order matters — list cheapest / most-specific first.
+
+**Browser-dead short-circuit.** When the underlying chromium / CDP socket
+dies (MLX session timeout, native crash, navigation broke the page),
+Playwright throws `Target page, context or browser has been closed` on
+every subsequent operation. `runWithRetry` detects this message pattern
+on a step error, sets `err.browserDead = true` + `err.noRetry = true`,
+and breaks the retry loop. `runBrowser`'s per-step catch then treats
+`err.browserDead` as a third abort condition (alongside checkpoint and
+credentials-rejected): tracker note gets `FAIL at <step>`, remaining
+steps are skipped, profile-folder is renamed FAIL. **Status is NOT
+PATCHed to Need Checking** for browser-dead — the cause is usually
+MLX-side (session timeout, agent crash) and the FB account itself is
+fine. Without this short-circuit, every remaining step burns 3×60s on
+the same closed-page error before soft-failing.
 
 **Checkpoint short-circuit:** FB redirects flagged accounts to
 `/checkpoint/{id}/?next=...` URLs. Retrying any step from that state is

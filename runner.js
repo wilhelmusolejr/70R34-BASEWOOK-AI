@@ -196,6 +196,22 @@ async function runWithRetry(fn, profileId, stepType, page) {
         err.dumped = true;
       }
 
+      // Browser-dead detection. Playwright surfaces "Target page, context or
+      // browser has been closed" when the underlying chromium / CDP socket
+      // is gone (MLX session timeout, native crash, navigation crashed the
+      // page). Every subsequent step in this profile would burn 3×60s on
+      // the same error before soft-failing — short-circuit instead. Marked
+      // as noRetry so runWithRetry breaks out, AND as browserDead so
+      // runBrowser's catch can abort the whole profile's remaining steps.
+      if (err && /Target page, context or browser has been closed/i.test(err.message || '')) {
+        console.warn(
+          `BROWSER DEAD detected on ${stepType} — aborting profile (no point retrying on a closed session)`
+        );
+        err.browserDead = true;
+        err.noRetry = true;
+        break;
+      }
+
       // Checkpoint detection — FB has flagged this profile (login challenge,
       // ID verification, etc.). Retrying won't help and burns cooldown time.
       // Mark the error so runBrowser can short-circuit the whole task.
@@ -231,12 +247,23 @@ async function runWithRetry(fn, profileId, stepType, page) {
 
       // Recovery chain — walk the registry, try to fix whatever common FB
       // page state is blocking us (EU cookie consent, soft checkpoint, etc.).
-      // If something recovered, skip the long retry wait — the page is
-      // already in a usable state.
-      const recovered = await tryRecover(page, { stepType });
-      const waitMs = recovered ? 2000 : RETRY_WAIT_MS;
-      if (recovered) {
-        console.log(`Recovered via "${recovered}" — retrying in ${waitMs / 1000}s`);
+      // Three possible outcomes:
+      //   recovered → page is usable, shrink retry wait from 60s to 2s
+      //   unfixable → URL is a known dead-end (e.g. ad-free consent flow
+      //               we don't yet handle). Skip remaining retries — burning
+      //               them only burns time. Step soft-fails immediately.
+      //   neither   → no recoverer matched; do the normal 60s wait + retry
+      const recovery = await tryRecover(page, { stepType });
+      if (recovery.unfixable) {
+        console.warn(
+          `Step ${stepType} blocked by "${recovery.unfixable}" — skipping remaining ${STEP_RETRY_ATTEMPTS - attempt} attempt(s)`
+        );
+        err.noRetry = true;
+        break;
+      }
+      const waitMs = recovery.recovered ? 2000 : RETRY_WAIT_MS;
+      if (recovery.recovered) {
+        console.log(`Recovered via "${recovery.recovered}" — retrying in ${waitMs / 1000}s`);
       } else {
         console.warn(`Retrying in ${waitMs / 1000}s...`);
       }
@@ -1149,14 +1176,17 @@ async function runBrowser(session, steps, options = {}) {
       } catch (err) {
         const isCheckpoint = !!(err && err.checkpoint);
         const isCredRejected = !!(err && err.credentialsRejected);
-        const isAbort = isCheckpoint || isCredRejected;
+        const isBrowserDead = !!(err && err.browserDead);
+        const isAbort = isCheckpoint || isCredRejected || isBrowserDead;
 
         if (vaultState) {
           const msg = isCheckpoint
             ? `Checkpoint hit during ${step.type} — aborting profile`
             : isCredRejected
               ? `Credentials rejected during ${step.type} — aborting profile`
-              : `Step ${step.type} failed: ${err.message} — continuing to next step`;
+              : isBrowserDead
+                ? `Browser session died during ${step.type} — aborting profile`
+                : `Step ${step.type} failed: ${err.message} — continuing to next step`;
           vaultLog.browser({ browserId: vaultState.browserId }, [{ level: 'error', msg }]);
         }
 
@@ -1205,6 +1235,19 @@ async function runBrowser(session, steps, options = {}) {
               );
             }
           }
+          throw err;
+        }
+
+        // Browser-dead — the underlying chromium/CDP socket is gone. Every
+        // subsequent step would burn 3×60s of retry on the same error, then
+        // soft-fail. Cheaper to abort the whole profile here. Status is NOT
+        // PATCHed to Need Checking since the cause is usually MLX-side
+        // (session timeout, agent crash) and the account itself is fine.
+        if (isBrowserDead) {
+          failure = { step, error: err };
+          console.warn(
+            `Browser session died during ${step.type} — skipping remaining steps for this profile`
+          );
           throw err;
         }
 

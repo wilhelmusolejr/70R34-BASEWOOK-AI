@@ -15,8 +15,15 @@
  *   1. Append to RECOVERERS with { name, matches, apply }.
  *   2. `matches(page)` should be cheap and URL- or selector-based — no heavy
  *      navigation. Return a boolean (sync or async).
- *   3. `apply(page, ctx)` does the fix. Return true if recovered, false if
- *      matched but couldn't fix (the runner moves on to the next recoverer).
+ *   3. `apply(page, ctx)` returns one of THREE values:
+ *        true         → recovered, retry will succeed
+ *        false        → matched but couldn't fix (e.g. button not visible
+ *                       this time); runner moves on to the next recoverer
+ *                       AND continues its normal retry-with-60s loop
+ *        'unfixable'  → URL/state is a known dead-end with no resolution
+ *                       (e.g. an FB consent flow we don't yet handle). The
+ *                       runner SKIPS remaining retries — burning them is
+ *                       waste. Step soft-fails immediately.
  *      Errors inside apply are caught and logged — never propagated.
  *   4. Order matters — list the cheapest / most specific first.
  */
@@ -38,10 +45,17 @@ const RECOVERERS = [
   // navigation until the user clicks "Allow all cookies" or "Decline".
   // Without this recoverer the bot hangs waiting for the home-button selector
   // (a[href="/"][role="link"]) until the 5-minute step timeout fires.
+  //
+  // Matcher requires `flow=user_cookie_choice_v2` specifically — a plain
+  // `/privacy/consent/` substring would also match the ad-free-subscription
+  // flow below (different page, different button, NOT a cookie banner).
   // --------------------------------------------------------------------------
   {
     name: 'eu-cookie-consent',
-    matches: (page) => safeUrl(page).includes('/privacy/consent/'),
+    matches: (page) => {
+      const u = safeUrl(page);
+      return u.includes('/privacy/consent/') && u.includes('flow=user_cookie_choice_v2');
+    },
     apply: async (page) => {
       const btn = page
         .locator('div[aria-label="Allow all cookies"]:not([aria-hidden="true"])')
@@ -63,6 +77,37 @@ const RECOVERERS = [
       }
       await humanWait(page, 1500, 2500);
       return true;
+    },
+  },
+
+  // --------------------------------------------------------------------------
+  // EU "pay-or-consent" ad-free subscription upsell. FB intercepts every
+  // navigation with `/privacy/consent/?flow=ad_free_subscription` until the
+  // profile completes a 2-step click sequence (Get started → Use Facebook
+  // with ads). We don't yet implement that walk, so for now the matcher
+  // returns 'unfixable' to signal the runner: skip remaining retries on
+  // this step, soft-fail immediately, move on. Without this, every step
+  // after the redirect burns 3×60s of retry before giving up.
+  //
+  // TODO: implement the multi-step click sequence:
+  //   1. Click div[aria-label="Get started"]
+  //   2. Wait for next page
+  //   3. Click the "Use Facebook with ads" / Italian "Continua con annunci"
+  //      button (selector TBD — needs HTML capture)
+  //   4. Wait for redirect off /privacy/consent/
+  // Per-profile this only needs to fire ONCE — FB remembers the choice.
+  // --------------------------------------------------------------------------
+  {
+    name: 'ad-free-subscription',
+    matches: (page) => {
+      const u = safeUrl(page);
+      return u.includes('/privacy/consent/') && u.includes('flow=ad_free_subscription');
+    },
+    apply: async () => {
+      console.log(
+        '  [recovery:ad-free-subscription] EU pay-or-consent modal — no click sequence implemented yet, flagging unfixable'
+      );
+      return 'unfixable';
     },
   },
 
@@ -136,10 +181,14 @@ const RECOVERERS = [
  *
  * @param {import('playwright').Page} page
  * @param {Object} [ctx] — caller-provided context (user, stepType, etc.)
- * @returns {Promise<string|null>} name of the recoverer that succeeded, or null
+ * @returns {Promise<{ recovered: string|null, unfixable: string|null }>}
+ *   recovered → name of the recoverer that fixed the page (retry will try again)
+ *   unfixable → name of the recoverer that flagged the URL as a dead-end
+ *               (runner should skip remaining retries)
+ *   both null → no recoverer matched (runner continues normal retry path)
  */
 async function tryRecover(page, ctx = {}) {
-  if (!page) return null;
+  if (!page) return { recovered: null, unfixable: null };
 
   for (const r of RECOVERERS) {
     let matched = false;
@@ -153,10 +202,16 @@ async function tryRecover(page, ctx = {}) {
 
     console.log(`  [recovery] trying "${r.name}"`);
     try {
-      const ok = await r.apply(page, ctx);
-      if (ok) {
+      const result = await r.apply(page, ctx);
+      if (result === true) {
         console.log(`  [recovery] "${r.name}" recovered`);
-        return r.name;
+        return { recovered: r.name, unfixable: null };
+      }
+      if (result === 'unfixable') {
+        console.warn(
+          `  [recovery] "${r.name}" flagged URL as unfixable — runner will skip remaining retries`
+        );
+        return { recovered: null, unfixable: r.name };
       }
       console.log(`  [recovery] "${r.name}" matched but couldn't fix — moving on`);
     } catch (err) {
@@ -164,7 +219,7 @@ async function tryRecover(page, ctx = {}) {
     }
   }
 
-  return null;
+  return { recovered: null, unfixable: null };
 }
 
 module.exports = { tryRecover, RECOVERERS };
