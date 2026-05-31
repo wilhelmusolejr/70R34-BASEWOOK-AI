@@ -82,8 +82,51 @@ module.exports = async function sharePosts(page, params) {
       await btn.click({ force: true });
       await humanWait(page, 1500, 2500);
 
+      // FB serves the share UI in two A/B-tested flows now:
+      //   (a) modal-direct: clicking the share button immediately opens the
+      //       "Send this to friends or post it on your profile" modal with
+      //       a [aria-label="Share now"] commit button.
+      //   (b) dropdown-first: clicking the share button opens a small menu
+      //       (Share to Feed / Share to your story / Send in Messenger /
+      //       More options / Copy link / Embed / Share via...). Picking
+      //       "Share to Feed" lands on the same modal as flow (a).
+      // Selector for the dropdown's "Share to Feed" row: the menu items
+      // are div[role="button"] with the visible label in a nested <span>.
+      // Poll both routes — whichever surfaces first wins this session.
+      const MODAL_SELECTOR = '[aria-label="Share now"]';
+      const SHARE_TO_FEED_XPATH =
+        'xpath=//div[@role="button"][.//span[normalize-space(text())="Share to Feed"]]';
+
+      let route = null;
+      const deadlineMs = Date.now() + 8000;
+      while (Date.now() < deadlineMs && !route) {
+        if (await page.locator(MODAL_SELECTOR).first().isVisible().catch(() => false)) {
+          route = 'modal';
+          break;
+        }
+        if (await page.locator(SHARE_TO_FEED_XPATH).first().isVisible().catch(() => false)) {
+          route = 'dropdown';
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+
+      if (route === 'dropdown') {
+        console.log(`  Post ${shared + 1}: dropdown opened, picking "Share to Feed"`);
+        await humanWait(page, 800, 1500); // reading delay on the menu
+        await page
+          .locator(SHARE_TO_FEED_XPATH)
+          .first()
+          .click({ force: true })
+          .catch(() => {});
+        await humanWait(page, 800, 1500);
+      }
+
+      // Final fetch of the modal's Share-now button handle — the downstream
+      // code uses .boundingBox() + .click() on it. Modal-direct flow gives
+      // it immediately; dropdown flow gives it shortly after the click above.
       const modalShareBtn = await page
-        .waitForSelector('[aria-label="Share now"]', { timeout: 8000 })
+        .waitForSelector(MODAL_SELECTOR, { timeout: 8000 })
         .catch(() => null);
 
       if (!modalShareBtn) {
