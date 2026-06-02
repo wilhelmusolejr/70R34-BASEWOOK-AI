@@ -20,7 +20,7 @@ const {
 } = require('./utils/sessionLog');
 const { initRunLogDir } = require('./utils/runLogDir');
 const { loadState, saveState, clearState } = require('./utils/taskState');
-const { tryRecover } = require('./utils/recoverers');
+const { tryRecover, recoverUntilReady } = require('./utils/recoverers');
 const { vaultLog } = require('./vault-log');
 
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
@@ -78,7 +78,11 @@ function buildTrackerNote(completed, { failure, softFailures = [] } = {}, elapse
   const lines = [];
   const elapsed = elapsedMs ? ` (${formatElapsed(elapsedMs)})` : '';
   if (failure) {
-    const where = failure.step?.type ? ` at ${failure.step.type}` : '';
+    // Prefer the actual failing step (err.stepType, set by runWithRetry) over
+    // the top-level step.type so "FAIL at open_search_result" isn't mislabeled
+    // "FAIL at search" when a child step is the one that failed.
+    const failedType = failure.error?.stepType || failure.step?.type;
+    const where = failedType ? ` at ${failedType}` : '';
     const msg = failure.error?.message || String(failure.error || 'unknown error');
     lines.push(`FAIL${where}${elapsed}: ${msg}`);
   } else if (softFailures.length > 0) {
@@ -186,15 +190,22 @@ async function runWithRetry(fn, profileId, stepType, page) {
     } catch (err) {
       lastError = err;
 
-      // Capture the actual broken-state forensics BEFORE checkpoint detection
-      // or tryRecover mutates the page (dismissing modals, navigating off the
-      // failure URL, etc.). One dump per error — `err.dumped` survives across
-      // retry attempts so we never write the same incident twice. Centralizing
-      // here means individual actions don't need their own try/catch+dump.
-      if (!err.dumped) {
-        await dumpStepFailure(page, stepType, err, attempt);
-        err.dumped = true;
-      }
+      // Stamp the ACTUAL failing step type onto the error (once, by the
+      // innermost runWithRetry — closest to the throw). When a child step fails
+      // (e.g. open_search_result under search), the error propagates up to
+      // runBrowser whose `step` is the top-level parent; without this, the log
+      // would mislabel it "Step search failed" instead of naming the real
+      // child. Consumers prefer err.stepType over the top-level step.type.
+      if (err && !err.stepType) err.stepType = stepType;
+
+      // NOTE: forensic dumping happens at the END of this function (terminal
+      // failure), NOT here on the first throw. We used to dump eagerly on every
+      // attempt, but that (a) left misleading fail-*.html/png dumps for errors
+      // that tryRecover then FIXED (e.g. a consent page cleared by the cookie
+      // recoverer, after which the retry succeeded — the folder ends up SUCCESS
+      // yet full of fail-* files), and (b) wrote one ~4MB dump PER attempt for a
+      // genuine 3-attempt failure. Now we recover first and dump once, only if
+      // the step actually fails. See the dump before `throw lastError` below.
 
       // Browser-dead detection. Playwright surfaces "Target page, context or
       // browser has been closed" when the underlying chromium / CDP socket
@@ -226,6 +237,7 @@ async function runWithRetry(fn, profileId, stepType, page) {
           console.warn(`CHECKPOINT detected on ${stepType} (url=${url}) — aborting profile`);
           err.checkpoint = true;
           err.noRetry = true;
+          err.dumped = true; // checkpoint-*.{html,png} already written — skip terminal dump
           break;
         }
         console.log(`Soft checkpoint dismissed during ${stepType} — letting retry continue`);
@@ -269,6 +281,16 @@ async function runWithRetry(fn, profileId, stepType, page) {
       }
       await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
+  }
+
+  // Terminal failure — every path that reaches here has given up (exhausted
+  // attempts, noRetry, unfixable, browser-dead, hard checkpoint). NOW we know
+  // it's a real failure (not something recovery fixed), so dump the broken page
+  // state ONCE. `err.dumped` skips paths that already wrote their own forensics
+  // (checkpoint → checkpoint-*.{html,png}).
+  if (lastError && !lastError.dumped && page) {
+    await dumpStepFailure(page, stepType, lastError);
+    lastError.dumped = true;
   }
 
   throw lastError;
@@ -336,6 +358,45 @@ function safePageUrl(page) {
   } catch (_) {
     return '';
   }
+}
+
+/**
+ * Page-readiness gate — run BEFORE every step. If the page is parked on a
+ * consent funnel (EU cookie / ad-free / GDPR data-settings), clear it FIRST so
+ * the step doesn't run on a blocked page. Steps that don't touch the page would
+ * otherwise "succeed" on top of the consent screen, and page-touching steps
+ * would each burn their full 3×retry budget — the consent page is fixed once,
+ * up front, not rediscovered per step.
+ *
+ * recoverUntilReady loops the recovery chain until the page is clean (handles
+ * FB's chained cookie→ad_free→3pd funnels in one gate). If it can't clear the
+ * page, we dump the blocked HTML (so an unhandled consent variant can be turned
+ * into a new recoverer) and throw err.pageBlocked — runBrowser treats that as
+ * an abort: skip remaining steps, FAIL tracker note, NO Need-Checking PATCH
+ * (a stuck consent funnel is a recovery gap on our side, not a flagged account;
+ * it re-runs cleanly next cycle).
+ *
+ * Checkpoints are NOT handled here — they keep their dedicated pre-flight /
+ * in-retry / post-step detection + Need-Checking PATCH.
+ */
+async function ensurePageReady(page, vaultState) {
+  const { ready, reason } = await recoverUntilReady(page, {});
+  if (ready) return;
+
+  const err = new Error(`Page blocked by consent flow (${reason}) — cannot continue`);
+  err.pageBlocked = true;
+  err.noRetry = true;
+
+  if (!err.dumped) {
+    await dumpStepFailure(page, 'consent-blocked', err);
+    err.dumped = true;
+  }
+  if (vaultState) {
+    vaultLog.browser({ browserId: vaultState.browserId }, [
+      { level: 'error', msg: `Page blocked (${reason}) — aborting profile` },
+    ]);
+  }
+  throw err;
 }
 
 /**
@@ -885,6 +946,13 @@ function evaluateStepGuards(step, user) {
  * Execute a single step and recurse into child steps.
  */
 async function runStep(page, step, profileId, user, vaultState) {
+  // Page-readiness gate — clear any consent funnel the page is parked on
+  // BEFORE running this step (or its children). Throws err.pageBlocked if the
+  // page can't be cleared, which runBrowser treats as an abort. Runs for every
+  // step (top-level and nested) so a navigator child that triggers a consent
+  // redirect can't leave the next child running on a blocked page.
+  await ensurePageReady(page, vaultState);
+
   if (step.type === 'random_preset') {
     await runRandomPreset(page, step, profileId, user, vaultState);
     return;
@@ -1177,23 +1245,31 @@ async function runBrowser(session, steps, options = {}) {
         const isCheckpoint = !!(err && err.checkpoint);
         const isCredRejected = !!(err && err.credentialsRejected);
         const isBrowserDead = !!(err && err.browserDead);
-        const isAbort = isCheckpoint || isCredRejected || isBrowserDead;
+        const isPageBlocked = !!(err && err.pageBlocked);
+        const isAbort = isCheckpoint || isCredRejected || isBrowserDead || isPageBlocked;
+
+        // The actual step that failed — a child (e.g. open_search_result) when
+        // `step` is its top-level parent (e.g. search). Falls back to the
+        // top-level type for errors thrown outside runWithRetry.
+        const failedType = (err && err.stepType) || step.type;
 
         if (vaultState) {
           const msg = isCheckpoint
-            ? `Checkpoint hit during ${step.type} — aborting profile`
+            ? `Checkpoint hit during ${failedType} — aborting profile`
             : isCredRejected
-              ? `Credentials rejected during ${step.type} — aborting profile`
+              ? `Credentials rejected during ${failedType} — aborting profile`
               : isBrowserDead
-                ? `Browser session died during ${step.type} — aborting profile`
-                : `Step ${step.type} failed: ${err.message} — continuing to next step`;
+                ? `Browser session died during ${failedType} — aborting profile`
+                : isPageBlocked
+                  ? `Page blocked by consent flow during ${failedType} — aborting profile`
+                  : `Step ${failedType} failed: ${err.message} — continuing to next step`;
           vaultLog.browser({ browserId: vaultState.browserId }, [{ level: 'error', msg }]);
         }
 
         if (isCheckpoint) {
           failure = { step, error: err };
           console.warn(
-            `Checkpoint hit during ${step.type} — skipping remaining steps for this profile`
+            `Checkpoint hit during ${failedType} — skipping remaining steps for this profile`
           );
 
           // Flag the user record so it's surfaced for manual review and won't
@@ -1222,7 +1298,7 @@ async function runBrowser(session, steps, options = {}) {
         if (isCredRejected) {
           failure = { step, error: err };
           console.warn(
-            `Credentials rejected during ${step.type} — flagging profile and skipping remaining steps`
+            `Credentials rejected during ${failedType} — flagging profile and skipping remaining steps`
           );
           const userId = user?._id || user?.id || '';
           if (userId) {
@@ -1246,7 +1322,21 @@ async function runBrowser(session, steps, options = {}) {
         if (isBrowserDead) {
           failure = { step, error: err };
           console.warn(
-            `Browser session died during ${step.type} — skipping remaining steps for this profile`
+            `Browser session died during ${failedType} — skipping remaining steps for this profile`
+          );
+          throw err;
+        }
+
+        // Page blocked by a consent funnel the recovery gate couldn't clear.
+        // Running the rest of the flow would just waste 3×retry per remaining
+        // step on a dead page. Abort. Status is NOT PATCHed to Need Checking —
+        // a stuck consent funnel is a recovery gap on our side, not a flagged
+        // account; it re-runs cleanly next cycle (and the blocked HTML was
+        // dumped by ensurePageReady for building a new recoverer).
+        if (isPageBlocked) {
+          failure = { step, error: err };
+          console.warn(
+            `Page blocked by consent flow during ${failedType} — skipping remaining steps for this profile`
           );
           throw err;
         }
@@ -1255,7 +1345,7 @@ async function runBrowser(session, steps, options = {}) {
         // The step's own retry budget already exhausted inside runWithRetry;
         // a single failure shouldn't waste the rest of the session.
         console.warn(
-          `Step ${step.type} failed (non-fatal): ${err.message} — continuing to next step`
+          `Step ${failedType} failed (non-fatal): ${err.message} — continuing to next step`
         );
         softFailures.push({ step, error: err });
       }

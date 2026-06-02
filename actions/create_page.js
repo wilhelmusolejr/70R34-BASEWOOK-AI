@@ -147,11 +147,26 @@ module.exports = async function create_page(page, params) {
     return;
   }
 
-  if (!pageName) throw new Error('create_page: pageName is required');
+  // Guard: skip cleanly when this user has no Page configured. An empty
+  // pageName means linkedPage.pageName isn't set on the record — there's
+  // nothing to create, so this is a no-op (like the duplicate-Page guard
+  // above), NOT a failure. Returning here keeps the profile SUCCESS instead
+  // of burning the runner's 3×60s retry budget on a deterministic
+  // missing-data error that can never succeed by retrying.
+  if (!pageName || !String(pageName).trim()) {
+    console.log('  [create_page] No linkedPage.pageName configured — skipping (nothing to create).');
+    return;
+  }
 
+  // pageName is present but we couldn't derive a category from it. Deterministic
+  // (same name always fails the same way), so mark noRetry — fail fast instead
+  // of retrying 3×60s.
   const categoryText = getCategoryKeyword(pageName, categoryKeyword);
-  if (!categoryText)
-    throw new Error('create_page: could not derive category keyword from pageName');
+  if (!categoryText) {
+    const err = new Error('create_page: could not derive category keyword from pageName');
+    err.noRetry = true;
+    throw err;
+  }
   const parsedCity = parseCityState(city);
   const address = buildPageAddress({ city, state, zipCode });
   const emailValue = String(email || '').trim();

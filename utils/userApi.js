@@ -213,6 +213,46 @@ async function fetchSharerUrls(country) {
   return parsed.urls || [];
 }
 
+/**
+ * Delete a sharer record by its URL. The by-country endpoint only returns
+ * URLs (no _id), and DELETE /api/sharers/:id needs the Mongo id — so we list
+ * the sharers (narrowed by country when given), match the URL, and delete by
+ * the resolved id. Best-effort: returns true on delete, false otherwise, and
+ * never throws (a pruning hiccup must not break the visit that triggered it).
+ *
+ * Used to prune dead sharer links when visit_profile lands on FB's
+ * "content isn't available" card for a sharers-pool target.
+ */
+async function deleteSharerByUrl(url, country = '') {
+  if (!BASE_URL || !url) return false;
+  const norm = (u) =>
+    String(u || '')
+      .trim()
+      .replace(/\/+$/, '')
+      .toLowerCase();
+  try {
+    const listUrl = country
+      ? `${BASE_URL}/api/sharers?country=${encodeURIComponent(String(country).toUpperCase())}`
+      : `${BASE_URL}/api/sharers`;
+    const { data } = await axios.get(listUrl, { timeout: 15000 });
+    const list = Array.isArray(data) ? data : data.sharers || data.items || data.data || [];
+    const target = norm(url);
+    const match = list.find((s) => norm(s.url) === target);
+    if (!match) {
+      console.warn(`  [sharers] No DB record matched ${url} — nothing to delete.`);
+      return false;
+    }
+    const id = match.id || match._id;
+    if (!id) return false;
+    await axios.delete(`${BASE_URL}/api/sharers/${id}`, { timeout: 15000 });
+    console.log(`  [sharers] Deleted dead sharer ${id} (${url}).`);
+    return true;
+  } catch (err) {
+    console.warn(`  [sharers] deleteSharerByUrl failed for ${url}: ${err.message}`);
+    return false;
+  }
+}
+
 module.exports = {
   fetchUser,
   fetchActiveProfiles,
@@ -221,5 +261,6 @@ module.exports = {
   recordFriendRequest,
   updateFriendRequestStatus,
   fetchSharerUrls,
+  deleteSharerByUrl,
   setOnboarding,
 };

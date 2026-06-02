@@ -39,55 +39,43 @@ function safeUrl(page) {
 }
 
 /**
- * Wait for a `div[role="button"]` whose visible span text matches `text`
- * exactly (after trim), then click it. Returns true on success, false if
- * the button never appears within `waitMs`. Adds a reading delay between
- * detection and click — instant-clicking is a bot tell.
+ * Wait + click any clickable element whose text-or-label matches `text`.
+ * Matches `div[role="button"]` OR `div[role="radio"]` and considers BOTH:
+ *   - the element's own `aria-label` (exact, or starts-with so radios that
+ *     append " . Description . Radio button . Unselected" still match)
+ *   - a child `<span>` with `text` as its trimmed text content
  *
- * `text` is the visible label (e.g. "Continue", "Agree", "Accept and continue").
- * XPath uses normalize-space + a contains() fallback so trailing whitespace
- * or wrapper elements don't defeat the match.
+ * This handles every consent-flow click in one helper: "Get started"
+ * (button + aria-label exact), "Use free of charge with ads" (radio +
+ * aria-label prefix), "Continue" / "Agree" / "OK" / "Accept and continue"
+ * / "Done" (button + child span text). If FB swaps button↔radio on any
+ * screen, the selector still resolves.
+ *
+ * `waitFor` (NOT `isVisible`) — `isVisible({ timeout })` returns
+ * synchronously in modern Playwright (timeout is a no-op). `waitFor` is
+ * the only way to actually wait for the element to render.
  */
 async function waitClickByText(page, text, { waitMs = 15000, readMin = 2000, readMax = 3500 } = {}) {
   const xpath =
-    `xpath=//div[@role="button"][.//span[normalize-space(text())="${text}"]] | ` +
-    `//div[@role="button"][.//span[contains(normalize-space(text()),"${text}")]]`;
-  const btn = page.locator(xpath).first();
-  const visible = await btn.isVisible({ timeout: waitMs }).catch(() => false);
-  if (!visible) {
-    console.log(`  [recovery] button with text "${text}" not found within ${waitMs}ms`);
+    `xpath=//div[(@role="button" or @role="radio") and (` +
+    `@aria-label="${text}"` +
+    ` or starts-with(normalize-space(@aria-label),"${text} ")` +
+    ` or .//span[normalize-space(text())="${text}"]` +
+    `)]`;
+  const el = page.locator(xpath).first();
+  try {
+    await el.waitFor({ state: 'visible', timeout: waitMs });
+  } catch (_) {
+    console.log(`  [recovery] element matching "${text}" not found within ${waitMs}ms`);
     return false;
   }
   await humanWait(page, readMin, readMax);
   try {
-    await btn.click({ force: true });
+    await el.click({ force: true });
     console.log(`  [recovery] clicked "${text}"`);
     return true;
   } catch (err) {
     console.warn(`  [recovery] click on "${text}" threw: ${err.message}`);
-    return false;
-  }
-}
-
-/**
- * Wait + click a `div[aria-label="..."]` (typically with role="button").
- * Same reading-delay semantics as `waitClickByText`. Used for buttons that
- * FB labels via aria-label rather than visible text (e.g. "Get started").
- */
-async function waitClickByLabel(page, label, { waitMs = 15000, readMin = 2000, readMax = 3500 } = {}) {
-  const btn = page.locator(`div[aria-label="${label}"][role="button"]`).first();
-  const visible = await btn.isVisible({ timeout: waitMs }).catch(() => false);
-  if (!visible) {
-    console.log(`  [recovery] button with aria-label="${label}" not found within ${waitMs}ms`);
-    return false;
-  }
-  await humanWait(page, readMin, readMax);
-  try {
-    await btn.click({ force: true });
-    console.log(`  [recovery] clicked aria-label="${label}"`);
-    return true;
-  } catch (err) {
-    console.warn(`  [recovery] click on aria-label="${label}" threw: ${err.message}`);
     return false;
   }
 }
@@ -114,8 +102,16 @@ const RECOVERERS = [
       const btn = page
         .locator('div[aria-label="Allow all cookies"]:not([aria-hidden="true"])')
         .first();
-      const visible = await btn.isVisible({ timeout: 5000 }).catch(() => false);
-      if (!visible) return false;
+      // waitFor (NOT isVisible({timeout})) — isVisible's timeout is a no-op in
+      // modern Playwright (returns synchronously), so on a slow-rendering
+      // consent page the old probe returned false before the button mounted
+      // and the recoverer reported "matched but couldn't fix". waitFor is the
+      // only way to actually wait for the button to appear.
+      try {
+        await btn.waitFor({ state: 'visible', timeout: 8000 });
+      } catch (_) {
+        return false;
+      }
       // Reading delay — a real human glances at the consent text before clicking.
       // Cookie banners are long-ish, so 2.5-4.5s.
       await humanWait(page, 2500, 4500);
@@ -156,19 +152,23 @@ const RECOVERERS = [
       return u.includes('/privacy/consent/') && u.includes('flow=ad_free_subscription');
     },
     apply: async (page) => {
-      // Step 1 — "Get started"
-      if (!(await waitClickByLabel(page, 'Get started', { readMin: 2500, readMax: 4500 }))) {
-        return false;
+      // Step 1 — "Get started". Probe with a short timeout; if not visible,
+      // a previous half-recovery may have already advanced past this screen,
+      // so we resume from Step 2 rather than failing.
+      if (await waitClickByText(page, 'Get started', { waitMs: 3000, readMin: 2500, readMax: 4500 })) {
+        // clicked — continue to Step 2
+      } else {
+        console.log('  [recovery] "Get started" not visible — resuming from radio screen');
       }
 
-      // Step 2 — pick "Use free of charge with ads" then "Continue"
-      // FB renders the radio with the option label as a child <span>. Clicking
-      // the visible row label triggers the radio selection.
-      await waitClickByText(page, 'Use free of charge with ads', {
-        waitMs: 15000,
-        readMin: 3000,
-        readMax: 5000,
-      });
+      // Step 2 — pick "Use free of charge with ads" then "Continue".
+      // FB renders the option as div[role="radio"], not div[role="button"];
+      // waitClickByText matches either, so one call covers both shapes.
+      // Continue is disabled until a radio is selected, so the radio is the
+      // real gate.
+      if (!(await waitClickByText(page, 'Use free of charge with ads', { readMin: 3000, readMax: 5000 }))) {
+        return false;
+      }
       if (!(await waitClickByText(page, 'Continue', { readMin: 1500, readMax: 2500 }))) {
         return false;
       }
@@ -213,7 +213,7 @@ const RECOVERERS = [
       return u.includes('/privacy/consent/') && u.includes('flow=consent_next_3pd');
     },
     apply: async (page) => {
-      if (!(await waitClickByLabel(page, 'Get started', { readMin: 2500, readMax: 4500 }))) {
+      if (!(await waitClickByText(page, 'Get started', { readMin: 2500, readMax: 4500 }))) {
         return false;
       }
       if (
@@ -345,4 +345,57 @@ async function tryRecover(page, ctx = {}) {
   return { recovered: null, unfixable: null };
 }
 
-module.exports = { tryRecover, RECOVERERS };
+/**
+ * Cheap check: is the page currently parked on a consent funnel?
+ *
+ * Scoped to `/privacy/consent/` ONLY — checkpoints (`/checkpoint/`) keep their
+ * dedicated handling in runner.js (pre-flight / in-retry / post-step sweep +
+ * Need-Checking PATCH). We deliberately do NOT fold checkpoints into this gate
+ * so the two concerns stay independent.
+ */
+function isConsentBlocked(page) {
+  return safeUrl(page).includes('/privacy/consent/');
+}
+
+/**
+ * Proactive recovery GATE. Unlike tryRecover (reactive — only called after a
+ * step throws, fixes one screen, hands control back to the retry loop), this
+ * keeps recovering until the page is no longer on a consent funnel OR we run
+ * out of rounds. FB chains consent funnels (cookie → ad_free → 3pd), so a
+ * single tryRecover pass clears only the first; looping clears the whole chain
+ * in one gate before the next real step runs.
+ *
+ * Returns { ready, reason }:
+ *   ready: true            → page is clean, safe to run the next step
+ *   ready: false, reason   → still blocked after maxRounds, OR a recoverer
+ *                            flagged the URL 'unfixable'. Caller should abort.
+ *
+ * Never throws — recoverer errors are swallowed inside tryRecover.
+ */
+async function recoverUntilReady(page, ctx = {}, { maxRounds = 4 } = {}) {
+  if (!page) return { ready: true };
+
+  for (let round = 1; round <= maxRounds; round++) {
+    if (!isConsentBlocked(page)) return { ready: true };
+
+    console.log(
+      `  [recovery-gate] page parked on consent funnel (round ${round}/${maxRounds}) — recovering before continuing`
+    );
+    const { recovered, unfixable } = await tryRecover(page, ctx);
+
+    if (unfixable) return { ready: false, reason: `unfixable:${unfixable}` };
+    if (!isConsentBlocked(page)) return { ready: true };
+
+    // recovered but still on a consent URL → FB chained into the next funnel;
+    // loop and the matching recoverer fires next round. matched-but-couldn't-fix
+    // (recovered === null) → brief wait in case the screen is still rendering,
+    // then retry.
+    if (!recovered) {
+      await humanWait(page, 1500, 2500);
+    }
+  }
+
+  return { ready: !isConsentBlocked(page), reason: 'recovery exhausted' };
+}
+
+module.exports = { tryRecover, recoverUntilReady, isConsentBlocked, RECOVERERS };

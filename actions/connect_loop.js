@@ -174,6 +174,36 @@ async function syncExistingFriendRequest(receiverId, senderId) {
   }
 }
 
+/**
+ * Pre-action browsing — make a visit look human before we decide to add.
+ * Glance DOWN the profile for a random 2-10s, then scroll back to the TOP over
+ * ~10s (where the Add-friend button lives, so this also re-frames it for the
+ * action-button probe). Mouse-wheel only (never window.scrollTo) per the
+ * anti-detection rules. Best-effort — swallows errors so a scroll hiccup never
+ * blocks the connect attempt.
+ */
+async function browseProfileThenTop(page) {
+  try {
+    // Phase 1 — skim down for a random 2-10s.
+    const downDeadline = Date.now() + 2000 + Math.floor(Math.random() * 8001);
+    while (Date.now() < downDeadline) {
+      await page.mouse.wheel(0, 300 + Math.floor(Math.random() * 300)); // down 300-600
+      await humanWait(page, 500, 1100);
+    }
+
+    // Phase 2 — scroll back to the top over ~10s. Upward wheel ticks hit the
+    // top partway and further ticks are harmless no-ops, so a fixed ~10s window
+    // both lands at the top AND keeps the "reading on the way up" duration.
+    const upDeadline = Date.now() + 10000;
+    while (Date.now() < upDeadline) {
+      await page.mouse.wheel(0, -(400 + Math.floor(Math.random() * 300))); // up 400-700
+      await humanWait(page, 350, 650);
+    }
+  } catch (err) {
+    console.warn(`[connect_loop] pre-action browse failed (non-fatal): ${err.message}`);
+  }
+}
+
 module.exports = async function connect_loop(page, params = {}) {
   const pool = params.pool || 'users';
   const targetCount = Number(params.count ?? 7);
@@ -275,8 +305,16 @@ module.exports = async function connect_loop(page, params = {}) {
     }
 
     // ── 2. Validity check ─────────────────────────────────────────────
+    // Random 10-30s timeout. A normal profile renders the friends-link /
+    // Go-to-Feed markers near-instantly; when they DON'T appear (locale/render
+    // variant) the check used to burn a full 60s before returning "unknown"
+    // and proceeding anyway — pure waste. 10-30s is plenty to catch a real
+    // render, and randomized so the wait isn't a uniform timing fingerprint.
     console.log(`[connect_loop] Checking profile availability...`);
-    const availability = await checkProfileAvailability(page, 60000);
+    const availability = await checkProfileAvailability(
+      page,
+      10000 + Math.floor(Math.random() * 20001)
+    );
     if (availability === 'unavailable') {
       console.log(`[connect_loop] Profile UNAVAILABLE (deleted/banned/restricted) — skipping.`);
       await humanWait(page, waitMin * 1000, waitMax * 1000);
@@ -300,6 +338,10 @@ module.exports = async function connect_loop(page, params = {}) {
         console.log(`[connect_loop] Friend count selector not found — skip PATCH.`);
       }
     }
+
+    // ── 3.5 Human-like pre-action browse: skim down ~2-10s, back to top ~10s ──
+    console.log(`[connect_loop] Browsing profile before action (skim down, back to top)...`);
+    await browseProfileThenTop(page);
 
     // ── 4. Action button check, in priority order ────────────────────
     console.log(`[connect_loop] Probing action buttons...`);

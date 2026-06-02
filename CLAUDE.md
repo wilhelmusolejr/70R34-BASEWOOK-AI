@@ -1568,18 +1568,22 @@ retry behavior:
    probe. Catches FB's intermittent upsell modals after a 1.2-2.5s
    reading delay.
 
-**Multi-step recoverers use two helpers** (`utils/recoverers.js`):
+**Multi-step recoverers share one helper** (`utils/recoverers.js`):
 
-- `waitClickByLabel(page, ariaLabel, { waitMs, readMin, readMax })` —
-  for buttons FB labels via aria-label (e.g. "Get started").
-- `waitClickByText(page, visibleSpanText, { waitMs, readMin, readMax })` —
-  for buttons FB renders as `div[role="button"]` with a child `<span>`
-  bearing the visible label (e.g. "Continue", "Agree", "Accept and
-  continue"). XPath uses `normalize-space + contains()` fallback so
-  trailing whitespace doesn't defeat the match.
+- `waitClickByText(page, text, { waitMs, readMin, readMax })` — matches
+  any `div[role="button"]` OR `div[role="radio"]` whose `aria-label`
+  equals `text` exactly, whose `aria-label` starts with `text + " "`
+  (for radios that append " . Description . Radio button . Unselected"),
+  OR whose child `<span>` has `text` as its trimmed text content. One
+  call handles every consent-flow shape: "Get started" (button +
+  aria-label), "Use free of charge with ads" (radio + aria-label
+  prefix), "Continue" / "Agree" / "OK" / "Accept and continue" / "Done"
+  (button + child span text). Uses `waitFor({ state: 'visible' })` —
+  NOT `isVisible({ timeout })`, which returns synchronously in modern
+  Playwright and never actually waits.
 
-Both add a reading delay between detection and click, log a clear
-no-match line on timeout, and never throw — return false on miss so
+Adds a reading delay between detection and click, logs a clear
+no-match line on timeout, and never throws — returns false on miss so
 the caller can decide whether to abort the recovery or continue.
 
 **Reading delays are calibrated to the modal.** A real user reads the
@@ -2222,6 +2226,68 @@ Both can run simultaneously as separate Node processes. Since they target
 different profiles, Multilogin opens separate browsers with no conflict.
 Same-profile collision is not guarded — avoid running the same profile
 from both entry points.
+
+## Resilience updates (2026-06)
+
+A batch of error-handling + anti-detection changes. Grouped by file:
+
+**`runner.js`**
+- **Proactive page-readiness gate.** `ensurePageReady(page)` runs at the top of
+  every `runStep` (top-level AND nested). If the page is parked on a consent
+  funnel (`/privacy/consent/`), it loops `recoverUntilReady` to clear the whole
+  chained cookie→ad_free→3pd sequence BEFORE the step runs — instead of a step
+  silently "succeeding" on a blocked page or each step burning its retry budget.
+  If it can't clear after the cap, it dumps `consent-blocked-*.{html,png}` and
+  throws `err.pageBlocked` → `runBrowser` aborts remaining steps (FAIL tracker
+  note, **no** Need-Checking PATCH — a stuck funnel is our recovery gap, not a
+  flagged account; re-runs cleanly next cycle).
+- **Deferred forensic dump.** `runWithRetry` no longer dumps on the first throw.
+  It dumps ONCE at terminal failure (after retries/recovery give up). So errors
+  that `tryRecover` fixes leave NO dump (a recovered consent page used to litter
+  a SUCCESS folder with `fail-*` files), and a genuine 3-attempt failure writes
+  one dump, not three. Checkpoint path sets `err.dumped` to skip the terminal dump.
+- **Real-failing-step labels.** `runWithRetry` stamps `err.stepType` with the
+  actual failing step. Soft-fail logs + the `FAIL at <step>` tracker header now
+  name the real child (e.g. `open_search_result`) instead of the top-level
+  parent (`search`).
+
+**`utils/recoverers.js`** — `eu-cookie-consent` now uses `waitFor({state:'visible'})`
+instead of `isVisible({timeout})` (the latter's timeout is a no-op → it was
+reporting "matched but couldn't fix" on slow renders). New exports
+`recoverUntilReady` (loop-until-clean gate) + `isConsentBlocked`.
+
+**`actions/open_search_result.js`** — FB's "We didn't find any results" empty-state
+is now a **clean skip**, not a 15s×3 timeout failure. Races the result-link
+selector against the no-results banner (en + it). A genuinely broken page (neither)
+still throws + dumps.
+
+**`actions/create_page.js`** — empty `pageName` (no `linkedPage.pageName`) is a
+**clean skip** (nothing to create), not a 3×60s retry failure. The category-derive
+failure is now `noRetry` (deterministic → fail fast).
+
+**`actions/facebook_signup.js`** — fast-fails on `confirmemail.php` (FB demanding
+an emailed code after signup) with a specific `noRetry` error instead of polling
+the full 5-minute home-button timeout. Also fixed the home-wait loop's
+`tryRecover` handling: it now destructures `{ recovered, unfixable }` (was
+testing the whole object → always truthy, logged `[object Object]`, ignored
+`unfixable`).
+
+**`actions/connect_loop.js` + `actions/accept_loop.js`**
+- `checkProfileAvailability` timeout: fixed 60s → **random 10–30s** (the
+  "unknown" path used to burn a full 60s then proceed anyway).
+- **Pre-action browse** before the Add-friend / Confirm-request probe: skim DOWN
+  the profile a random 2–10s, then scroll back to the TOP over ~10s (mouse-wheel
+  only). Looks human AND re-frames the header button for the click.
+
+**`actions/visit_profile.js` + `utils/userApi.js` — dead-sharer handling.**
+FB serves a "This content isn't available right now" card for removed/restricted
+targets (no feed → child connect/like/share all find 0 and flail ~70s).
+`visit_profile` now detects that card (`isContentUnavailable`, instant check) and,
+for **pool** visits, re-picks a different random target (up to 4). For the
+**`sharers` pool ONLY**, it also hard-deletes the dead link via
+`deleteSharerByUrl(url, country)` → `DELETE /api/sharers/:id` (lists
+`/api/sharers`, matches the URL, resolves the Mongo id). **Never** deletes for
+`users` (real profiles) or `friends` (static JSON). Best-effort, never throws.
 
 ## Current status
 

@@ -309,6 +309,26 @@ module.exports = async function facebook_signup(page, params) {
     if (remaining <= 0) {
       throw new Error('facebook_signup: Home button never appeared (5 min timeout)');
     }
+
+    // Fast-fail on the email-confirmation interstitial. After signup FB often
+    // redirects to confirmemail.php demanding a code emailed to the account —
+    // the Home button can NEVER appear there, so polling the full 5 minutes is
+    // pure waste. Surface the specific cause (so triage doesn't have to open the
+    // dump) and mark noRetry (a retry just re-lands on the same page). The
+    // account WAS created; it's just gated behind email verification we don't
+    // solve yet.
+    let currentUrl = '';
+    try {
+      currentUrl = page.url();
+    } catch (_) {}
+    if (currentUrl.includes('confirmemail.php')) {
+      const err = new Error(
+        'facebook_signup: email confirmation required (confirmemail.php) — account created but FB wants an emailed code'
+      );
+      err.noRetry = true;
+      throw err;
+    }
+
     const pollMs = Math.min(15000, remaining);
     const visible = await home
       .waitFor({ state: 'visible', timeout: pollMs })
@@ -316,7 +336,21 @@ module.exports = async function facebook_signup(page, params) {
       .catch(() => false);
     if (visible) break;
 
-    const recovered = await tryRecover(page, { stepType: 'facebook_signup:home-wait' });
+    // tryRecover returns { recovered, unfixable } — destructure it. The old
+    // code did `const recovered = await tryRecover(...)` and tested the whole
+    // object, which is always truthy (so it logged "[object Object]" and
+    // ignored the unfixable signal). Honor unfixable: a consent flow we can't
+    // clear during signup should abort fast, not poll for 5 minutes.
+    const { recovered, unfixable } = await tryRecover(page, {
+      stepType: 'facebook_signup:home-wait',
+    });
+    if (unfixable) {
+      const err = new Error(
+        `facebook_signup: blocked by "${unfixable}" during home-wait — cannot continue`
+      );
+      err.noRetry = true;
+      throw err;
+    }
     if (recovered) {
       console.log(`  [facebook_signup] recovery "${recovered}" fired — re-polling home button`);
       recoveredOnce = true;
