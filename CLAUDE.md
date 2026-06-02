@@ -2267,10 +2267,14 @@ failure is now `noRetry` (deterministic → fail fast).
 
 **`actions/facebook_signup.js`** — fast-fails on `confirmemail.php` (FB demanding
 an emailed code after signup) with a specific `noRetry` error instead of polling
-the full 5-minute home-button timeout. Also fixed the home-wait loop's
-`tryRecover` handling: it now destructures `{ recovered, unfixable }` (was
-testing the whole object → always truthy, logged `[object Object]`, ignored
-`unfixable`).
+the full 5-minute home-button timeout. The error carries `err.needChecking = true`,
+so `runBrowser` PATCHes the profile to `status: "Need Checking"` on BOTH the
+per-step path AND the `ensure_login` auto-relogin path (`ensure_login` delegates
+to `facebook_signup`, so the detection fires there too). The account exists but is
+gated behind a code we don't enter yet — flagging it surfaces it for manual review
+instead of re-running blind. Also fixed the home-wait loop's `tryRecover` handling:
+it now destructures `{ recovered, unfixable }` (was testing the whole object →
+always truthy, logged `[object Object]`, ignored `unfixable`).
 
 **`actions/connect_loop.js` + `actions/accept_loop.js`**
 - `checkProfileAvailability` timeout: fixed 60s → **random 10–30s** (the

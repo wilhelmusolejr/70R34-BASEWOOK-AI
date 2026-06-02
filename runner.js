@@ -1228,6 +1228,26 @@ async function runBrowser(session, steps, options = {}) {
           { level: 'error', msg: `Auto re-login failed: ${err.message}` },
         ]);
       }
+      // Email-confirmation (confirmemail.php), checkpoint, or rejected creds
+      // hit during re-login → flag the profile for manual review. The account
+      // may exist but is gated (needs an emailed code / challenge / new creds),
+      // so it shouldn't be re-run blind by the next task.
+      if (err.needChecking || err.checkpoint || err.credentialsRejected) {
+        const uid = user?._id || user?.id || '';
+        if (uid) {
+          const why = err.needChecking
+            ? 'email confirmation'
+            : err.checkpoint
+              ? 'checkpoint'
+              : 'credentials rejected';
+          try {
+            await updateProfile(uid, { status: 'Need Checking' });
+            console.log(`Profile ${uid} status -> "Need Checking" (${why})`);
+          } catch (patchErr) {
+            console.warn(`Failed to PATCH status "Need Checking" for ${uid}: ${patchErr.message}`);
+          }
+        }
+      }
       throw err;
     }
 
@@ -1246,7 +1266,9 @@ async function runBrowser(session, steps, options = {}) {
         const isCredRejected = !!(err && err.credentialsRejected);
         const isBrowserDead = !!(err && err.browserDead);
         const isPageBlocked = !!(err && err.pageBlocked);
-        const isAbort = isCheckpoint || isCredRejected || isBrowserDead || isPageBlocked;
+        const isNeedChecking = !!(err && err.needChecking);
+        const isAbort =
+          isCheckpoint || isCredRejected || isBrowserDead || isPageBlocked || isNeedChecking;
 
         // The actual step that failed — a child (e.g. open_search_result) when
         // `step` is its top-level parent (e.g. search). Falls back to the
@@ -1262,7 +1284,9 @@ async function runBrowser(session, steps, options = {}) {
                 ? `Browser session died during ${failedType} — aborting profile`
                 : isPageBlocked
                   ? `Page blocked by consent flow during ${failedType} — aborting profile`
-                  : `Step ${failedType} failed: ${err.message} — continuing to next step`;
+                  : isNeedChecking
+                    ? `Manual review required during ${failedType} — aborting profile`
+                    : `Step ${failedType} failed: ${err.message} — continuing to next step`;
           vaultLog.browser({ browserId: vaultState.browserId }, [{ level: 'error', msg }]);
         }
 
@@ -1338,6 +1362,29 @@ async function runBrowser(session, steps, options = {}) {
           console.warn(
             `Page blocked by consent flow during ${failedType} — skipping remaining steps for this profile`
           );
+          throw err;
+        }
+
+        // Needs manual review (e.g. facebook_signup hit confirmemail.php — the
+        // account exists but is gated behind an emailed code we don't enter
+        // yet). Flag the profile so it surfaces for triage instead of being
+        // re-run blind, and abort the rest of the session.
+        if (isNeedChecking) {
+          failure = { step, error: err };
+          console.warn(
+            `Manual review required during ${failedType} — flagging profile and skipping remaining steps`
+          );
+          const userId = user?._id || user?.id || '';
+          if (userId) {
+            try {
+              await updateProfile(userId, { status: 'Need Checking' });
+              console.log(`Profile ${userId} status -> "Need Checking" (${failedType})`);
+            } catch (patchErr) {
+              console.warn(
+                `Failed to PATCH status "Need Checking" for ${userId}: ${patchErr.message}`
+              );
+            }
+          }
           throw err;
         }
 

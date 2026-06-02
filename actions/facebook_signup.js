@@ -326,6 +326,10 @@ module.exports = async function facebook_signup(page, params) {
         'facebook_signup: email confirmation required (confirmemail.php) — account created but FB wants an emailed code'
       );
       err.noRetry = true;
+      // Flag for manual review — the account exists but is gated behind an
+      // emailed code we don't enter yet. runBrowser PATCHes status="Need
+      // Checking" on this flag (both the per-step and ensure_login paths).
+      err.needChecking = true;
       throw err;
     }
 
