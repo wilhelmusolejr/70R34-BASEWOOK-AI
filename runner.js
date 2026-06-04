@@ -243,6 +243,19 @@ async function runWithRetry(fn, profileId, stepType, page) {
         console.log(`Soft checkpoint dismissed during ${stepType} — letting retry continue`);
       }
 
+      // Email-confirmation gate — FB parked the session on confirmemail.php
+      // (account exists but FB wants an emailed code we don't enter). Retrying
+      // any step just times out on a page that will never render. Abort + flag
+      // for manual review, same as a checkpoint.
+      if (isConfirmEmailUrl(url)) {
+        console.warn(
+          `CONFIRMEMAIL gate detected on ${stepType} (url=${url}) — aborting profile`
+        );
+        err.needChecking = true;
+        err.noRetry = true;
+        break;
+      }
+
       // Handlers can set err.noRetry = true to opt out of step-level retry
       // (e.g. create_page, which handles its own retries internally — a
       // whole-handler restart would spawn a duplicate Page on FB).
@@ -361,6 +374,24 @@ function safePageUrl(page) {
 }
 
 /**
+ * Detect FB's email-confirmation gate. After a signup OR a risk flag on an
+ * existing session, FB parks the page on confirmemail.php demanding a code
+ * emailed to the account. We don't enter that code, so every subsequent step
+ * just times out against a page that never renders the expected UI (an
+ * already-logged-in profile redirected here will FAIL setup_privacy, search,
+ * setup_cover, … one after another, each burning its full retry budget).
+ *
+ * Treated exactly like a checkpoint: abort the profile and flag it
+ * `status: "Need Checking"` for manual review. Detected in the same three
+ * places as checkpoint — pre-flight, in-retry step error, post-step sweep —
+ * via `err.needChecking`, which runBrowser's catch already handles
+ * (`facebook_signup` sets the same flag when it hits confirmemail mid-signup).
+ */
+function isConfirmEmailUrl(url) {
+  return !!url && url.includes('confirmemail.php');
+}
+
+/**
  * Page-readiness gate — run BEFORE every step. If the page is parked on a
  * consent funnel (EU cookie / ad-free / GDPR data-settings), clear it FIRST so
  * the step doesn't run on a blocked page. Steps that don't touch the page would
@@ -380,6 +411,30 @@ function safePageUrl(page) {
  * in-retry / post-step detection + Need-Checking PATCH.
  */
 async function ensurePageReady(page, vaultState) {
+  // Email-confirmation gate first — it's STICKY (once FB gates an account on
+  // confirmemail.php it stays gated for the session), so detecting it proactively
+  // at the top of every step is strictly better than letting each step burn its
+  // retry budget against a page that never renders. Unlike a consent funnel this
+  // is NOT recoverable on our side (we don't enter the emailed code), so we flag
+  // the profile Need Checking via err.needChecking — which runBrowser's catch
+  // already handles — rather than err.pageBlocked. This is the proactive partner
+  // to the in-retry + post-step + pre-flight confirmemail checks (mirroring the
+  // sticky-checkpoint handling), guaranteeing detection even for tasks whose
+  // first step navigates somewhere other than confirmemail.
+  const url = safePageUrl(page);
+  if (isConfirmEmailUrl(url)) {
+    console.warn(`CONFIRMEMAIL gate detected before step (url=${url}) — aborting profile`);
+    const ceErr = new Error(`Email confirmation gate (confirmemail.php) — manual review required`);
+    ceErr.needChecking = true;
+    ceErr.noRetry = true;
+    if (vaultState) {
+      vaultLog.browser({ browserId: vaultState.browserId }, [
+        { level: 'error', msg: `Email confirmation gate (confirmemail.php) — aborting profile` },
+      ]);
+    }
+    throw ceErr;
+  }
+
   const { ready, reason } = await recoverUntilReady(page, {});
   if (ready) return;
 
@@ -1017,6 +1072,16 @@ async function runStep(page, step, profileId, user, vaultState) {
     }
   }
 
+  // Post-action email-confirmation sweep. FB can redirect to confirmemail.php
+  // mid-action without the handler throwing — catch it so the next step doesn't
+  // run against a gate that never clears.
+  if (isConfirmEmailUrl(urlAfter)) {
+    const ceErr = new Error(`Email confirmation gate after ${step.type} (url=${urlAfter})`);
+    ceErr.needChecking = true;
+    ceErr.noRetry = true;
+    throw ceErr;
+  }
+
   console.log(`Completed: ${step.type}`);
 
   if (vaultState) {
@@ -1133,22 +1198,39 @@ async function runBrowser(session, steps, options = {}) {
         }
         console.log(`Soft checkpoint dismissed at pre-flight — continuing`);
       }
+
+      // Pre-flight email-confirmation check — session opened directly on
+      // confirmemail.php. Same abort + Need-Checking flag as a checkpoint.
+      if (isConfirmEmailUrl(preFlightUrl)) {
+        const ceErr = new Error(`Email confirmation gate at pre-flight (url=${preFlightUrl})`);
+        ceErr.needChecking = true;
+        ceErr.noRetry = true;
+        throw ceErr;
+      }
     } catch (err) {
-      failure = { step: { type: 'pre_flight_checkpoint' }, error: err };
+      const preflightAbort = !!(err && (err.checkpoint || err.needChecking));
+      failure = {
+        step: {
+          type: err && err.needChecking ? 'pre_flight_confirmemail' : 'pre_flight_checkpoint',
+        },
+        error: err,
+      };
       if (vaultState) {
-        const msg =
-          err && err.checkpoint
-            ? `Checkpoint hit at pre-flight — aborting profile`
+        const msg = err && err.checkpoint
+          ? `Checkpoint hit at pre-flight — aborting profile`
+          : err && err.needChecking
+            ? `Email confirmation gate at pre-flight — aborting profile`
             : `Pre-flight check failed: ${err.message}`;
         vaultLog.browser({ browserId: vaultState.browserId }, [{ level: 'error', msg }]);
       }
-      if (err && err.checkpoint) {
-        console.warn(`Checkpoint hit at pre-flight — skipping all steps for this profile`);
+      if (preflightAbort) {
+        const why = err.checkpoint ? 'checkpoint' : 'confirmemail';
+        console.warn(`Pre-flight abort (${why}) — skipping all steps for this profile`);
         const userId = user?._id || user?.id || '';
         if (userId) {
           try {
             await updateProfile(userId, { status: 'Need Checking' });
-            console.log(`Profile ${userId} status -> "Need Checking"`);
+            console.log(`Profile ${userId} status -> "Need Checking" (${why})`);
           } catch (patchErr) {
             console.warn(
               `Failed to PATCH status "Need Checking" for ${userId}: ${patchErr.message}`
