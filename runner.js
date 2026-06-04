@@ -127,6 +127,11 @@ function resolveSetupPageImages(user) {
   };
 }
 
+// create_page's eligibility gate, reused by evaluateBuiltinGate so the runner
+// can skip ineligible profiles BEFORE the chance roll (single source of truth
+// with the action's own internal check).
+const { createPageGate } = require('./actions/create_page');
+
 // Handler registry - add new handlers here
 const handlers = {
   homepage_interaction: require('./actions/homepage_interaction'),
@@ -248,9 +253,7 @@ async function runWithRetry(fn, profileId, stepType, page) {
       // any step just times out on a page that will never render. Abort + flag
       // for manual review, same as a checkpoint.
       if (isConfirmEmailUrl(url)) {
-        console.warn(
-          `CONFIRMEMAIL gate detected on ${stepType} (url=${url}) — aborting profile`
-        );
+        console.warn(`CONFIRMEMAIL gate detected on ${stepType} (url=${url}) — aborting profile`);
         err.needChecking = true;
         err.noRetry = true;
         break;
@@ -473,7 +476,10 @@ function renameProfileFolderWithStatus({ runLogDir, displayName, userId, status 
     const oldPath = path.join(runLogDir, 'profiles', oldName);
     if (!fs.existsSync(oldPath)) return;
 
-    const safeName = String(displayName).replace(/[\\/:*?"<>|]/g, '_').trim() || 'unknown';
+    const safeName =
+      String(displayName)
+        .replace(/[\\/:*?"<>|]/g, '_')
+        .trim() || 'unknown';
     const shortId = userId ? String(userId).slice(0, 8) : '';
     const newName =
       shortId && safeName !== String(userId)
@@ -702,6 +708,13 @@ function injectUserParams(steps, user) {
         // overrides; explicit empty string forces re-creation.
         pageUrl:
           typeof step.params?.pageUrl === 'string' ? step.params.pageUrl : user.pageUrl || '',
+        // pageSetupAt feeds the page-setup cooldown gate: skip if stamped &
+        // fresh, re-run if older than the gate's threshold while pageUrl is
+        // still empty. Explicit param wins (pass '' to bypass the cooldown).
+        pageSetupAt:
+          step.params?.pageSetupAt !== undefined
+            ? step.params.pageSetupAt
+            : user.onboarding?.pageSetupAt || '',
       };
     }
 
@@ -998,6 +1011,25 @@ function evaluateStepGuards(step, user) {
 }
 
 /**
+ * Built-in (code-level) eligibility gate for action types that self-skip on
+ * user data. Unlike the declarative `guard` block, this is wired per action
+ * type and reads the already-injected `step.params`. Runs BEFORE the `chance`
+ * roll so an ineligible profile never wastes a probability slot.
+ *
+ * create_page: delegates to the action's own `createPageGate` (single source of
+ * truth) — duplicate-Page / nothing-to-create / page-setup cooldown.
+ *
+ * Returns { pass, reason }.
+ */
+function evaluateBuiltinGate(step) {
+  if (step.type === 'create_page') {
+    const { skip, reason } = createPageGate(step.params || {});
+    if (skip) return { pass: false, reason };
+  }
+  return { pass: true };
+}
+
+/**
  * Execute a single step and recurse into child steps.
  */
 async function runStep(page, step, profileId, user, vaultState) {
@@ -1022,6 +1054,23 @@ async function runStep(page, step, profileId, user, vaultState) {
     if (vaultState) {
       vaultLog.browser({ browserId: vaultState.browserId }, [
         `Skipped: ${step.type} (guard: ${gate.reason})`,
+      ]);
+    }
+    return;
+  }
+
+  // Built-in action eligibility gate (currently create_page's duplicate-Page /
+  // nothing-to-create / page-setup cooldown checks). Runs AFTER the JSON `guard`
+  // and BEFORE the `chance` roll — same ordering rationale as `guard`: an
+  // ineligible profile (already has a Page, nothing to create, or within the
+  // page-setup cooldown) must skip WITHOUT consuming a probability slot. The
+  // action re-checks the same gate internally as defense-in-depth.
+  const builtin = evaluateBuiltinGate(step);
+  if (!builtin.pass) {
+    console.log(`Skipping: ${step.type} (gate: ${builtin.reason})`);
+    if (vaultState) {
+      vaultLog.browser({ browserId: vaultState.browserId }, [
+        `Skipped: ${step.type} (gate: ${builtin.reason})`,
       ]);
     }
     return;
@@ -1216,11 +1265,12 @@ async function runBrowser(session, steps, options = {}) {
         error: err,
       };
       if (vaultState) {
-        const msg = err && err.checkpoint
-          ? `Checkpoint hit at pre-flight — aborting profile`
-          : err && err.needChecking
-            ? `Email confirmation gate at pre-flight — aborting profile`
-            : `Pre-flight check failed: ${err.message}`;
+        const msg =
+          err && err.checkpoint
+            ? `Checkpoint hit at pre-flight — aborting profile`
+            : err && err.needChecking
+              ? `Email confirmation gate at pre-flight — aborting profile`
+              : `Pre-flight check failed: ${err.message}`;
         vaultLog.browser({ browserId: vaultState.browserId }, [{ level: 'error', msg }]);
       }
       if (preflightAbort) {
@@ -1925,7 +1975,9 @@ function writeSummaryFile({
   lines.push(`Finished:  ${finishedAt}`);
   lines.push(`Duration:  ${totalElapsedSec}s`);
   lines.push('');
-  lines.push(`Profiles:  ${formattedResults.length}${profileSource ? ` (source: ${profileSource})` : ''}`);
+  lines.push(
+    `Profiles:  ${formattedResults.length}${profileSource ? ` (source: ${profileSource})` : ''}`
+  );
   lines.push(`Succeeded: ${successCount}`);
   if (skippedCount > 0) lines.push(`Skipped:   ${skippedCount} (cooldown)`);
   lines.push(`Failed:    ${errorCount}`);

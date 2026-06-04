@@ -31,12 +31,19 @@ const {
   clickLocator,
   uploadImageFromButton,
 } = require('../utils/pageSetupHelpers');
+const { setOnboarding } = require('../utils/userApi');
 
 const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
 
 const PRE_CREATE_ATTEMPTS = 3;
 const POST_FIELD_ATTEMPTS = 2;
 const RETRY_WAIT_MS = 60000;
+
+// Page-setup cooldown. create_page stamps onboarding.pageSetupAt once a Page is
+// committed FB-side; the entry gate then skips re-runs while the stamp is fresh.
+// After this many days, if the profile STILL has no pageUrl, the earlier attempt
+// evidently never produced a usable Page, so one more attempt is allowed.
+const PAGE_SETUP_RETRY_DAYS = 10;
 
 /**
  * Retry a single post-create action (field fill, upload, step advance).
@@ -117,6 +124,58 @@ async function resetModals(page) {
   }
 }
 
+/**
+ * Pure eligibility gate for create_page — no Playwright, just the user-derived
+ * params. Returns `{ skip, reason }`. Evaluated in priority order:
+ *
+ *   1. Duplicate-Page guard — pageUrl already recorded → skip (create_page is
+ *      destructive; a second run spawns a duplicate Page that needs manual
+ *      cleanup AND splits page-asset state in the DB).
+ *   2. Nothing-to-create guard — no pageName → skip (no data to build a Page).
+ *   3. Page-setup cooldown — onboarding.pageSetupAt stamped & fresh (< 10d) →
+ *      skip. Stamped & stale (≥ 10d) with pageUrl still empty (proven by gate 1)
+ *      and a pageName present (proven by gate 2) → the earlier attempt never
+ *      produced a usable Page, so allow a retry (no skip). Stamped but
+ *      unparseable date → skip (safe default: an attempt was made, don't risk a
+ *      duplicate on a bad timestamp).
+ *
+ * Shared by the action (defense-in-depth / direct invocation) AND the runner's
+ * pre-`chance` guard phase (so an ineligible profile never wastes a probability
+ * slot). Single source of truth — keep the two callers in sync via this fn.
+ */
+function createPageGate({ pageUrl = '', pageName = '', pageSetupAt = '' } = {}) {
+  if (pageUrl && String(pageUrl).trim()) {
+    return {
+      skip: true,
+      reason: `already has pageUrl="${pageUrl}" (duplicate-Page guard)`,
+    };
+  }
+
+  if (!pageName || !String(pageName).trim()) {
+    return { skip: true, reason: 'no linkedPage.pageName configured (nothing to create)' };
+  }
+
+  if (pageSetupAt && String(pageSetupAt).trim()) {
+    const stampedMs = Date.parse(pageSetupAt);
+    if (Number.isNaN(stampedMs)) {
+      return {
+        skip: true,
+        reason: `pageSetupAt set but unparseable ("${pageSetupAt}") (safe default)`,
+      };
+    }
+    const ageDays = (Date.now() - stampedMs) / 86400000;
+    if (ageDays < PAGE_SETUP_RETRY_DAYS) {
+      return {
+        skip: true,
+        reason: `pageSetupAt stamped ${ageDays.toFixed(1)}d ago (< ${PAGE_SETUP_RETRY_DAYS}d page-setup cooldown)`,
+      };
+    }
+    // Stale stamp, still no pageUrl → fall through and allow a retry.
+  }
+
+  return { skip: false, reason: '' };
+}
+
 module.exports = async function create_page(page, params) {
   const {
     pageName,
@@ -130,31 +189,16 @@ module.exports = async function create_page(page, params) {
     coverPhotoUrl = '',
     categoryKeyword = '',
     userId = '',
-    pageUrl = '',
   } = params;
 
-  // Guard: skip the whole action if this user already has a Page recorded.
-  // create_page is destructive (commits a real FB Page on first click) and
-  // running it twice produces a duplicate Page on the account — which then
-  // needs manual cleanup AND splits the page-asset state in the DB. The
-  // pageUrl is PATCHed to the user record after a successful create_page;
-  // when injectUserParams sees it non-empty, the action returns immediately.
-  // Pass an empty string explicitly to override (e.g. testing).
-  if (pageUrl && String(pageUrl).trim()) {
-    console.log(
-      `  [create_page] User already has pageUrl="${pageUrl}" — skipping (guard against duplicate Page).`
-    );
-    return;
-  }
-
-  // Guard: skip cleanly when this user has no Page configured. An empty
-  // pageName means linkedPage.pageName isn't set on the record — there's
-  // nothing to create, so this is a no-op (like the duplicate-Page guard
-  // above), NOT a failure. Returning here keeps the profile SUCCESS instead
-  // of burning the runner's 3×60s retry budget on a deterministic
-  // missing-data error that can never succeed by retrying.
-  if (!pageName || !String(pageName).trim()) {
-    console.log('  [create_page] No linkedPage.pageName configured — skipping (nothing to create).');
+  // Entry gate — duplicate-Page / nothing-to-create / page-setup cooldown.
+  // Defense-in-depth: when invoked via the runner this has already been checked
+  // in the pre-`chance` guard phase, but the action re-checks so a direct
+  // invocation (dev script / test) is still protected from spawning a duplicate
+  // Page. `return` (no throw) — from the runner's view the step was a clean no-op.
+  const gate = createPageGate(params);
+  if (gate.skip) {
+    console.log(`  [create_page] skipping — ${gate.reason}.`);
     return;
   }
 
@@ -316,6 +360,19 @@ module.exports = async function create_page(page, params) {
     }
 
     console.log('  [create_page] Page committed — entering post-create phase (per-field retry).');
+    // Stamp the page-setup cooldown marker right after the "Create Page" commit
+    // click succeeded — i.e. once a Page actually exists on FB. This is the
+    // destructive point we must not repeat, so from here on the profile is on
+    // the PAGE_SETUP_RETRY_DAYS cooldown regardless of how the post-create phase
+    // goes (the canary early-return and full-completion both flow through here).
+    // Pre-commit failures (couldn't even reach the button) are intentionally NOT
+    // stamped — nothing was created, so they stay retriable on the next run
+    // rather than locking out for the full cooldown on a transient nav issue.
+    // A successful run also persists pageUrl, after which the duplicate-Page
+    // guard takes over; a committed-but-half-configured Page keeps pageUrl empty
+    // and becomes eligible again only once the cooldown lapses. Best-effort —
+    // setOnboarding swallows its own errors.
+    if (userId) await setOnboarding(userId, 'pageSetupAt');
     await stepWait(page);
 
     /* ---------- POST-CREATE phase — each field retried individually ---------- */
@@ -514,3 +571,7 @@ module.exports = async function create_page(page, params) {
     if (coverTempPath) fs.unlink(coverTempPath, () => {});
   }
 };
+
+// Exposed so the runner can evaluate the same gate in its pre-`chance` guard
+// phase (an ineligible profile then never wastes a probability slot).
+module.exports.createPageGate = createPageGate;

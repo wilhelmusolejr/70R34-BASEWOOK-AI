@@ -149,9 +149,12 @@ Supported guard keys (all optional, all must pass when set):
 | `minAccountAgeDays: N` | `(now - user.accountCreated) >= N days`. Empty / invalid `accountCreated` is treated as "age unknown" → guard FAILS (safe default — don't run age-gated actions until we can verify the age). |
 
 Order of evaluation per step:
-1. **`guard`** — skip with reason if any condition fails
-2. **`chance`** — if guard passed, roll the probability dice
-3. **Handler** — if both passed, run
+1. **`guard`** — declarative JSON guard block; skip with reason if any condition fails
+2. **built-in gate** — code-level per-action eligibility (currently `create_page`'s
+   duplicate-Page / nothing-to-create / page-setup cooldown via `evaluateBuiltinGate`);
+   skip with reason if ineligible
+3. **`chance`** — if guard + built-in gate passed, roll the probability dice
+4. **Handler** — if all passed, run
 
 Console output on skip looks like:
 ```
@@ -432,6 +435,7 @@ Each setup-style action stamps a completion timestamp on the profile's
 | `setup_cover` | `coverImageSetAt` | After Save changes wins |
 | `setup_about` | `aboutSetAt` | After every section completes + markProfileSetup PATCH |
 | `marketplace_location` | `marketplaceSetAt` | After Apply + verification succeeds |
+| `create_page` | `pageSetupAt` | Right after the "Create Page" commit click succeeds (a Page now exists FB-side). Covers the canary early-return + full-completion paths. Pre-commit failures are NOT stamped (nothing was created → stay retriable). Feeds the page-setup cooldown gate so a committed-but-incomplete Page isn't re-attempted daily. |
 | `publish_post` | `publishPostAt` | After the Create-post dialog detaches |
 | `share_post` | `lastSharedAt` | After "Share now" click |
 | `share_posts` | `lastSharedAt` | After loop completes with at least 1 share |
@@ -929,6 +933,53 @@ recorded (set by the persistence PATCH above). To force re-creation
 the step's params — the runner respects explicit-empty over the user
 record.
 
+### Page-setup cooldown gate (`pageSetupAt`)
+
+A third entry check (inside `createPageGate`, after the duplicate-Page
+and empty-`pageName` checks). It exists because page creation is
+high-risk: it can fail or get flagged mid-flow, and re-running it **every
+day** when it keeps failing can harm the account. So the cooldown backs
+off for `PAGE_SETUP_RETRY_DAYS` (10) after **any** attempt.
+
+`create_page` stamps `onboarding.pageSetupAt` **right after the "Create
+Page" commit click succeeds** — the moment a Page actually exists FB-side,
+which is the destructive point we must not repeat. Both downstream paths
+(the post-create canary early-return and full completion) flow through it.
+**Pre-commit failures are intentionally NOT stamped** — they created
+nothing, so they stay retriable on the next run instead of locking out for
+the full cooldown over a transient nav glitch. A successful run also
+persists `pageUrl`, after which the duplicate-Page guard takes over; a
+committed-but-half-configured Page keeps `pageUrl` empty and becomes
+eligible again only once the cooldown lapses. `injectUserParams` passes
+the current stamp through as `params.pageSetupAt`. The gate:
+
+- **Stamped & fresh** (age < 10 days) → skip. Backs off after a Page was
+  recently committed — don't spawn a duplicate right after one was made,
+  and don't re-attempt a committed-but-incomplete Page every day.
+- **Stamped & stale** (age ≥ 10 days) → fall through and run again. By
+  the time this gate is reached, the duplicate-Page guard has already
+  proven `pageUrl` is empty and the `pageName` guard has proven a name
+  exists — so a stamp this old with still no `pageUrl` means the earlier
+  attempt never produced a usable Page; one more attempt is allowed.
+- **Stamped but unparseable date** → skip (safe default — an attempt was
+  made; don't risk a duplicate on a bad timestamp).
+- **Not stamped** → fall through and run (first-ever attempt).
+
+Threshold is `PAGE_SETUP_RETRY_DAYS = 10` in `actions/create_page.js`.
+Pass an explicit `"pageSetupAt": ""` in the step's params to bypass the
+cooldown (forces the gate to treat the profile as never-attempted).
+
+**Gate runs BEFORE `chance`.** All three checks are evaluated in
+`runStep`'s built-in guard phase (`evaluateBuiltinGate` → the action's
+exported `createPageGate`), which runs AFTER the JSON `guard` block and
+BEFORE the `chance` roll — same ordering rationale as `guard`: an
+ineligible profile (already has a Page, nothing to create, or within the
+cooldown) skips WITHOUT consuming a probability slot. Only once the gate
+passes (eligible to create) is `chance` rolled to decide whether this
+run actually fires. So `chance` gates *eligible* profiles, never wasted
+on ones that would skip anyway. The action also re-checks `createPageGate`
+internally as defense-in-depth (direct/test invocation outside the runner).
+
 ### Auto-injected params
 
 | Step | Param | Source |
@@ -939,6 +990,7 @@ record.
 | `create_page` | `city`/`state`/`zipCode`/`streetAddress` | `buildPageAddress(...)` |
 | `create_page` | `profilePhotoUrl`/`coverPhotoUrl` | `resolveSetupPageImages(user)` |
 | `create_page` | `pageUrl` | `user.pageUrl` (duplicate-Page guard — non-empty short-circuits the action) |
+| `create_page` | `pageSetupAt` | `user.onboarding.pageSetupAt` (page-setup cooldown gate — skip if stamped & fresh, re-run if older than 10d while `pageUrl` still empty) |
 | `schedule_posts` | `posts` | `user.linkedPage.posts` |
 | `switch_profile` | `userName` | `firstName + lastName` |
 
@@ -1916,7 +1968,7 @@ Walks step tree before execution, fills missing params from user record.
 | `setup_avatar` | `photoUrl`, `userIdentity`, `userId` |
 | `setup_cover` | `photoUrl`, `userId` |
 | `setup_privacy` | `userId` |
-| `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId` |
+| `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId`, `pageUrl`, `pageSetupAt` |
 | `schedule_posts` | `posts` from `linkedPage.posts` |
 | `switch_profile` | `userName` from `firstName + lastName` |
 | `search` | `city` from `user.city` (page/general modes), `country` from `user.country` (all modes — IT vs US pool selection) |
