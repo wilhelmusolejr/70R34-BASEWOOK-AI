@@ -1,8 +1,9 @@
 {
   "taskId": "engage-and-add",
   "profilesFromStatus": "Active",
+  "profiles": [],
   "cooldown": { "shareHours": 24 },
-  "concurrency": 5,
+  "concurrency": 10,
   "blockMedia": true,
   "steps": [
     {
@@ -97,21 +98,10 @@
     { "type": "wait", "params": { "min": 30, "max": 60 } },
 
     {
-      "type": "homepage_interaction",
-      "steps": [
-        { "type": "scroll", "params": { "min": 30, "max": 50 } },
-        { "type": "like_posts", "params": { "min": 0, "max": 2 } }
-      ]
-    },
-
-    { "type": "wait", "params": { "min": 30, "max": 60 } },
-
-    {
       "type": "create_page",
       "guard": { "ifFieldEmpty": "pageUrl", "minAccountAgeDays": 5 },
-      "chance": 0.3,
+      "chance": 0.5,
       "steps": [
-        { "type": "schedule_posts" },
         { "type": "switch_profile" }
       ]
     }
