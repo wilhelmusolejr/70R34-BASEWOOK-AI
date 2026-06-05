@@ -87,6 +87,7 @@ async function runStep(page, step) {
 | `profilesFromStatus` | * | — | Dynamic fetch: `GET /api/profiles?status=<value>&limit=500`. Used when `profiles[]` is missing/empty. |
 | `cooldown.shareHours` | no | — | Skip profile if `user.onboarding.lastSharedAt` is within this many hours. |
 | `concurrency` | no | all | Max parallel browsers |
+| `openStaggerSeconds` | no | `0` | Min seconds between browser **opens**. `0` = all `concurrency` browsers open at once (original behavior). When set, each worker reserves the next open slot before launching, so opens start ≥ N seconds apart — avoids the startup thundering-herd (RAM/CPU spike) and the fleet-timing detection signal of N accounts coming online simultaneously. Mid-run reopens that are already naturally spread incur no extra wait. |
 | `blockMedia` | no | `true` | Block images/video/audio/fonts |
 | `steps` | yes | — | Array of steps |
 
@@ -2344,6 +2345,39 @@ for **pool** visits, re-picks a different random target (up to 4). For the
 `deleteSharerByUrl(url, country)` → `DELETE /api/sharers/:id` (lists
 `/api/sharers`, matches the URL, resolves the Mongo id). **Never** deletes for
 `users` (real profiles) or `friends` (static JSON). Best-effort, never throws.
+
+## Resilience + control updates (2026-06, batch 2)
+
+**`runner.js` — `confirmemail.php` detection OUTSIDE signup.** Previously only
+`facebook_signup` caught FB's email-confirmation gate. An **already-logged-in**
+profile that FB redirected to `confirmemail.php` mid-session had no detection —
+every step timed out as a soft failure, the session ran ~1h, and the profile was
+logged `PARTIAL` → folder renamed `SUCCESS`, never flagged. Now `isConfirmEmailUrl`
+is checked in the same spots as a sticky checkpoint — proactive `ensurePageReady`
+gate, in-retry step error, post-step sweep, AND pre-flight — all setting
+`err.needChecking`, which `runBrowser` already handles (abort remaining steps +
+PATCH `status: "Need Checking"`). `backfill-confirmemail-needchecking.js` flags the
+backlog: scans run folders for dumps whose `<!-- url: -->` comment is
+confirmemail.php, resolves the owner id via `/tracker`+`/onboarding` markers
+(refuses to guess on short-id collisions), PATCHes to Need Checking (dry-run by
+default, `--apply` to write, idempotent).
+
+**`create_page` — page-setup cooldown gate (`pageSetupAt`).** Page creation is
+high-risk: a failing/flagged creation re-run every day can harm the account or
+spawn duplicate Pages. New onboarding key `pageSetupAt` stamped right after the
+"Create Page" commit click succeeds (pre-commit failures NOT stamped → stay
+retriable). Gate `createPageGate(params)` (duplicate-Page / nothing-to-create /
+10-day cooldown) is the single source of truth, evaluated BEFORE the `chance`
+roll via the runner's `evaluateBuiltinGate` so an ineligible profile never wastes
+a probability slot; the action re-checks it internally as defense-in-depth. See
+[Page-setup cooldown gate](#page-setup-cooldown-gate-pagesetupat).
+
+**`runner.js` — browser-open stagger (`task.openStaggerSeconds`).** Default
+behavior opened all `concurrency` browsers simultaneously (RAM/CPU spike + a
+fleet-timing detection signal). When set, each worker reserves the next open slot
+(synchronous/atomic) and waits, so opens start ≥ N seconds apart. Reserved AFTER
+the cooldown skip (a skip never burns a slot); mid-run reopens already spread out
+incur no extra wait. `0`/unset = original behavior. See the task-fields table.
 
 ## Current status
 

@@ -1663,6 +1663,29 @@ async function runTask(task) {
   const options = { blockMedia: blockMedia !== false };
   const startedAtMs = Date.now();
 
+  // Browser-open stagger. By default all `limit` workers start at once and open
+  // their browsers simultaneously — a thundering-herd that spikes RAM/CPU AND is
+  // a fleet-timing detection signal (N accounts coming online in the same
+  // second). `task.openStaggerSeconds` spaces opens out: each worker reserves
+  // the next open slot before launching, so opens start at least that many
+  // seconds apart. 0 / unset = original simultaneous behavior.
+  //
+  // reserveOpenSlotMs() is synchronous, so the read-modify-write of nextOpenAt
+  // is atomic in Node's single-threaded loop (no await between read and write) —
+  // two workers can never grab the same slot. Returns how long THIS worker must
+  // wait before opening. Slots that fall in the past (e.g. a mid-run reopen long
+  // after the initial burst) return 0, so the stagger never adds idle time once
+  // opens are already naturally spread.
+  const openStaggerMs = Math.max(0, Number(task.openStaggerSeconds) || 0) * 1000;
+  let nextOpenAt = 0;
+  function reserveOpenSlotMs() {
+    if (openStaggerMs <= 0) return 0;
+    const now = Date.now();
+    const slot = Math.max(now, nextOpenAt);
+    nextOpenAt = slot + openStaggerMs;
+    return slot - now;
+  }
+
   // Memoized — if run-task.js already initialized the dir (so it could set up
   // the top-level tasks-logs.log tee before this point), this call is a no-op
   // and returns the same path.
@@ -1776,6 +1799,17 @@ async function runTask(task) {
         };
         saveState(taskId, userIds, state);
         continue; // next userId from the queue
+      }
+
+      // Stagger the actual browser open (reserved AFTER the cooldown skip so a
+      // skipped profile never burns a slot). The reserve is synchronous/atomic;
+      // the wait that follows is what spaces the fleet's opens apart.
+      const openWaitMs = reserveOpenSlotMs();
+      if (openWaitMs > 0) {
+        console.log(
+          `[${displayName}] Staggering browser open — waiting ${(openWaitMs / 1000).toFixed(0)}s...`
+        );
+        await new Promise((r) => setTimeout(r, openWaitMs));
       }
 
       await runInSession({ displayName, browserId, idsToStrip: [userId], userId }, async () => {
