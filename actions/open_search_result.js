@@ -1,70 +1,225 @@
 /**
  * open_search_result — Navigator action.
- * Picks a profile/page link from the currently-loaded search-results page
- * (anchors matching `a[href*="/profile.php?id="]`) and clicks into it.
- * After click, the browser is on that profile or page, so child steps
- * (scroll, add_friend, follow, like_posts, ...) operate on it.
+ * Picks a profile/page result from the currently-loaded search-results page and
+ * clicks into it. After the click the browser is on that profile or page, so
+ * child steps (scroll, add_friend, follow, like_posts, ...) operate on it.
+ *
+ * Two result-link shapes are recognized:
+ *   - numeric → a[href*="/profile.php?id="]  (people, freshly-created Pages)
+ *   - vanity  → facebook.com/<handle>        (established Pages: /unistrapg,
+ *               /Regione.Umbria.official, ...). The Pages filter surfaces mostly
+ *               vanity links, which is why a numeric-only match used to time out
+ *               on every Pages search that returned well-known Pages.
+ *
+ * Vanity links are indistinguishable from FB's own chrome (sidebar shortcuts,
+ * nav, footer), so they are accepted ONLY inside the search-results container
+ * ([role="feed"] / [aria-label="Search results"]). Numeric /profile.php?id=
+ * links are accepted anywhere (the original behavior — safe, never chrome).
  *
  * Use as a child of `search`.
  */
 
 const { humanClick, humanWait, scrollToCenter } = require('../utils/humanBehavior');
 
-const RESULT_LINK_SELECTOR = 'a[href*="/profile.php?id="]';
+// First path-segments that are FB product routes, never a Page vanity handle.
+const RESERVED_SEGMENTS = [
+  'profile.php',
+  'marketplace',
+  'groups',
+  'watch',
+  'reel',
+  'reels',
+  'stories',
+  'story.php',
+  'events',
+  'gaming',
+  'games',
+  'pages',
+  'page',
+  'me',
+  'friends',
+  'bookmarks',
+  'notifications',
+  'messages',
+  'settings',
+  'business',
+  'ads',
+  'help',
+  'policies',
+  'privacy',
+  'login',
+  'reg',
+  'photo',
+  'photo.php',
+  'permalink.php',
+  'sharer',
+  'search',
+  'hashtag',
+  'public',
+  'places',
+  'live',
+  'fundraisers',
+  'jobs',
+  'weather',
+  'save',
+  'offers',
+  'today',
+  'find-friends',
+  'lite',
+  'home.php',
+  'recover',
+];
 
-// FB's empty-search-results state. A zero-result query (common for obscure
-// "{category} in {city}" / "{topic} near me" searches) renders this banner
-// INSTEAD of result links — it's a legitimate outcome, NOT a failure. We detect
-// it and return cleanly so the runner doesn't burn its 3×retry budget waiting
-// for links that will never appear. Covers the en-US + it phrasings seen on
-// IT-proxy accounts; the `.` in "didn.t" matches both straight and curly
-// apostrophes. A genuinely broken/empty page (neither links nor this banner)
-// still throws → dumps → so an unhandled locale can be added later.
+// FB's empty-search-results state. A zero-result query renders this banner
+// INSTEAD of result links — a legitimate outcome, NOT a failure. Covers en-US +
+// it phrasings; the `.` in "didn.t" matches both straight and curly apostrophes.
 const NO_RESULTS_RE =
   /We didn.t find any results|Try searching for something else|Nessun risultato|Non abbiamo trovato|Prova a cercare/i;
+
+/**
+ * Is `href` a clickable search RESULT link?
+ *   numeric /profile.php?id=<n>  → always a result (can't be chrome).
+ *   single-segment vanity handle → a result only when `allowVanity` (i.e. we're
+ *     scoped to the results container, so it can't be a nav/sidebar link).
+ *
+ * NOTE: the detection waitForFunction below runs an INLINE copy of this logic in
+ * the page context — FB's CSP blocks eval, so we can't inject this fn. Keep the
+ * two in sync.
+ */
+function isResultHref(href, allowVanity) {
+  if (!href) return false;
+  if (/\/profile\.php\?id=\d+/.test(href)) return true;
+  if (!allowVanity) return false;
+  let path;
+  try {
+    const u = href.startsWith('http') ? new URL(href) : new URL(href, 'https://www.facebook.com');
+    const host = u.hostname.replace(/^www\./, '');
+    if (host !== 'facebook.com' && host !== 'web.facebook.com' && host !== 'm.facebook.com') {
+      return false;
+    }
+    path = u.pathname;
+  } catch (e) {
+    return false;
+  }
+  const seg = path.replace(/^\/+|\/+$/g, '');
+  if (!seg || seg.indexOf('/') !== -1) return false; // homepage "/" or multi-segment route
+  if (seg.toLowerCase().endsWith('.php')) return false; // *.php product route
+  if (RESERVED_SEGMENTS.indexOf(seg.toLowerCase()) !== -1) return false;
+  return /^[a-zA-Z0-9.]{5,}$/.test(seg); // FB usernames: ≥5 chars, [a-z0-9.]
+}
+
+// Dedupe key — collapses the photo+name anchor pair and the `?__tn__=`/`&` query
+// variants of the same target down to one key (pathname + optional ?id=).
+function hrefKey(href) {
+  try {
+    const u = href.startsWith('http') ? new URL(href) : new URL(href, 'https://www.facebook.com');
+    const id = u.searchParams.get('id');
+    return u.pathname.replace(/\/+$/, '') + (id ? `?id=${id}` : '');
+  } catch (e) {
+    return String(href).split('?')[0];
+  }
+}
 
 module.exports = async function open_search_result(page, params) {
   const { pick = 'random' } = params;
 
-  // Wait for EITHER result links OR the no-results banner — whichever the page
-  // renders first wins the race. Both branches resolve (never reject) so the
-  // race result is deterministic: 'results' | 'empty' | 'timeout' (= neither
-  // appeared within 15s, a real failure).
-  const outcome = await Promise.race([
-    page
-      .locator(RESULT_LINK_SELECTOR)
-      .first()
-      .waitFor({ state: 'visible', timeout: 15000 })
-      .then(
-        () => 'results',
-        () => 'timeout'
-      ),
-    page
-      .getByText(NO_RESULTS_RE)
-      .first()
-      .waitFor({ state: 'visible', timeout: 15000 })
-      .then(
-        () => 'empty',
-        () => 'timeout'
-      ),
-  ]);
+  // Wait up to 15s for EITHER a result link (numeric anywhere, vanity inside the
+  // results feed) OR FB's no-results banner. Detection runs in-page so the
+  // vanity-vs-chrome scoping is evaluated against the live DOM. Resolves to
+  // 'results' | 'empty'; neither within 15s → the page never settled into a
+  // known search-results state (a real failure) → throw.
+  let outcome;
+  try {
+    const handle = await page.waitForFunction(
+      ({ reserved, noResultsSrc }) => {
+        const noResultsRe = new RegExp(noResultsSrc, 'i');
+        const text = document.body ? document.body.innerText || '' : '';
+        if (noResultsRe.test(text)) return 'empty';
 
-  if (outcome === 'empty') {
-    console.log('  [open_search_result] Search returned no results — skipping (not an error).');
-    return;
-  }
-  if (outcome === 'timeout') {
+        const container =
+          document.querySelector('[role="feed"]') ||
+          document.querySelector('[aria-label="Search results"]');
+        const scope = container || document;
+        const allowVanity = !!container;
+
+        // INLINE copy of isResultHref (FB CSP blocks injecting the Node fn).
+        const isResult = (href) => {
+          if (!href) return false;
+          if (/\/profile\.php\?id=\d+/.test(href)) return true;
+          if (!allowVanity) return false;
+          let path;
+          try {
+            const u = href.startsWith('http')
+              ? new URL(href)
+              : new URL(href, 'https://www.facebook.com');
+            const host = u.hostname.replace(/^www\./, '');
+            if (
+              host !== 'facebook.com' &&
+              host !== 'web.facebook.com' &&
+              host !== 'm.facebook.com'
+            ) {
+              return false;
+            }
+            path = u.pathname;
+          } catch (e) {
+            return false;
+          }
+          const seg = path.replace(/^\/+|\/+$/g, '');
+          if (!seg || seg.indexOf('/') !== -1) return false;
+          if (seg.toLowerCase().endsWith('.php')) return false;
+          if (reserved.indexOf(seg.toLowerCase()) !== -1) return false;
+          return /^[a-zA-Z0-9.]{5,}$/.test(seg);
+        };
+
+        const anchors = scope.querySelectorAll('a[href]');
+        for (const a of anchors) {
+          if (a.getAttribute('aria-hidden') === 'true') continue;
+          if (isResult(a.getAttribute('href'))) return 'results';
+        }
+        return false;
+      },
+      { reserved: RESERVED_SEGMENTS, noResultsSrc: NO_RESULTS_RE.source },
+      { timeout: 15000, polling: 700 }
+    );
+    outcome = await handle.jsonValue();
+  } catch (err) {
     throw new Error(
       'open_search_result: neither result links nor the no-results banner appeared within 15s'
     );
   }
 
+  if (outcome === 'empty') {
+    console.log('  [open_search_result] Search returned no results — skipping (not an error).');
+    return;
+  }
+
   await humanWait(page, 800, 1500);
 
-  const anchors = await page.$$(RESULT_LINK_SELECTOR);
-  if (!anchors.length) {
-    // Links vanished between the race resolving and the re-query (rare). Treat
-    // a now-visible no-results banner as a clean skip rather than a failure.
+  // Re-collect result anchors in Node for clicking. Scope to the results
+  // container so vanity handles can't be FB chrome (sidebar/shortcuts).
+  const container =
+    (await page.$('[role="feed"]')) || (await page.$('[aria-label="Search results"]'));
+  const root = container || page;
+  const allowVanity = !!container;
+  const anchors = await root.$$('a[href]');
+
+  const seen = new Set();
+  const candidates = [];
+  for (const a of anchors) {
+    const ariaHidden = await a.getAttribute('aria-hidden').catch(() => null);
+    if (ariaHidden === 'true') continue;
+    const href = await a.getAttribute('href').catch(() => null);
+    if (!isResultHref(href, allowVanity)) continue;
+    const key = hrefKey(href);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push({ handle: a, href });
+  }
+
+  if (!candidates.length) {
+    // Race said 'results' but the re-query found none (rare: feed virtualization
+    // unmounted them, or a no-results banner rendered late). Treat a now-present
+    // banner as a clean skip; otherwise it's a genuine miss.
     const empty = await page
       .getByText(NO_RESULTS_RE)
       .first()
@@ -78,21 +233,6 @@ module.exports = async function open_search_result(page, params) {
     }
     throw new Error('open_search_result: no profile/page links found on page');
   }
-
-  // Dedupe by href so we don't re-pick the same target variant (avatar + name anchor pair).
-  const seen = new Set();
-  const candidates = [];
-  for (const a of anchors) {
-    const href = await a.getAttribute('href').catch(() => null);
-    if (!href) continue;
-    const key = href.split('&')[0];
-    if (seen.has(key)) continue;
-    seen.add(key);
-    candidates.push({ handle: a, href });
-  }
-
-  if (!candidates.length)
-    throw new Error('open_search_result: no usable profile links after dedupe');
 
   let chosen;
   if (pick === 'first' || pick === 0) {
