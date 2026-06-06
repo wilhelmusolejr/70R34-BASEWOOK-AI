@@ -436,7 +436,7 @@ Each setup-style action stamps a completion timestamp on the profile's
 | `setup_cover` | `coverImageSetAt` | After Save changes wins |
 | `setup_about` | `aboutSetAt` | After every section completes + markProfileSetup PATCH |
 | `marketplace_location` | `marketplaceSetAt` | After Apply + verification succeeds |
-| `create_page` | `pageSetupAt` | Right after the "Create Page" commit click succeeds (a Page now exists FB-side). Covers the canary early-return + full-completion paths. Pre-commit failures are NOT stamped (nothing was created → stay retriable). Feeds the page-setup cooldown gate so a committed-but-incomplete Page isn't re-attempted daily. |
+| `create_page` | `pageSetAt` | Right after the "Create Page" commit click succeeds (a Page now exists FB-side). Covers the canary early-return + full-completion paths. Pre-commit failures are NOT stamped (nothing was created → stay retriable). Feeds the page-setup cooldown gate so a committed-but-incomplete Page isn't re-attempted daily. **Server key is `pageSetAt`, not `pageSetupAt`.** |
 | `publish_post` | `publishPostAt` | After the Create-post dialog detaches |
 | `share_post` | `lastSharedAt` | After "Share now" click |
 | `share_posts` | `lastSharedAt` | After loop completes with at least 1 share |
@@ -833,6 +833,19 @@ before re-throwing.
 | `schedule_posts` | Leaf | Schedule `params.posts[]` on loaded Page, one per day starting tomorrow. Per-post failures logged, not thrown. |
 | `switch_profile` | Leaf | Your profile → Switch to [userName] → 50s cooldown. Falls back to "Quick switch profiles". |
 
+> **⚠️ KNOWN BREAKAGE (2026-06, NOT yet fixed) — `switch_profile` selectors are stale.**
+> FB redesigned the "Your profile" menu: the inline **`[aria-label="Switch to <name>"]`**
+> and **`[aria-label="Quick switch profiles"]`** entries the action waits for **no longer
+> exist** — they were replaced by a single **`[aria-label="See all profiles"]`** button that
+> opens a profile picker. The action opens the menu fine, then both `waitFor`s time out at
+> 15s (×3 retries). Confirmed fleet-wide across every recent run (warmup + engage, 06-03/04);
+> dumps in `logs/.../fail-switch_profile-*.{html,png}` (the PNG shows the new menu clearly).
+> **Impact is non-fatal** — it's the last step (switch back to the personal profile), so the
+> Page still gets created; the session just ends on the Page profile. **Fix (TODO):** click
+> `[aria-label="See all profiles"]`, then select the target profile by `userName` in the
+> picker that opens (its DOM isn't dumped yet — the action times out before clicking it, so
+> it needs a live run to capture the picker's selectors).
+
 Composed via the `setup_page_full` preset, or nested:
 ```json
 { "type": "create_page", "steps": [
@@ -934,15 +947,21 @@ recorded (set by the persistence PATCH above). To force re-creation
 the step's params — the runner respects explicit-empty over the user
 record.
 
-### Page-setup cooldown gate (`pageSetupAt`)
+### Page-setup cooldown gate (`pageSetAt`)
 
-A third entry check (inside `createPageGate`, after the duplicate-Page
-and empty-`pageName` checks). It exists because page creation is
-high-risk: it can fail or get flagged mid-flow, and re-running it **every
-day** when it keeps failing can harm the account. So the cooldown backs
-off for `PAGE_SETUP_RETRY_DAYS` (10) after **any** attempt.
+> **Server onboarding key is `pageSetAt` (no "up").** Using `pageSetupAt`
+> 400s with "Unknown onboarding key" and the stamp silently never lands
+> (setOnboarding swallows the error). The stamp write, the gate, and the
+> `injectUserParams` read must all use `pageSetAt`.
 
-`create_page` stamps `onboarding.pageSetupAt` **right after the "Create
+The second entry check (inside `createPageGate`, after the duplicate-Page
+check — a missing `pageName`/`linkedPage` is NOT a skip, see the pool-claim
+note below). It exists because page creation is high-risk: it can fail or
+get flagged mid-flow, and re-running it **every day** when it keeps failing
+can harm the account. So the cooldown backs off for `PAGE_SETUP_RETRY_DAYS`
+(10) after **any** attempt.
+
+`create_page` stamps `onboarding.pageSetAt` **right after the "Create
 Page" commit click succeeds** — the moment a Page actually exists FB-side,
 which is the destructive point we must not repeat. Both downstream paths
 (the post-create canary early-return and full completion) flow through it.
@@ -952,34 +971,49 @@ the full cooldown over a transient nav glitch. A successful run also
 persists `pageUrl`, after which the duplicate-Page guard takes over; a
 committed-but-half-configured Page keeps `pageUrl` empty and becomes
 eligible again only once the cooldown lapses. `injectUserParams` passes
-the current stamp through as `params.pageSetupAt`. The gate:
+the current stamp through as `params.pageSetAt`. The gate:
 
 - **Stamped & fresh** (age < 10 days) → skip. Backs off after a Page was
   recently committed — don't spawn a duplicate right after one was made,
   and don't re-attempt a committed-but-incomplete Page every day.
 - **Stamped & stale** (age ≥ 10 days) → fall through and run again. By
   the time this gate is reached, the duplicate-Page guard has already
-  proven `pageUrl` is empty and the `pageName` guard has proven a name
-  exists — so a stamp this old with still no `pageUrl` means the earlier
-  attempt never produced a usable Page; one more attempt is allowed.
+  proven `pageUrl` is empty — so a stamp this old with still no `pageUrl`
+  means the earlier attempt never produced a usable Page; one more attempt
+  is allowed.
 - **Stamped but unparseable date** → skip (safe default — an attempt was
   made; don't risk a duplicate on a bad timestamp).
 - **Not stamped** → fall through and run (first-ever attempt).
 
 Threshold is `PAGE_SETUP_RETRY_DAYS = 10` in `actions/create_page.js`.
-Pass an explicit `"pageSetupAt": ""` in the step's params to bypass the
+Pass an explicit `"pageSetAt": ""` in the step's params to bypass the
 cooldown (forces the gate to treat the profile as never-attempted).
 
-**Gate runs BEFORE `chance`.** All three checks are evaluated in
-`runStep`'s built-in guard phase (`evaluateBuiltinGate` → the action's
-exported `createPageGate`), which runs AFTER the JSON `guard` block and
-BEFORE the `chance` roll — same ordering rationale as `guard`: an
-ineligible profile (already has a Page, nothing to create, or within the
-cooldown) skips WITHOUT consuming a probability slot. Only once the gate
-passes (eligible to create) is `chance` rolled to decide whether this
-run actually fires. So `chance` gates *eligible* profiles, never wasted
-on ones that would skip anyway. The action also re-checks `createPageGate`
-internally as defense-in-depth (direct/test invocation outside the runner).
+**Gate runs BEFORE `chance`.** Both checks (duplicate-Page + cooldown) are
+evaluated in `runStep`'s built-in guard phase (`evaluateBuiltinGate` → the
+action's exported `createPageGate`), which runs AFTER the JSON `guard` block
+and BEFORE the `chance` roll — same ordering rationale as `guard`: an
+ineligible profile (already has a Page, or within the cooldown) skips
+WITHOUT consuming a probability slot. Only once the gate passes is `chance`
+rolled. The action also re-checks `createPageGate` internally as
+defense-in-depth (direct/test invocation outside the runner).
+
+### Auto-assign a Page from the pool (no `linkedPage` → claim one)
+
+A missing `linkedPage` is **no longer a skip**. When `create_page` runs
+(after the gate + `chance`) and the profile has no `pageName`, the action
+claims a Page from the online pool via `autoAssignPage(userId, pageCountryMode)`
+→ `POST /api/pages/auto-assign { profileId, country }`, then maps the
+returned page's `pageName`/`bio`/`assets` into the form fields and proceeds.
+Done HERE (not up front) so a pool page is **only consumed when we're
+actually about to create** — never on a chance-skip or a cooldown-blocked
+profile. Empty pool / endpoint refusal (404/409) → clean skip (no throw).
+
+`pageCountryMode` (step param, default `"random"`) is a MODE, NOT a literal
+country: `"profile"` (profile's country only), `"random"` (profile's country
+first, else any), `"US"`/`"IT"` (force). The endpoint links the page to the
+profile server-side; `pageUrl` is still only PATCHed back after the FB Page
+is actually created, so the duplicate-Page guard + cooldown stay authoritative.
 
 ### Auto-injected params
 
@@ -991,7 +1025,8 @@ internally as defense-in-depth (direct/test invocation outside the runner).
 | `create_page` | `city`/`state`/`zipCode`/`streetAddress` | `buildPageAddress(...)` |
 | `create_page` | `profilePhotoUrl`/`coverPhotoUrl` | `resolveSetupPageImages(user)` |
 | `create_page` | `pageUrl` | `user.pageUrl` (duplicate-Page guard — non-empty short-circuits the action) |
-| `create_page` | `pageSetupAt` | `user.onboarding.pageSetupAt` (page-setup cooldown gate — skip if stamped & fresh, re-run if older than 10d while `pageUrl` still empty) |
+| `create_page` | `pageSetAt` | `user.onboarding.pageSetAt` (page-setup cooldown gate — skip if stamped & fresh, re-run if older than 10d while `pageUrl` still empty) |
+| `create_page` | `pageCountryMode` | step param, default `"random"` (auto-assign pool country MODE: `profile`/`random`/`US`/`IT`) |
 | `schedule_posts` | `posts` | `user.linkedPage.posts` |
 | `switch_profile` | `userName` | `firstName + lastName` |
 
@@ -1073,6 +1108,15 @@ burning 3 minutes on retries.
 | `sharers` | `config/share_sources.json` | Pages/profiles posting daily — visit to scroll/like/share |
 | `users` | `GET /api/profiles?status=Active` + `status=Need%20Setup` (parallel, deduped, limit=5 each) | Up to 10 random users across both statuses; empty/null `profileUrl` filtered out before random pick |
 
+**`sharers` pool requires `user.country`.** The sharer list is country-scoped
+(`fetchSharerUrls(country)`), so a profile with an empty `country` throws
+`visit_profile: country is required for "sharers" pool`. Because `share_posts`
+is typically nested UNDER the `sharers` `visit_profile`, that throw skips the
+whole subtree — the profile silently does **0 shares** for the run (the visit
+fails non-fatally, the share child never runs). If a profile isn't sharing,
+check its `country` field first. `country` is auto-injected from the user record
+by `injectUserParams`.
+
 ## `search` + `open_search_result` + `follow` + `connect`
 
 | Action | Kind | Job |
@@ -1113,13 +1157,21 @@ clicks results tab. Matched against visible `<span>` in `a[role="link"]`.
 
 ### `open_search_result` pick
 
-1. `page.$$('a[href*="/profile.php?id="]')`
-2. Dedupe by href (avatar + name link point to same target)
-3. `pick`: `"random"` (default), `"first"`, integer index
-4. `scrollToCenter` before click
+Recognizes **two** result-link shapes (a numeric-only match used to time out
+on every Pages search that returned established Pages):
 
-`/profile.php?id=*` is FB's canonical URL for **both** users and pages —
-filter type upstream via `search.filter`.
+1. **numeric** `a[href*="/profile.php?id="]` — accepted anywhere (can't be chrome).
+2. **vanity** `facebook.com/<handle>` (e.g. `/unistrapg`, `/Regione.Umbria.official`)
+   — accepted **only inside the results container** (`[role="feed"]` /
+   `[aria-label="Search results"]`), since vanity links are indistinguishable
+   from FB's own chrome (sidebar/nav). Guarded by a reserved-route blocklist
+   (`me`, `marketplace`, `groups`, `*.php`, …) + FB username shape `[a-z0-9.]{5,}`.
+
+Detection is a `waitForFunction` race: result-link **vs** the no-results banner
+(en + it) — neither within 15s → throw. FB's CSP blocks `eval`, so the matcher
+is duplicated inline in the page function AND in Node (`isResultHref`) — keep
+the two in sync. Then: dedupe by pathname (+`?id=`), `pick` (`random`/`first`/
+index), `scrollToCenter`, click.
 
 ## `connect_loop` + `accept_loop` — friend-graph loops
 
@@ -1969,7 +2021,7 @@ Walks step tree before execution, fills missing params from user record.
 | `setup_avatar` | `photoUrl`, `userIdentity`, `userId` |
 | `setup_cover` | `photoUrl`, `userId` |
 | `setup_privacy` | `userId` |
-| `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId`, `pageUrl`, `pageSetupAt` |
+| `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId`, `pageUrl`, `pageSetAt`, `pageCountryMode` |
 | `schedule_posts` | `posts` from `linkedPage.posts` |
 | `switch_profile` | `userName` from `firstName + lastName` |
 | `search` | `city` from `user.city` (page/general modes), `country` from `user.country` (all modes — IT vs US pool selection) |
@@ -2362,15 +2414,17 @@ confirmemail.php, resolves the owner id via `/tracker`+`/onboarding` markers
 (refuses to guess on short-id collisions), PATCHes to Need Checking (dry-run by
 default, `--apply` to write, idempotent).
 
-**`create_page` — page-setup cooldown gate (`pageSetupAt`).** Page creation is
+**`create_page` — page-setup cooldown gate (`pageSetAt`).** Page creation is
 high-risk: a failing/flagged creation re-run every day can harm the account or
-spawn duplicate Pages. New onboarding key `pageSetupAt` stamped right after the
-"Create Page" commit click succeeds (pre-commit failures NOT stamped → stay
-retriable). Gate `createPageGate(params)` (duplicate-Page / nothing-to-create /
-10-day cooldown) is the single source of truth, evaluated BEFORE the `chance`
-roll via the runner's `evaluateBuiltinGate` so an ineligible profile never wastes
-a probability slot; the action re-checks it internally as defense-in-depth. See
-[Page-setup cooldown gate](#page-setup-cooldown-gate-pagesetupat).
+spawn duplicate Pages. Onboarding key `pageSetAt` (server key — **NOT**
+`pageSetupAt`, which 400s) stamped right after the "Create Page" commit click
+succeeds (pre-commit failures NOT stamped → stay retriable). Gate
+`createPageGate(params)` (duplicate-Page / 10-day cooldown) is the single source
+of truth, evaluated BEFORE the `chance` roll via the runner's `evaluateBuiltinGate`
+so an ineligible profile never wastes a probability slot; the action re-checks it
+internally as defense-in-depth. A missing `linkedPage` is NOT a gate — the action
+claims a Page from the pool (`POST /api/pages/auto-assign`) after the gate +
+`chance`. See [Page-setup cooldown gate](#page-setup-cooldown-gate-pagesetat).
 
 **`runner.js` — browser-open stagger (`task.openStaggerSeconds`).** Default
 behavior opened all `concurrency` browsers simultaneously (RAM/CPU spike + a
@@ -2378,6 +2432,34 @@ fleet-timing detection signal). When set, each worker reserves the next open slo
 (synchronous/atomic) and waits, so opens start ≥ N seconds apart. Reserved AFTER
 the cooldown skip (a skip never burns a slot); mid-run reopens already spread out
 incur no extra wait. `0`/unset = original behavior. See the task-fields table.
+
+## `auto-engage-loop.js` — self-running daily scheduler
+
+Replaces running `node run-task.js task-daily-engage.json` by hand. Polls every
+`AUTO_LOOP_INTERVAL_MS` (default 10 min); if no batch is running, launches one.
+The per-profile **24h share cooldown** (`lastSharedAt`) thins each batch, so an
+Active profile effectively runs the full sequence ~once/day even though it ticks
+every 10 min.
+
+**Config is DRIVEN BY `task-daily-engage.json`** (env var overrides win):
+
+| Field | Source | Env override |
+|-------|--------|--------------|
+| steps | task file | — |
+| `concurrency` | task file → 10 | `AUTO_LOOP_CONCURRENCY` |
+| `openStaggerSeconds` | task file → 0 | `AUTO_LOOP_STAGGER_SECONDS` |
+| `cooldown.shareHours` | task file → 24 | `AUTO_LOOP_SHARE_HOURS` |
+| `profilesFromStatus` | task file → "Active" | `AUTO_LOOP_STATUS` |
+| `blockMedia` | task file | — |
+| poll interval | 10 min | `AUTO_LOOP_INTERVAL_MS` |
+
+Two deliberate exceptions: `profiles[]` is **ignored** (status-batch runner —
+always uses `profilesFromStatus`), and `taskId` defaults to `"auto-engage"` (not
+the file's) to keep its `state/`+logs separate from manual runs. The task file is
+`require()`d once at startup → **edits need a loop restart**. Survives
+`unhandledRejection`/`uncaughtException` without dying; 60s heartbeat +
+per-batch summary to `logs/auto-loop.log`. Run from a **non-VS-Code terminal**
+for long uptime (silent-death note below).
 
 ## Current status
 
