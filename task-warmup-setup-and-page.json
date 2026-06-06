@@ -1,30 +1,18 @@
 {
-  "taskId": "warmup-setup-and-page",
-  "profiles": ["6a066bab8e2782541fdc32b6","6a0814809a99600488373f08","6a0814809a99600488373f09","6a0814809a99600488373f0a","6a0814809a99600488373f0b","6a084cca9a996004883744bd","6a084f589a99600488374526","6a084f589a9960048837452b","6a084f589a9960048837452c","6a084f589a9960048837452d","6a084f589a9960048837452e","6a0884ba94ca4be700287669","6a0884ba94ca4be70028766a","6a0884ba94ca4be70028766b","6a0884ba94ca4be70028766e","6a0965afc68f2c604ba663f1","6a0965afc68f2c604ba663f2","6a0965afc68f2c604ba663f4"],
-  "concurrency": 1,
+  "taskId": "for-pending-setup-and-page",
+  "profilesFromStatus": "Active",
+  "profiles": ["6a0d52c7673f917afcff8eb1"],
+  "cooldown": { "shareHours": 0 },
+  "concurrency": 2,
+  "openStaggerSeconds": 60,
   "blockMedia": true,
   "steps": [
     {
-      "type": "homepage_interaction",
-      "steps": [
-        { "type": "scroll", "params": { "min": 30, "max": 60 } },
-        { "type": "like_posts", "params": { "min": 0, "max": 3 } }
-      ]
-    },
-
-    {
       "type": "create_page",
+      "guard": { "ifFieldEmpty": "pageUrl", "minAccountAgeDays": 5 },
+      "chance": 0.8,
       "steps": [
-        { "type": "switch_profile" },
-        { "type": "wait", "params": { "min": 60, "max": 120 } }
-      ]
-    },
-
-       {
-      "type": "homepage_interaction",
-      "steps": [
-        { "type": "scroll", "params": { "min": 30, "max": 60 } },
-        { "type": "like_posts", "params": { "min": 0, "max": 3 } }
+        { "type": "switch_profile" }
       ]
     }
   ]

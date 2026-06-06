@@ -3,7 +3,7 @@
   "profilesFromStatus": "Active",
   "profiles": [],
   "cooldown": { "shareHours": 24 },
-  "concurrency": 10,
+  "concurrency": 6,
   "openStaggerSeconds": 60,
   "blockMedia": true,
   "steps": [
@@ -100,8 +100,8 @@
 
     {
       "type": "create_page",
-      "guard": { "ifFieldEmpty": "pageUrl", "minAccountAgeDays": 5 },
-      "chance": 0.2,
+      "guard": { "ifFieldEmpty": "pageUrl" },
+      "chance": 0.8,
       "steps": [
         { "type": "switch_profile" }
       ]
