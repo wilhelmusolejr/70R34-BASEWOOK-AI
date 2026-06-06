@@ -31,15 +31,42 @@ const {
   clickLocator,
   uploadImageFromButton,
 } = require('../utils/pageSetupHelpers');
-const { setOnboarding } = require('../utils/userApi');
+const { setOnboarding, autoAssignPage } = require('../utils/userApi');
 
 const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
+const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
+
+function buildImageUrl(filename) {
+  if (!filename) return '';
+  if (/^https?:\/\//i.test(filename)) return filename;
+  return `${IMAGE_SERVER_BASE_URL}${filename}`;
+}
+
+/**
+ * Resolve profile + cover image URLs from an assigned Page's assets[].
+ * Prefers the explicit asset `type` field ("profile"/"cover") that the
+ * /api/pages records carry, falling back to positional order. Mirrors
+ * runner.js resolveSetupPageImages but type-first (more robust than the
+ * filename-keyword heuristic when the type is populated).
+ */
+function resolvePageAssetUrls(assets) {
+  const list = Array.isArray(assets) ? assets : [];
+  const fileOf = (a) => a?.imageId?.filename || a?.filename || '';
+  const byType = (t) => fileOf(list.find((a) => a?.type === t));
+  const filenames = list.map(fileOf).filter(Boolean);
+  const profile = byType('profile') || filenames[0] || '';
+  const cover = byType('cover') || filenames[1] || filenames[0] || '';
+  return {
+    profilePhotoUrl: buildImageUrl(profile),
+    coverPhotoUrl: buildImageUrl(cover),
+  };
+}
 
 const PRE_CREATE_ATTEMPTS = 3;
 const POST_FIELD_ATTEMPTS = 2;
 const RETRY_WAIT_MS = 60000;
 
-// Page-setup cooldown. create_page stamps onboarding.pageSetupAt once a Page is
+// Page-setup cooldown. create_page stamps onboarding.pageSetAt once a Page is
 // committed FB-side; the entry gate then skips re-runs while the stamp is fresh.
 // After this many days, if the profile STILL has no pageUrl, the earlier attempt
 // evidently never produced a usable Page, so one more attempt is allowed.
@@ -131,19 +158,27 @@ async function resetModals(page) {
  *   1. Duplicate-Page guard — pageUrl already recorded → skip (create_page is
  *      destructive; a second run spawns a duplicate Page that needs manual
  *      cleanup AND splits page-asset state in the DB).
- *   2. Nothing-to-create guard — no pageName → skip (no data to build a Page).
- *   3. Page-setup cooldown — onboarding.pageSetupAt stamped & fresh (< 10d) →
+ *   2. Page-setup cooldown — onboarding.pageSetAt stamped & fresh (< 10d) →
  *      skip. Stamped & stale (≥ 10d) with pageUrl still empty (proven by gate 1)
- *      and a pageName present (proven by gate 2) → the earlier attempt never
- *      produced a usable Page, so allow a retry (no skip). Stamped but
- *      unparseable date → skip (safe default: an attempt was made, don't risk a
- *      duplicate on a bad timestamp).
+ *      → the earlier attempt never produced a usable Page, so allow a retry (no
+ *      skip). Stamped but unparseable date → skip (safe default: an attempt was
+ *      made, don't risk a duplicate on a bad timestamp).
+ *
+ *      NOTE: the server's onboarding key is `pageSetAt` (no "up") — that's the
+ *      only spelling /api/profiles/:id/onboarding/:key accepts. Using
+ *      `pageSetupAt` 400s ("Unknown onboarding key") and the stamp never lands.
+ *
+ * NOTE: a missing linkedPage is intentionally NOT a gate. A profile with no
+ * blueprint is still eligible — the action claims one from the online pool
+ * (POST /api/pages/auto-assign) AFTER passing this gate + the chance roll, so a
+ * pool page is only consumed when we're actually about to create. The gate
+ * therefore no longer reads pageName.
  *
  * Shared by the action (defense-in-depth / direct invocation) AND the runner's
  * pre-`chance` guard phase (so an ineligible profile never wastes a probability
  * slot). Single source of truth — keep the two callers in sync via this fn.
  */
-function createPageGate({ pageUrl = '', pageName = '', pageSetupAt = '' } = {}) {
+function createPageGate({ pageUrl = '', pageSetAt = '' } = {}) {
   if (pageUrl && String(pageUrl).trim()) {
     return {
       skip: true,
@@ -151,23 +186,19 @@ function createPageGate({ pageUrl = '', pageName = '', pageSetupAt = '' } = {}) 
     };
   }
 
-  if (!pageName || !String(pageName).trim()) {
-    return { skip: true, reason: 'no linkedPage.pageName configured (nothing to create)' };
-  }
-
-  if (pageSetupAt && String(pageSetupAt).trim()) {
-    const stampedMs = Date.parse(pageSetupAt);
+  if (pageSetAt && String(pageSetAt).trim()) {
+    const stampedMs = Date.parse(pageSetAt);
     if (Number.isNaN(stampedMs)) {
       return {
         skip: true,
-        reason: `pageSetupAt set but unparseable ("${pageSetupAt}") (safe default)`,
+        reason: `pageSetAt set but unparseable ("${pageSetAt}") (safe default)`,
       };
     }
     const ageDays = (Date.now() - stampedMs) / 86400000;
     if (ageDays < PAGE_SETUP_RETRY_DAYS) {
       return {
         skip: true,
-        reason: `pageSetupAt stamped ${ageDays.toFixed(1)}d ago (< ${PAGE_SETUP_RETRY_DAYS}d page-setup cooldown)`,
+        reason: `pageSetAt stamped ${ageDays.toFixed(1)}d ago (< ${PAGE_SETUP_RETRY_DAYS}d page-setup cooldown)`,
       };
     }
     // Stale stamp, still no pageUrl → fall through and allow a retry.
@@ -178,20 +209,22 @@ function createPageGate({ pageUrl = '', pageName = '', pageSetupAt = '' } = {}) 
 
 module.exports = async function create_page(page, params) {
   const {
-    pageName,
-    bio = '',
     email = '',
     streetAddress = '',
     city = '',
     state = '',
     zipCode = '',
-    profilePhotoUrl = '',
-    coverPhotoUrl = '',
     categoryKeyword = '',
     userId = '',
+    pageCountryMode = 'random',
   } = params;
 
-  // Entry gate — duplicate-Page / nothing-to-create / page-setup cooldown.
+  // Page-derived fields. Mutable because when the profile has no linkedPage
+  // blueprint these arrive empty and get filled from a pool page claimed below.
+  let { pageName = '', bio = '', profilePhotoUrl = '', coverPhotoUrl = '' } = params;
+
+  // Entry gate — duplicate-Page / page-setup cooldown (NOT nothing-to-create;
+  // a missing blueprint is recoverable via the pool claim below).
   // Defense-in-depth: when invoked via the runner this has already been checked
   // in the pre-`chance` guard phase, but the action re-checks so a direct
   // invocation (dev script / test) is still protected from spawning a duplicate
@@ -200,6 +233,33 @@ module.exports = async function create_page(page, params) {
   if (gate.skip) {
     console.log(`  [create_page] skipping — ${gate.reason}.`);
     return;
+  }
+
+  // No linked Page blueprint on the profile → claim one from the online pool
+  // (POST /api/pages/auto-assign). Done HERE — after the gate + the runner's
+  // chance roll — so a pool page is only consumed when we're actually about to
+  // create. The endpoint links the page to this profile server-side and returns
+  // it; we map its fields into the locals the rest of the flow uses. On an empty
+  // pool / endpoint refusal there's nothing to build → clean skip (no throw).
+  if (!String(pageName).trim()) {
+    console.log(
+      `  [create_page] No linked Page blueprint — requesting one from the pool (mode=${pageCountryMode})...`
+    );
+    const assigned = await autoAssignPage(userId, pageCountryMode);
+    if (!assigned || !assigned.pageName) {
+      console.log('  [create_page] No Page available to assign — nothing to create, skipping.');
+      return;
+    }
+    pageName = assigned.pageName;
+    if (assigned.bio) bio = assigned.bio;
+    const photos = resolvePageAssetUrls(assigned.assets);
+    if (photos.profilePhotoUrl) profilePhotoUrl = photos.profilePhotoUrl;
+    if (photos.coverPhotoUrl) coverPhotoUrl = photos.coverPhotoUrl;
+    console.log(
+      `  [create_page] Assigned Page "${pageName}" from pool ` +
+        `(bio=${bio ? 'set' : 'empty'}, profileImg=${profilePhotoUrl ? 'y' : 'n'}, ` +
+        `coverImg=${coverPhotoUrl ? 'y' : 'n'}).`
+    );
   }
 
   // pageName is present but we couldn't derive a category from it. Deterministic
@@ -372,7 +432,7 @@ module.exports = async function create_page(page, params) {
     // guard takes over; a committed-but-half-configured Page keeps pageUrl empty
     // and becomes eligible again only once the cooldown lapses. Best-effort —
     // setOnboarding swallows its own errors.
-    if (userId) await setOnboarding(userId, 'pageSetupAt');
+    if (userId) await setOnboarding(userId, 'pageSetAt');
     await stepWait(page);
 
     /* ---------- POST-CREATE phase — each field retried individually ---------- */

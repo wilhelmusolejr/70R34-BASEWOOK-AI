@@ -124,10 +124,11 @@ async function updateFriendRequestStatus(receiverId, senderId, status) {
  * Stamp a single onboarding step's timestamp on a profile. Atomic — sets
  * one key on profile.onboarding.<key>. Pass `null`/`""`/`undefined` to clear.
  *
- * Valid keys (see server/src/models/Profile.js):
+ * Valid keys (server ONBOARDING_KEYS — a wrong key 400s "Unknown onboarding key"):
  *   privacyPublicAt, profileImageSetAt, coverImageSetAt, aboutSetAt,
  *   marketplaceSetAt, groupJoinedAt, highlightsSetAt, publishPostAt,
- *   recoveryEmailSetAt, lastSharedAt
+ *   pageSetAt, recoveryEmailSetAt, lastSharedAt
+ *   (note: the page-setup stamp is `pageSetAt`, NOT `pageSetupAt`)
  *
  * Best-effort: logs warnings on failure but never throws — a transient
  * onboarding-PATCH hiccup must NOT fail the action that succeeded.
@@ -253,8 +254,72 @@ async function deleteSharerByUrl(url, country = '') {
   }
 }
 
+/**
+ * Claim a Page blueprint from the online pool for a profile that has none.
+ *
+ * POST /api/pages/auto-assign { profileId, country } — the backend:
+ *   1. 404 if the profile doesn't exist.
+ *   2. 409 if the profile already has a page (profile.pageId set OR pageUrl
+ *      non-empty) — its own duplicate guard.
+ *   3. resolves a country per the `country` MODE (see below), picks the oldest
+ *      unowned page for it, links it (Page.linkedIdentities + Profile.pageId),
+ *      and returns the populated page.
+ *   4. 404 if no unowned page is available for the resolved country.
+ *   5. 400 if `country` isn't one of the accepted modes.
+ *
+ * `country` is a MODE selector, NOT a literal code to pass through:
+ *   - "profile" (server default if omitted) — only pages matching the profile's
+ *     own country (IT profile → IT page only).
+ *   - "random" — prefer the profile's country; if none available, any country.
+ *   - "US" / "IT" — strictly that country regardless of the profile.
+ * Passed through verbatim (NOT uppercased): keyword modes are lowercase,
+ * country codes uppercase — the server validates and 400s on anything else.
+ *
+ * Best-effort by design: 409 (already owned) and 404 (none available) are NOT
+ * failures — they mean "no provisioning happened," so we return null and let
+ * the create_page gate skip as before. Network / unexpected errors (incl. a 400
+ * bad-mode config error) are logged and also return null — claiming a page must
+ * never block or fail the run.
+ *
+ * @param {string} profileId — the profile's _id
+ * @param {string} [countryMode='random'] — "profile" | "random" | "US" | "IT"
+ * @returns {Promise<Object|null>} the populated page (formatPage shape) or null
+ */
+async function autoAssignPage(profileId, countryMode = 'random') {
+  if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
+  if (!profileId) {
+    console.warn('  [pages] autoAssignPage: no profileId — skipping');
+    return null;
+  }
+
+  const body = { profileId };
+  if (countryMode && String(countryMode).trim()) body.country = String(countryMode).trim();
+
+  try {
+    const { data } = await axios.post(`${BASE_URL}/api/pages/auto-assign`, body, {
+      timeout: 15000,
+    });
+    const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+    return parsed.data || parsed;
+  } catch (err) {
+    const status = err.response?.status;
+    const detail = err.response?.data?.message || err.message;
+    if (status === 409) {
+      console.log(`  [pages] auto-assign refused (409 already has a page): ${detail}`);
+    } else if (status === 404) {
+      console.log(`  [pages] auto-assign found no unowned page available (404): ${detail}`);
+    } else if (status === 400) {
+      console.warn(`  [pages] auto-assign rejected mode "${body.country}" (400): ${detail}`);
+    } else {
+      console.warn(`  [pages] auto-assign failed (${status || 'no-status'}): ${detail}`);
+    }
+    return null;
+  }
+}
+
 module.exports = {
   fetchUser,
+  autoAssignPage,
   fetchActiveProfiles,
   fetchProfilesByStatus,
   updateProfile,

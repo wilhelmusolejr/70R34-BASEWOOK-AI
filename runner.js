@@ -699,6 +699,11 @@ function injectUserParams(steps, user) {
         city: step.params?.city || user.city || '',
         state: step.params?.state || pageAddress.stateName,
         zipCode: step.params?.zipCode || pageAddress.zipCode,
+        // pageCountryMode selects how the auto-assign pool picks a page country
+        // when the profile has no linkedPage yet: "random" (prefer the profile's
+        // country, else any), "profile" (strict profile country), or "US"/"IT"
+        // (force that country). Defaults to "random". Explicit step param wins.
+        pageCountryMode: step.params?.pageCountryMode || 'random',
         profilePhotoUrl: step.params?.profilePhotoUrl || pageImages.profilePhotoUrl,
         coverPhotoUrl: step.params?.coverPhotoUrl || pageImages.coverPhotoUrl,
         userId: step.params?.userId || user._id || user.id || '',
@@ -708,13 +713,15 @@ function injectUserParams(steps, user) {
         // overrides; explicit empty string forces re-creation.
         pageUrl:
           typeof step.params?.pageUrl === 'string' ? step.params.pageUrl : user.pageUrl || '',
-        // pageSetupAt feeds the page-setup cooldown gate: skip if stamped &
-        // fresh, re-run if older than the gate's threshold while pageUrl is
-        // still empty. Explicit param wins (pass '' to bypass the cooldown).
-        pageSetupAt:
-          step.params?.pageSetupAt !== undefined
-            ? step.params.pageSetupAt
-            : user.onboarding?.pageSetupAt || '',
+        // pageSetAt feeds the page-setup cooldown gate: skip if stamped & fresh,
+        // re-run if older than the gate's threshold while pageUrl is still empty.
+        // Explicit param wins (pass '' to bypass the cooldown). NOTE: the server
+        // onboarding key is `pageSetAt` (no "up") — `pageSetupAt` 400s and never
+        // persists, so both the stamp and this read must use `pageSetAt`.
+        pageSetAt:
+          step.params?.pageSetAt !== undefined
+            ? step.params.pageSetAt
+            : user.onboarding?.pageSetAt || '',
       };
     }
 
@@ -1017,7 +1024,8 @@ function evaluateStepGuards(step, user) {
  * roll so an ineligible profile never wastes a probability slot.
  *
  * create_page: delegates to the action's own `createPageGate` (single source of
- * truth) — duplicate-Page / nothing-to-create / page-setup cooldown.
+ * truth) — duplicate-Page / page-setup cooldown. A missing linkedPage is NOT a
+ * gate (the action claims one from the pool after this gate + the chance roll).
  *
  * Returns { pass, reason }.
  */
@@ -1060,11 +1068,12 @@ async function runStep(page, step, profileId, user, vaultState) {
   }
 
   // Built-in action eligibility gate (currently create_page's duplicate-Page /
-  // nothing-to-create / page-setup cooldown checks). Runs AFTER the JSON `guard`
-  // and BEFORE the `chance` roll — same ordering rationale as `guard`: an
-  // ineligible profile (already has a Page, nothing to create, or within the
-  // page-setup cooldown) must skip WITHOUT consuming a probability slot. The
-  // action re-checks the same gate internally as defense-in-depth.
+  // page-setup cooldown checks). Runs AFTER the JSON `guard` and BEFORE the
+  // `chance` roll — same ordering rationale as `guard`: an ineligible profile
+  // (already has a Page, or within the page-setup cooldown) must skip WITHOUT
+  // consuming a probability slot. A missing linkedPage is NOT a skip — the
+  // action claims one from the pool after chance passes. The action re-checks
+  // the same gate internally as defense-in-depth.
   const builtin = evaluateBuiltinGate(step);
   if (!builtin.pass) {
     console.log(`Skipping: ${step.type} (gate: ${builtin.reason})`);
