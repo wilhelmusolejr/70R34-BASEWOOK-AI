@@ -998,6 +998,52 @@ WITHOUT consuming a probability slot. Only once the gate passes is `chance`
 rolled. The action also re-checks `createPageGate` internally as
 defense-in-depth (direct/test invocation outside the runner).
 
+### Daily page-creation circuit breaker (`allowedFailures`)
+
+Operationalizes the volume finding (see `RESULT-create-page-checkpoint-2026-06-06.md`):
+FB's page-creation gate is a **cumulative per-day rate limit**. Across the
+2026-06-06 run, every session that created ≤ ~18 Pages had ~0 bans, while the
+single session that created 61 Pages had a 33% checkpoint rate that climbed as
+the day's volume grew. The **same young accounts** created Pages cleanly the day
+before in a low-volume session — so the driver is **Pages-per-day**, not account
+age. The breaker backs off for the rest of the day once FB starts pushing back.
+
+**Mechanism.** `checkDailyFailureBreaker(allowedFailures, statsTzOffset)` in
+`actions/create_page.js` queries the dashboard endpoint
+`GET /api/profiles/page-set-stats?date=<YYYY-MM-DD>&tzOffset=<min>` →
+`{ date, passed, failed, total }`, where:
+- the server counts profiles whose `onboarding.pageSetAt` was stamped that day,
+- `passed` = has a non-empty `pageUrl`; **`failed` = no `pageUrl`** (i.e. the
+  checkpoint / no-form outcomes — the DB is the cross-profile, cross-run source
+  of truth for "current date").
+
+It **skips when `failed > allowedFailures`**. `allowedFailures` is the number of
+failures *tolerated* before tripping:
+- `0` → trip on the **first** failure today,
+- `1` → allow one (trip on the 2nd), `2` → allow two, etc.
+
+**Opt-in.** Disabled (never skips) when `allowedFailures` is not a finite number,
+so tasks that don't set it are unaffected. **Fails OPEN** on any API error — a
+stats-endpoint hiccup must never silently halt all page creation.
+
+**Runs in the gate phase, BEFORE `chance`** (and before consuming a pool page):
+`evaluateBuiltinGate` (now async) runs `createPageGate` (cheap, local — so a
+profile that already has a Page never triggers an API call) and THEN the breaker,
+both before the `chance` roll. So the per-step order is:
+`guard` → duplicate/cooldown gate → **daily-failure breaker** → `chance` → handler.
+(The action no longer re-checks the breaker internally — the local
+`createPageGate` re-check remains for direct/test invocation.)
+
+**Timezone (`PAGE_STATS_TZ_OFFSET` / `statsTzOffset`).** The day boundary must
+match the dashboard's. `resolveStatsTzOffset` precedence: step param
+`statsTzOffset` → `PAGE_STATS_TZ_OFFSET` env → the bot machine's own offset. Set
+`PAGE_STATS_TZ_OFFSET=-480` (UTC+8, PH) so the count matches the PH-time
+dashboard regardless of the server's clock. The queried `date` is computed from
+the **same** offset that's sent, so date and boundary stay consistent.
+
+Configured in `task-daily-engage.json` (the high-volume auto-engage loop):
+`create_page` → `"chance": 0.5`, `"params": { "allowedFailures": 0 }`.
+
 ### Auto-assign a Page from the pool (no `linkedPage` → claim one)
 
 A missing `linkedPage` is **no longer a skip**. When `create_page` runs

@@ -31,7 +31,7 @@ const {
   clickLocator,
   uploadImageFromButton,
 } = require('../utils/pageSetupHelpers');
-const { setOnboarding, autoAssignPage } = require('../utils/userApi');
+const { setOnboarding, autoAssignPage, fetchPageSetStats } = require('../utils/userApi');
 
 const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
@@ -178,6 +178,83 @@ async function resetModals(page) {
  * pre-`chance` guard phase (so an ineligible profile never wastes a probability
  * slot). Single source of truth — keep the two callers in sync via this fn.
  */
+/**
+ * Resolve the tz offset (minutes, JS getTimezoneOffset() convention — UTC+8 →
+ * -480) used to align the page-set-stats day boundary with the intended
+ * "current date". Precedence: explicit step-param override → PAGE_STATS_TZ_OFFSET
+ * env → the bot machine's own offset. Set PAGE_STATS_TZ_OFFSET=-480 so the
+ * day window matches the PH-time dashboard regardless of the server's clock.
+ */
+function resolveStatsTzOffset(override) {
+  for (const candidate of [override, process.env.PAGE_STATS_TZ_OFFSET]) {
+    const n = Number(candidate);
+    if (candidate !== undefined && candidate !== null && candidate !== '' && Number.isFinite(n)) {
+      return n;
+    }
+  }
+  return new Date().getTimezoneOffset();
+}
+
+/**
+ * Today's date (YYYY-MM-DD) for a given tz offset — the local wall-clock day at
+ * that offset. Computed from the SAME offset sent to the endpoint so the date
+ * and the boundary stay consistent.
+ */
+function statsDateForOffset(tzOffset) {
+  return new Date(Date.now() - tzOffset * 60000).toISOString().slice(0, 10);
+}
+
+/**
+ * Daily page-creation circuit breaker (operationalizes the volume finding:
+ * FB's create_page gate is a cumulative per-day rate limit, so once it starts
+ * pushing back, back off for the rest of the day).
+ *
+ * Reads today's page-set stats from the server — profiles whose
+ * `onboarding.pageSetAt` was stamped today, split into passed (has pageUrl) vs
+ * failed (no pageUrl, i.e. checkpoint / no-form) — and skips this profile once
+ * the day's `failed` count EXCEEDS the tolerated budget.
+ *
+ * `allowedFailures` = failures tolerated before tripping:
+ *   0 → trip on the first failure today, 1 → allow one (trip on the 2nd), etc.
+ *   Trips when `failedToday > allowedFailures`.
+ *
+ * Opt-in: disabled (never skips) when `allowedFailures` is not a finite number,
+ * so tasks that don't set it are unaffected. Fails OPEN on any API error — a
+ * stats-endpoint hiccup must never silently halt all page creation.
+ *
+ * @param {*} allowedFailures — from step params (number or numeric string)
+ * @param {*} [tzOffsetOverride] — optional step-param tz offset override
+ * @returns {Promise<{skip:boolean, reason:string}>}
+ */
+async function checkDailyFailureBreaker(allowedFailures, tzOffsetOverride) {
+  const allowed = Number(allowedFailures);
+  if (!Number.isFinite(allowed)) return { skip: false, reason: '' };
+
+  const tzOffset = resolveStatsTzOffset(tzOffsetOverride);
+  const date = statsDateForOffset(tzOffset);
+  try {
+    const stats = await fetchPageSetStats(date, tzOffset);
+    if (stats.failed > allowed) {
+      return {
+        skip: true,
+        reason:
+          `${stats.failed} page-creation failure(s) already today (${date}) > ` +
+          `allowed ${allowed} — daily circuit breaker`,
+      };
+    }
+    console.log(
+      `  [create_page] daily breaker OK — ${stats.failed} failure(s) today (${date}), ` +
+        `allowed ${allowed} (passed=${stats.passed}, total=${stats.total}).`
+    );
+    return { skip: false, reason: '' };
+  } catch (err) {
+    console.warn(
+      `  [create_page] daily breaker check failed (${err.message}) — allowing creation (fail-open).`
+    );
+    return { skip: false, reason: '' };
+  }
+}
+
 function createPageGate({ pageUrl = '', pageSetAt = '' } = {}) {
   if (pageUrl && String(pageUrl).trim()) {
     return {
@@ -635,3 +712,4 @@ module.exports = async function create_page(page, params) {
 // Exposed so the runner can evaluate the same gate in its pre-`chance` guard
 // phase (an ineligible profile then never wastes a probability slot).
 module.exports.createPageGate = createPageGate;
+module.exports.checkDailyFailureBreaker = checkDailyFailureBreaker;

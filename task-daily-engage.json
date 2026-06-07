@@ -94,17 +94,16 @@
 
     { "type": "wait", "params": { "min": 30, "max": 60 } },
 
-    { "type": "connect_loop", "params": { "count": 5, "skipIfFriendsAbove": 30 } },
+    { "type": "connect_loop", "params": { "count": 7, "skipIfFriendsAbove": 30 } },
 
     { "type": "wait", "params": { "min": 30, "max": 60 } },
 
     {
       "type": "create_page",
       "guard": { "ifFieldEmpty": "pageUrl" },
-      "chance": 0.8,
-      "steps": [
-        { "type": "switch_profile" }
-      ]
+      "chance": 0.5,
+      "params": { "allowedFailures": 0 },
+      "steps": [{ "type": "switch_profile" }]
     }
   ]
 }

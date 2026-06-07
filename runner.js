@@ -127,10 +127,10 @@ function resolveSetupPageImages(user) {
   };
 }
 
-// create_page's eligibility gate, reused by evaluateBuiltinGate so the runner
-// can skip ineligible profiles BEFORE the chance roll (single source of truth
-// with the action's own internal check).
-const { createPageGate } = require('./actions/create_page');
+// create_page's eligibility gate + daily-failure circuit breaker, reused by
+// evaluateBuiltinGate so the runner can skip ineligible profiles BEFORE the
+// chance roll (single source of truth with the action's own internal check).
+const { createPageGate, checkDailyFailureBreaker } = require('./actions/create_page');
 
 // Handler registry - add new handlers here
 const handlers = {
@@ -1023,16 +1023,29 @@ function evaluateStepGuards(step, user) {
  * type and reads the already-injected `step.params`. Runs BEFORE the `chance`
  * roll so an ineligible profile never wastes a probability slot.
  *
- * create_page: delegates to the action's own `createPageGate` (single source of
- * truth) — duplicate-Page / page-setup cooldown. A missing linkedPage is NOT a
- * gate (the action claims one from the pool after this gate + the chance roll).
+ * create_page: two checks, both BEFORE the chance roll —
+ *   1. `createPageGate` (single source of truth) — duplicate-Page / page-setup
+ *      cooldown. Cheap, local. A missing linkedPage is NOT a gate (the action
+ *      claims one from the pool after this gate + the chance roll).
+ *   2. `checkDailyFailureBreaker` — opt-in (params.allowedFailures) fleet-wide
+ *      daily circuit breaker: queries the page-set-stats endpoint and skips once
+ *      today's failed page-creations exceed the allowed budget. Runs after the
+ *      local gate (so we don't API-call a profile that already has a Page) but
+ *      before chance, so "allowed to create today?" is decided before the dice
+ *      roll. Fails open on any API error.
+ *
+ * Async because the breaker hits the network.
  *
  * Returns { pass, reason }.
  */
-function evaluateBuiltinGate(step) {
+async function evaluateBuiltinGate(step) {
   if (step.type === 'create_page') {
-    const { skip, reason } = createPageGate(step.params || {});
-    if (skip) return { pass: false, reason };
+    const params = step.params || {};
+    const localGate = createPageGate(params);
+    if (localGate.skip) return { pass: false, reason: localGate.reason };
+
+    const breaker = await checkDailyFailureBreaker(params.allowedFailures, params.statsTzOffset);
+    if (breaker.skip) return { pass: false, reason: breaker.reason };
   }
   return { pass: true };
 }
@@ -1074,7 +1087,7 @@ async function runStep(page, step, profileId, user, vaultState) {
   // consuming a probability slot. A missing linkedPage is NOT a skip — the
   // action claims one from the pool after chance passes. The action re-checks
   // the same gate internally as defense-in-depth.
-  const builtin = evaluateBuiltinGate(step);
+  const builtin = await evaluateBuiltinGate(step);
   if (!builtin.pass) {
     console.log(`Skipping: ${step.type} (gate: ${builtin.reason})`);
     if (vaultState) {

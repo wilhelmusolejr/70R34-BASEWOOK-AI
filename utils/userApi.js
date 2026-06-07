@@ -317,9 +317,43 @@ async function autoAssignPage(profileId, countryMode = 'random') {
   }
 }
 
+/**
+ * Fetch page-set stats for a given local day from the dashboard endpoint.
+ * Counts profiles whose `onboarding.pageSetAt` was stamped that day, split into
+ * `passed` (has a non-empty pageUrl) vs `failed` (no pageUrl) — the same rule as
+ * the Dashboard's "Set Page · last 7 days" chart. Powers the create_page
+ * daily-failure circuit breaker.
+ *
+ * @param {string} date — YYYY-MM-DD (the local day to count)
+ * @param {number} [tzOffset] — minutes, JS getTimezoneOffset() convention
+ *   (UTC+8 → -480). Aligns the server's day boundary with local time; omit for
+ *   UTC boundaries.
+ * @returns {Promise<{date:string, passed:number, failed:number, total:number}>}
+ */
+async function fetchPageSetStats(date, tzOffset) {
+  if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
+
+  const params = { date };
+  if (Number.isFinite(tzOffset)) params.tzOffset = tzOffset;
+
+  const { data } = await axios.get(`${BASE_URL}/api/profiles/page-set-stats`, {
+    params,
+    timeout: 15000,
+  });
+  const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+  const out = parsed.data || parsed;
+  return {
+    date: out.date || date,
+    passed: Number(out.passed) || 0,
+    failed: Number(out.failed) || 0,
+    total: Number(out.total) || 0,
+  };
+}
+
 module.exports = {
   fetchUser,
   autoAssignPage,
+  fetchPageSetStats,
   fetchActiveProfiles,
   fetchProfilesByStatus,
   updateProfile,
