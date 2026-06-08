@@ -32,7 +32,28 @@ const { humanWait, humanClick, humanType } = require('../utils/humanBehavior');
 const { downloadToTemp } = require('../utils/pageSetupHelpers');
 const { generatePostCaption } = require('../utils/generatePostCaption');
 const { getProfileLogDir } = require('../utils/sessionLog');
-const { setOnboarding } = require('../utils/userApi');
+const { setOnboarding, autoAssignPostToProfile } = require('../utils/userApi');
+
+const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
+
+// Resolve a post's images[] (string | { filename } | { imageId: { filename } })
+// into full URLs the downloader can consume — mirrors runner.js injectUserParams.
+function buildImageUrl(filename) {
+  if (!filename) return '';
+  if (/^https?:\/\//i.test(filename)) return filename;
+  return `${IMAGE_SERVER_BASE_URL}${filename}`;
+}
+function assetFilename(img) {
+  if (!img) return '';
+  if (typeof img === 'string') return img;
+  if (img.filename) return img.filename;
+  if (img.imageId && img.imageId.filename) return img.imageId.filename;
+  return '';
+}
+function resolvePostImageUrls(images) {
+  if (!Array.isArray(images)) return [];
+  return images.map((img) => buildImageUrl(assetFilename(img))).filter(Boolean);
+}
 
 const AUDIENCE_LABELS = {
   public: 'Public',
@@ -144,18 +165,62 @@ module.exports = async function publish_post(page, params) {
   const {
     imageUrls = [],
     caption = '',
-    postCaption = '',
     captionSource = 'ai',
     userIdentity = '',
-    postContext = '',
     audience = 'public',
     userId = '',
   } = params || {};
 
-  if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
-    throw new Error(
-      'publish_post: imageUrls is required (set explicitly, or populate user.posts[].images on the user record)'
-    );
+  // These three can be overridden by an auto-assigned post below.
+  let resolvedImageUrls = Array.isArray(imageUrls) ? imageUrls.slice() : [];
+  let postCaption = String(params?.postCaption || '');
+  let postContext = String(params?.postContext || '');
+
+  // Auto-assign a post from the pool. Mirrors create_page's pool claim: done
+  // HERE, after the runner's guard (publishPostAt missing) + chance roll, so a
+  // pool post is only consumed when we're actually about to publish. The server
+  // picks the newest unowned post matching the profile's country.
+  //   - assigned (200) → use the returned post's images/context/caption
+  //   - owns     (409) → profile already has a post → publish the injected one
+  //   - none     (409) / error (400/404) → nothing to publish → clean skip
+  // Only attempted when we have a userId (skipped for explicit/test invocation).
+  if (userId) {
+    const assign = await autoAssignPostToProfile(userId);
+    if (assign.status === 'assigned' && assign.post) {
+      const imgs = resolvePostImageUrls(assign.post.images);
+      if (imgs.length > 0) resolvedImageUrls = imgs;
+      if (typeof assign.post.context === 'string' && assign.post.context) {
+        postContext = assign.post.context;
+      }
+      if (typeof assign.post.caption === 'string' && assign.post.caption) {
+        postCaption = assign.post.caption;
+      }
+      console.log(`  [publish_post] Assigned post from pool (images=${resolvedImageUrls.length}).`);
+    } else if (assign.status === 'owns') {
+      console.log('  [publish_post] Profile already owns a post — using it.');
+    } else if (assign.status === 'none') {
+      // Server confirmed there's no post to assign for this profile/country.
+      console.log('  [publish_post] No post available to assign — skipping.');
+      return;
+    } else {
+      // 'error' (endpoint down / 404 / network) — don't hard-skip: fall back to
+      // whatever post was already injected. The empty-images check below skips
+      // cleanly if there's nothing to publish, so an assign-endpoint outage
+      // can't block a profile that already owns a post.
+      console.warn(
+        `  [publish_post] auto-assign unavailable (${assign.detail || 'error'}) — falling back to injected post.`
+      );
+    }
+  }
+
+  if (!Array.isArray(resolvedImageUrls) || resolvedImageUrls.length === 0) {
+    if (!userId) {
+      throw new Error(
+        'publish_post: imageUrls is required (set explicitly, or populate user.posts[].images on the user record)'
+      );
+    }
+    console.log('  [publish_post] No images to publish after auto-assign — skipping.');
+    return;
   }
 
   // Caption priority:
@@ -190,12 +255,12 @@ module.exports = async function publish_post(page, params) {
   }
 
   console.log(
-    `  [publish_post] Downloading ${imageUrls.length} image(s)... caption="${resolvedCaption.slice(0, 60)}${resolvedCaption.length > 60 ? '…' : ''}"`
+    `  [publish_post] Downloading ${resolvedImageUrls.length} image(s)... caption="${resolvedCaption.slice(0, 60)}${resolvedCaption.length > 60 ? '…' : ''}"`
   );
   const tmpPaths = [];
   try {
-    for (let i = 0; i < imageUrls.length; i++) {
-      tmpPaths.push(await downloadToTemp(imageUrls[i], `post_${i}`));
+    for (let i = 0; i < resolvedImageUrls.length; i++) {
+      tmpPaths.push(await downloadToTemp(resolvedImageUrls[i], `post_${i}`));
     }
   } catch (err) {
     // Clean up any partial downloads before re-throwing.
@@ -308,7 +373,7 @@ module.exports = async function publish_post(page, params) {
 
     if (userId) await setOnboarding(userId, 'publishPostAt');
   } catch (err) {
-    await dumpFailure(page, `error-${imageUrls.length}img`);
+    await dumpFailure(page, `error-${resolvedImageUrls.length}img`);
     throw err;
   } finally {
     for (const p of tmpPaths) fs.unlink(p, () => {});

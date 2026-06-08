@@ -38,6 +38,12 @@
       "chance": 0.3
     },
 
+    {
+      "type": "publish_post",
+      "guard": { "ifOnboardingMissing": "publishPostAt", "minAccountAgeDays": 4 },
+      "chance": 0.3
+    },
+
     { "type": "wait", "params": { "min": 20, "max": 40 } },
 
     { "type": "accept_loop" },

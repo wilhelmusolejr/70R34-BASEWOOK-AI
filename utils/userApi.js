@@ -350,9 +350,63 @@ async function fetchPageSetStats(date, tzOffset) {
   };
 }
 
+/**
+ * Auto-assign the newest unowned post matching the profile's country to a
+ * profile (US profiles also match country-less posts). Server picks + links
+ * the post and returns it populated. Used by publish_post to obtain a post to
+ * publish when the profile doesn't already own one.
+ *
+ * @param {string} profileId
+ * @returns {Promise<{status:'assigned'|'owns'|'none'|'error', post?:Object, detail?:string}>}
+ *   - 'assigned' (200) — `post` is the newly assigned post
+ *   - 'owns'     (409, "already owns a post") — profile already has a post → publish that
+ *   - 'none'     (409, "no matching unassigned post") — nothing to assign → skip
+ *   - 'error'    (400/404/other) — skip
+ */
+async function autoAssignPostToProfile(profileId) {
+  if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
+  if (!profileId) {
+    console.warn('  [posts] autoAssignPostToProfile: no profileId — skipping');
+    return { status: 'error', detail: 'no profileId' };
+  }
+
+  try {
+    const { data } = await axios.post(
+      `${BASE_URL}/api/posts/auto-assign-to-profile`,
+      { profileId },
+      { timeout: 15000 }
+    );
+    const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+    return { status: 'assigned', post: parsed.data || parsed };
+  } catch (err) {
+    const code = err.response?.status;
+    const detail = err.response?.data?.message || err.message;
+    if (code === 409) {
+      // 409 covers two cases — distinguish by message so the caller can tell
+      // "profile already has a post to publish" (continue) from "nothing to
+      // assign for this country" (skip).
+      if (/already|owns/i.test(detail)) {
+        console.log(`  [posts] auto-assign: profile already owns a post (409): ${detail}`);
+        return { status: 'owns', detail };
+      }
+      console.log(`  [posts] auto-assign: no unassigned post available (409): ${detail}`);
+      return { status: 'none', detail };
+    }
+    if (code === 404) {
+      console.warn(`  [posts] auto-assign: profile not found (404): ${detail}`);
+    } else if (code === 400) {
+      console.warn(`  [posts] auto-assign: invalid profile id (400): ${detail}`);
+    } else {
+      console.warn(`  [posts] auto-assign failed (${code || 'no-status'}): ${detail}`);
+    }
+    return { status: 'error', detail };
+  }
+}
+
 module.exports = {
   fetchUser,
   autoAssignPage,
+  autoAssignPostToProfile,
   fetchPageSetStats,
   fetchActiveProfiles,
   fetchProfilesByStatus,

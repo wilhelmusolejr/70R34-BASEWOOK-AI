@@ -1102,12 +1102,31 @@ async function runStep(page, step, profileId, user, vaultState) {
   // 40%. Applies to any step type. A skipped step also skips its nested
   // `steps[]` subtree — the whole branch is "did nothing" for this session.
   // Lets a single tasks.json look different on every run.
-  if (typeof step.chance === 'number' && step.chance < 1) {
-    if (Math.random() >= step.chance) {
-      console.log(`Skipping: ${step.type} (chance=${step.chance})`);
+  //
+  // `chanceByStatus` overrides `chance` per profile status, e.g.
+  //   "chanceByStatus": { "Active": 0.3 }
+  // means a 30% roll for Active profiles. When `chanceByStatus` is present but
+  // the profile's status isn't listed, the effective chance is 0 (skip) — so a
+  // map gates the step to ONLY the listed statuses. Falls back to `chance` (or
+  // always-run) when `chanceByStatus` is absent.
+  let effectiveChance = step.chance;
+  let chanceLabel = `chance=${step.chance}`;
+  if (step.chanceByStatus && typeof step.chanceByStatus === 'object') {
+    const status = (user && user.status) || '';
+    if (Object.prototype.hasOwnProperty.call(step.chanceByStatus, status)) {
+      effectiveChance = step.chanceByStatus[status];
+      chanceLabel = `chance=${effectiveChance} for status="${status}"`;
+    } else {
+      effectiveChance = 0;
+      chanceLabel = `status="${status}" not in chanceByStatus`;
+    }
+  }
+  if (typeof effectiveChance === 'number' && effectiveChance < 1) {
+    if (Math.random() >= effectiveChance) {
+      console.log(`Skipping: ${step.type} (${chanceLabel})`);
       if (vaultState) {
         vaultLog.browser({ browserId: vaultState.browserId }, [
-          `Skipped: ${step.type} (chance=${step.chance})`,
+          `Skipped: ${step.type} (${chanceLabel})`,
         ]);
       }
       return;

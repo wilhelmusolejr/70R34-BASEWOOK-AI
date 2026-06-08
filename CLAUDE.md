@@ -151,11 +151,30 @@ Supported guard keys (all optional, all must pass when set):
 
 Order of evaluation per step:
 1. **`guard`** — declarative JSON guard block; skip with reason if any condition fails
-2. **built-in gate** — code-level per-action eligibility (currently `create_page`'s
-   duplicate-Page / nothing-to-create / page-setup cooldown via `evaluateBuiltinGate`);
-   skip with reason if ineligible
-3. **`chance`** — if guard + built-in gate passed, roll the probability dice
+2. **built-in gate** — code-level per-action eligibility (`create_page`'s
+   duplicate-Page / page-setup cooldown + daily-failure circuit breaker via
+   `evaluateBuiltinGate`); skip with reason if ineligible
+3. **`chance`** (or **`chanceByStatus`**) — if guard + built-in gate passed, roll the
+   probability dice
 4. **Handler** — if all passed, run
+
+### `chanceByStatus` — status-dependent chance
+
+A step may use `chanceByStatus` instead of (or alongside) `chance` to vary the
+roll by the profile's `user.status`:
+
+```json
+{ "type": "publish_post",
+  "guard": { "ifOnboardingMissing": "publishPostAt" },
+  "chanceByStatus": { "Active": 0.3 } }
+```
+
+- The matching status's value is the effective chance (Active → 30%).
+- **When `chanceByStatus` is present but the profile's status isn't listed, the
+  effective chance is 0 (skip)** — so the map gates the step to ONLY the listed
+  statuses. Falls back to `chance` (or always-run) when `chanceByStatus` is absent.
+- Evaluated in the same `chance` phase (AFTER guard + built-in gate). Skip log:
+  `Skipping: publish_post (chance=0.3 for status="Active")`.
 
 Console output on skip looks like:
 ```
@@ -1364,6 +1383,39 @@ static `message` OR API-generated via `userIdentity` + `instruction`.
 
 Leaf action. Publishes a new post (one or more images + AI-generated caption)
 to the user's own profile.
+
+### Gate + auto-assign a post from the pool
+
+Typical task config — a once-per-profile onboarding post, Active-only at 30%:
+
+```json
+{ "type": "publish_post",
+  "guard": { "ifOnboardingMissing": "publishPostAt" },
+  "chanceByStatus": { "Active": 0.3 } }
+```
+
+1. **`guard: ifOnboardingMissing: "publishPostAt"`** — only post if the profile
+   has never published (the `publishPostAt` stamp is set on success, so this is
+   a one-time post).
+2. **`chanceByStatus: { "Active": 0.3 }`** — 30% roll for Active profiles; other
+   statuses skip (see [`chanceByStatus`](#chancebystatus--status-dependent-chance)).
+3. **Auto-assign a post** (mirrors `create_page`'s pool claim): once guard +
+   chance pass, the action calls `autoAssignPostToProfile(userId)` →
+   `POST /api/posts/auto-assign-to-profile { profileId }`. The server assigns
+   the newest unowned post whose country matches the profile (US profiles also
+   match country-less posts) and returns it populated. Done HERE — after the
+   gate + chance — so a pool post is only consumed when we're actually about to
+   publish. Outcomes:
+   - **200 `assigned`** → map the returned post's `images`/`context`/`caption`
+     into `imageUrls`/`postContext`/`postCaption` and publish.
+   - **409 `owns`** (already owns a post) → publish the already-injected post.
+   - **409 `none`** (no matching unassigned post for the country) → clean skip.
+   - **400/404/network `error`** → fall back to the injected post if any
+     (an assign-endpoint outage must not block a profile that already owns a
+     post); skip only if there are then no images. Fail-open by design.
+
+   The call is skipped entirely for explicit/test invocation with no `userId`
+   (the legacy "imageUrls is required" throw still applies there).
 
 ### Flow
 
