@@ -234,7 +234,19 @@ Decisions and the underlying timestamp:
 
 - **Missing config**, **missing `lastSharedAt`**, **invalid date**, or **`shareHours ≤ 0`** → never skip.
 - **`elapsedHours >= shareHours`** → not skipped, run normally.
-- **`elapsedHours < shareHours`** → **SKIPPED**. The worker posts a tracker-log entry `SKIPPED (cooldown): last shared X.Xh ago (cooldown 24h, Y.Yh remaining)`, marks the profile `status: 'skipped'` in `state/{taskId}.json`, and moves on without opening a browser.
+- **`elapsedHours < shareHours`** → **SKIPPED**. The worker marks the profile `status: 'skipped'` in `state/{taskId}.json`, logs a console line, and moves on without opening a browser. The tracker-log entry `SKIPPED (cooldown): last shared X.Xh ago (cooldown 24h, Y.Yh remaining)` is posted **only once per cooldown window** (see below).
+
+**Tracker-log de-dup (`utils/cooldownLogMarker.js`).** The auto-engage loop ticks
+every ~10 min, so a naive implementation would POST a fresh `SKIPPED (cooldown)`
+tracker entry for every cooled-down profile on every tick — ~144 identical
+entries/day per profile, flooding the trackerLog. Instead, `shouldLogCooldownSkip(userId, lastSharedAt)`
+posts the entry **only the first time** a given `lastSharedAt` window is seen, and
+suppresses it on every subsequent skip for the same window. Because the key is
+`lastSharedAt`, once the profile actually runs and shares again (lastSharedAt
+changes) and later re-enters cooldown, the new window logs exactly once more. The
+console line + `state` skip-mark still fire every tick (only the tracker POST is
+gated). Markers persist to `state/cooldown-log-markers.json` (gitignored), so the
+suppression survives across auto-loop batches and process restarts.
 
 Skipped profiles count as "done" for this run, so the auto-clear behavior at task end still fires (next manual run starts fresh and re-evaluates cooldown — by then most skipped profiles will have aged past the threshold and become eligible).
 

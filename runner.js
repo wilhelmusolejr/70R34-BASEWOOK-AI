@@ -20,6 +20,7 @@ const {
 } = require('./utils/sessionLog');
 const { initRunLogDir } = require('./utils/runLogDir');
 const { loadState, saveState, clearState } = require('./utils/taskState');
+const { shouldLogCooldownSkip } = require('./utils/cooldownLogMarker');
 const { tryRecover, recoverUntilReady } = require('./utils/recoverers');
 const { vaultLog } = require('./vault-log');
 
@@ -1690,6 +1691,7 @@ function checkCooldown(user, cooldownConfig) {
   return {
     skipped: true,
     elapsedHours,
+    lastSharedAt: String(lastSharedAt),
     reason: `last shared ${elapsedHours.toFixed(1)}h ago (cooldown ${shareHours}h, ${remaining}h remaining)`,
   };
 }
@@ -1821,11 +1823,22 @@ async function runTask(task) {
       // user record's onboarding subdocument.
       const cd = checkCooldown(userPreview, cooldown);
       if (cd.skipped) {
-        console.log(`[${displayName}] SKIPPED (cooldown): ${cd.reason}`);
-        await persistTrackerLog(
-          userPreview?._id || userPreview?.id || userId,
-          `SKIPPED (cooldown): ${cd.reason}`
+        // Post the cooldown skip to the tracker log only ONCE per cooldown
+        // window (keyed by lastSharedAt) — otherwise the 10-min auto-loop floods
+        // the profile with identical SKIPPED entries every tick. It logs again
+        // only after the profile next shares (lastSharedAt changes) and re-enters
+        // cooldown. The console line + state mark still fire every time.
+        const firstLogThisWindow = shouldLogCooldownSkip(userId, cd.lastSharedAt);
+        console.log(
+          `[${displayName}] SKIPPED (cooldown): ${cd.reason}` +
+            (firstLogThisWindow ? '' : ' [tracker log suppressed — already logged this window]')
         );
+        if (firstLogThisWindow) {
+          await persistTrackerLog(
+            userPreview?._id || userPreview?.id || userId,
+            `SKIPPED (cooldown): ${cd.reason}`
+          );
+        }
         const completedAt = new Date().toISOString();
         results[index] = {
           status: 'fulfilled',
