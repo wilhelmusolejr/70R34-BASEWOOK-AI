@@ -30,7 +30,7 @@ const fs = require('fs');
 const path = require('path');
 const { humanWait, humanClick, humanType } = require('../utils/humanBehavior');
 const { downloadToTemp } = require('../utils/pageSetupHelpers');
-const { generatePostCaption } = require('../utils/generatePostCaption');
+const { generatePostCaption, paraphrasePostCaption } = require('../utils/generatePostCaption');
 const { getProfileLogDir } = require('../utils/sessionLog');
 const { setOnboarding, autoAssignPostToProfile } = require('../utils/userApi');
 
@@ -225,14 +225,40 @@ module.exports = async function publish_post(page, params) {
 
   // Caption priority:
   //   1. explicit `caption` param wins (lets a task hardcode test text)
-  //   2. captionSource="post" → use the picked entry's caption (auto-injected
-  //      as `postCaption` from user.posts[].caption by injectUserParams)
-  //   3. captionSource="ai" (default) → AI-generated via generatePostCaption
-  //      (userIdentity + postContext). Uses system_prompt_post.txt, falls back
-  //      to the 50-reasons list when postContext is vague. Returns '' on
-  //      API failure or SKIP.
-  //   4. empty (post goes captionless)
+  //   2. captionSource="paraphrase" → AI rewrites the post's own caption in the
+  //      profile's voice (paraphrasePostCaption). If the AI call fails/empties,
+  //      fall back to the original caption AS-IS (never captionless when a
+  //      caption exists).
+  //   3. captionSource="post" → use the picked entry's caption as-is (auto-
+  //      injected as `postCaption` from user.posts[].caption by injectUserParams)
+  //   4. captionSource="ai" (default) → AI-generated from scratch via
+  //      generatePostCaption (userIdentity + postContext). Falls back to the
+  //      50-reasons list when postContext is vague. Returns '' on failure/SKIP.
+  //   5. empty (post goes captionless)
   let resolvedCaption = String(caption || '').trim();
+
+  if (!resolvedCaption && captionSource === 'paraphrase') {
+    const original = String(postCaption || '').trim();
+    if (original) {
+      let rewritten = '';
+      try {
+        rewritten = (await paraphrasePostCaption(userIdentity, original, postContext)) || '';
+      } catch (err) {
+        console.warn(`  [publish_post] paraphrase failed (non-fatal): ${err.message}`);
+      }
+      if (rewritten) {
+        resolvedCaption = rewritten;
+        console.log(`  [publish_post] Using captionSource=paraphrase (AI-rewritten post caption)`);
+      } else {
+        resolvedCaption = original; // AI failed/empty → use the original caption as-is
+        console.warn(`  [publish_post] paraphrase unavailable — using original caption as-is`);
+      }
+    } else {
+      console.warn(
+        `  [publish_post] captionSource=paraphrase but no caption on the picked entry — posting captionless`
+      );
+    }
+  }
 
   if (!resolvedCaption && captionSource === 'post') {
     resolvedCaption = String(postCaption || '').trim();

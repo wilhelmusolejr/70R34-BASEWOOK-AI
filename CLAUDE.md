@@ -1447,20 +1447,26 @@ goto facebook.com/me  ← unconditional, /me is the known-good landing page
 
 ### Caption sources — `captionSource` param
 
-Three modes, in priority order:
+Four modes, in priority order:
 
 1. **Explicit `params.caption`** — always wins (used for testing or hardcoded text).
-2. **`captionSource: "post"`** — uses the picked entry's `user.posts[].caption`
-   (auto-injected as `postCaption` by `injectUserParams`). Falls back to AI if the
-   field is empty. Use this when captions are pre-generated and stored in the DB.
-3. **`captionSource: "ai"` (default)** — `generatePostCaption(userIdentity, postContext)`
-   generates a fresh voice-matched caption each call.
-4. Empty (post goes captionless).
+2. **`captionSource: "paraphrase"`** — AI **rewrites the post's own caption**
+   (`user.posts[].caption`, injected as `postCaption`) in the profile's voice via
+   `paraphrasePostCaption(userIdentity, postCaption, postContext)` — keeps the
+   meaning/vibe/language, just re-voiced. **If the AI call fails or returns empty,
+   it falls back to the original caption AS-IS** (never captionless when a caption
+   exists). This is what `task-daily-engage` uses.
+3. **`captionSource: "post"`** — uses the picked entry's `user.posts[].caption`
+   verbatim (no AI). Use when the stored captions should post unchanged.
+4. **`captionSource: "ai"` (default)** — `generatePostCaption(userIdentity, postContext)`
+   generates a fresh voice-matched caption from scratch (ignores the stored caption).
+5. Empty (post goes captionless).
 
 ```json
-{ "type": "publish_post" }                                              // ai (default)
-{ "type": "publish_post", "params": { "captionSource": "post" } }       // use DB caption
-{ "type": "publish_post", "params": { "caption": "hardcoded text" } }   // explicit
+{ "type": "publish_post" }                                                    // ai (default)
+{ "type": "publish_post", "params": { "captionSource": "paraphrase" } }       // AI re-voices the DB caption
+{ "type": "publish_post", "params": { "captionSource": "post" } }             // use DB caption verbatim
+{ "type": "publish_post", "params": { "caption": "hardcoded text" } }         // explicit
 ```
 
 The Gemini system prompt (`system_prompt_post.txt`) does the heavy lifting for AI
@@ -1528,6 +1534,61 @@ Two modes:
 
 `duration` wins if both set. Defaults to 5s.
 
+## `utils/geminiClient.js` — shared Gemini client + API-key failover
+
+Single source of truth for every Gemini call. Both `generateMessage` and
+`generatePostCaption` (caption + paraphrase) route their `requestGemini` through
+`geminiGenerate(systemInstruction, userText, { temperature, maxTokens })` here —
+each caller keeps its own generation defaults, the network + failover logic lives
+in ONE place.
+
+**Why it exists.** The free Gemini tier enforces three separate quotas — **RPD**
+(requests/day), **RPM** (requests/minute), **TPM** (tokens/minute) — and a 429
+`RESOURCE_EXHAUSTED` from ANY of them returns the same generic *"You exceeded your
+current quota"* message. With ~5-10 concurrent browsers each firing multiple
+Gemini calls (paraphrase caption + a share message per shared post), the
+**per-minute** caps trip in bursts even while the daily budget is nearly untouched
+(e.g. 467/500 RPD but still scattered 429s). When that happened, `publish_post`'s
+paraphrase fell through to the original English caption.
+
+**Key failover.** `resolveGeminiKeys()` builds an ordered, de-duped key list from
+`.env`:
+
+```
+GEMINI_API_KEY=key1          # primary (may itself be comma-separated)
+GEMINI_API_KEY_2=key2        # backups, numbered 2..9
+GEMINI_API_KEY_3=key3
+GEMINI_API_KEYS=key4,key5    # optional explicit comma-separated list
+```
+
+On a quota / rate-limit / overload / bad-or-blocked-key error
+(`isFailoverGeminiError`: status 429/500/503, or message matching
+`quota|rate.?limit|exceeded|high demand|overloaded|resource_exhausted|api[_ ]?key|permission|unauthor|forbidden`),
+it rotates to the next key and retries the **same** request. On a clearly
+non-retryable error (e.g. a malformed body) it throws immediately so backup keys'
+quota isn't wasted. Logs `[gemini] key #1 failed (...) — trying backup key #2` and
+`[gemini] backup key #2 succeeded`.
+
+**For a backup to actually add capacity it must be from a SEPARATE Google
+project** — a second key in the same project shares the same RPM/RPD/TPM bucket
+and 429s in lockstep. New-format keys (`AQ.…`) and legacy keys (`AIza…`) both work
+(treated as opaque strings; sent via the `x-goog-api-key` header).
+
+**Quota-id surfacing (`describeQuota`).** Gemini's top-line `error.message` never
+says WHICH quota tripped; the specific limit lives in `error.details[]`
+(`QuotaFailure.quotaId` + `RetryInfo.retryDelay`). The client extracts both and
+appends them to the thrown/logged message, e.g.
+`... exceeded your current quota [quota: GenerateRequestsPerMinutePerProjectPerModel-FreeTier; retry in 37s]`.
+`...PerMinute...` → slow the fleet / add a separate-project key; `...PerDay...` →
+backup key or paid tier. Self-contained try/catch — returns `''` if details are
+absent, never breaks the error path.
+
+**Scope.** Covers every Gemini-backed feature: `generatePostCaption` (AI caption
+from scratch), `paraphrasePostCaption` (the English-caption fix), and
+`generateMessage` (share/comment messages). NOT `generateAvatarDescription.js` —
+that uses GitHub Models (`GITHUB_MODELS_TOKEN`, GPT-4.1), a different provider
+unaffected by Gemini quota.
+
 ## `utils/generateMessage.js` — Share message generation
 
 Used by `share_posts`/`share_post` when `userIdentity` is set.
@@ -1581,6 +1642,14 @@ Returns plain string, or `''` on API error / SKIP / empty. Same em/en-dash
 sanitization as `generateMessage`. `params.caption` (static) wins over the
 API call. `userIdentity` alone triggers the call; `postContext` is
 recommended but optional.
+
+**Also exports `paraphrasePostCaption(userIdentity, originalCaption, postContext)`**
+— rewrites an EXISTING caption in the profile's voice instead of inventing one
+(shares the same `system_prompt_post.txt` voice/style rules; user-turn frames it
+as a paraphrase that keeps the meaning, vibe, language, and rough length). Returns
+`''` on API error / SKIP / empty so `publish_post`'s `captionSource: "paraphrase"`
+mode can fall back to the original caption as-is. Used as the default caption mode
+in `task-daily-engage`.
 
 ## `outlook_login` — Sign in to outlook.com
 

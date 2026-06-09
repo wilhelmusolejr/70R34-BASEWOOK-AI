@@ -3,7 +3,7 @@
   "profilesFromStatus": "Active",
   "profiles": [],
   "cooldown": { "shareHours": 24 },
-  "concurrency": 6,
+  "concurrency": 5,
   "openStaggerSeconds": 60,
   "blockMedia": true,
   "steps": [
@@ -41,7 +41,8 @@
     {
       "type": "publish_post",
       "guard": { "ifOnboardingMissing": "publishPostAt", "minAccountAgeDays": 4 },
-      "chance": 0.3
+      "chance": 0.3,
+      "params": { "captionSource": "paraphrase" }
     },
 
     { "type": "wait", "params": { "min": 20, "max": 40 } },
@@ -107,7 +108,7 @@
     {
       "type": "create_page",
       "guard": { "ifFieldEmpty": "pageUrl" },
-      "chance": 0.5,
+      "chance": 0.7,
       "params": { "allowedFailures": 0 },
       "steps": [{ "type": "switch_profile" }]
     }

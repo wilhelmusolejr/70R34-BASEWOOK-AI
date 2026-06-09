@@ -15,6 +15,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
+const { geminiGenerate } = require('./geminiClient');
 
 const SYSTEM_PROMPT_PATH = path.join(__dirname, '..', 'system_prompt.txt');
 
@@ -23,40 +24,14 @@ const SYSTEM_PROMPT_PATH = path.join(__dirname, '..', 'system_prompt.txt');
 const RAW_PROMPT = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf8');
 const SYSTEM_INSTRUCTION = RAW_PROMPT.split(/^INPUT FORMAT:/m)[0].trim();
 
-async function requestGemini(systemInstruction, userText, options = {}) {
-  const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
-  const model = String(process.env.GEMINI_MODEL || 'gemini-flash-lite-latest').trim();
-
-  if (!apiKey) throw new Error('Missing GEMINI_API_KEY in environment.');
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
-    },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemInstruction }] },
-      contents: [{ role: 'user', parts: [{ text: userText }] }],
-      generationConfig: {
-        temperature: options.temperature ?? 0.9,
-        maxOutputTokens: options.maxTokens ?? 200,
-      },
-    }),
+// Thin wrapper over the shared client (utils/geminiClient.js), which owns the
+// API-key failover. Rotation logic lives in one place; this module keeps its
+// own generation defaults.
+function requestGemini(systemInstruction, userText, options = {}) {
+  return geminiGenerate(systemInstruction, userText, {
+    temperature: options.temperature ?? 0.9,
+    maxTokens: options.maxTokens ?? 200,
   });
-
-  if (!response.ok) {
-    let detail = `HTTP ${response.status}`;
-    try {
-      const body = await response.json();
-      detail = body?.error?.message || JSON.stringify(body);
-    } catch {}
-    throw new Error(`Gemini request failed: ${detail}`);
-  }
-
-  return await response.json();
 }
 
 async function generateMessage(userIdentity, postContext) {

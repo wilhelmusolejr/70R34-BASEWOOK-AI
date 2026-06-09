@@ -19,6 +19,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
+const { geminiGenerate } = require('./geminiClient');
 
 const SYSTEM_PROMPT_PATH = path.join(__dirname, '..', 'system_prompt_post.txt');
 
@@ -29,40 +30,14 @@ const SYSTEM_PROMPT_PATH = path.join(__dirname, '..', 'system_prompt_post.txt');
 const RAW_PROMPT = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf8');
 const SYSTEM_INSTRUCTION = RAW_PROMPT.split(/^##\s*Input Format|^INPUT FORMAT:/im)[0].trim();
 
-async function requestGemini(systemInstruction, userText, options = {}) {
-  const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
-  const model = String(process.env.GEMINI_MODEL || 'gemini-flash-lite-latest').trim();
-
-  if (!apiKey) throw new Error('Missing GEMINI_API_KEY in environment.');
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
-    },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemInstruction }] },
-      contents: [{ role: 'user', parts: [{ text: userText }] }],
-      generationConfig: {
-        temperature: options.temperature ?? 0.95,
-        maxOutputTokens: options.maxTokens ?? 300,
-      },
-    }),
+// Thin wrapper over the shared client (utils/geminiClient.js), which owns the
+// API-key failover. Keeps this module's voice-variance defaults (higher temp,
+// longer output) while the rotation logic lives in one place.
+function requestGemini(systemInstruction, userText, options = {}) {
+  return geminiGenerate(systemInstruction, userText, {
+    temperature: options.temperature ?? 0.95,
+    maxTokens: options.maxTokens ?? 300,
   });
-
-  if (!response.ok) {
-    let detail = `HTTP ${response.status}`;
-    try {
-      const body = await response.json();
-      detail = body?.error?.message || JSON.stringify(body);
-    } catch {}
-    throw new Error(`Gemini request failed: ${detail}`);
-  }
-
-  return await response.json();
 }
 
 async function generatePostCaption(userIdentity, postContext) {
@@ -112,4 +87,69 @@ async function generatePostCaption(userIdentity, postContext) {
   }
 }
 
-module.exports = { generatePostCaption };
+/**
+ * Paraphrase an EXISTING caption into the profile's voice. Same persona/style
+ * rules as generatePostCaption (shared system instruction), but the task is to
+ * rewrite the given caption — keeping its meaning, vibe, language, and rough
+ * length — rather than invent one from the image context.
+ *
+ * Returns the paraphrased caption on success, or '' on API error / SKIP / empty
+ * so the caller can fall back to the original caption as-is.
+ *
+ * @param {string} userIdentity — the profile's identityPrompt (voice)
+ * @param {string} originalCaption — the post's stored caption to rewrite
+ * @param {string} [postContext] — optional image description, for grounding
+ */
+async function paraphrasePostCaption(userIdentity, originalCaption, postContext) {
+  try {
+    const original = String(originalCaption || '').trim();
+    if (!original) return ''; // nothing to paraphrase
+
+    const normalizedIdentity = String(userIdentity || '').trim();
+    const normalizedContext = String(postContext || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const userText = [
+      'TASK: Rewrite (paraphrase) the caption below so it sounds like THIS person',
+      'wrote it — their voice, tone, and language. Keep the same overall meaning,',
+      'mood, and roughly the same length. Do not translate it to another language.',
+      'Output ONLY the rewritten caption, nothing else.',
+      '',
+      'USER IDENTITY:',
+      normalizedIdentity || '(none)',
+      '',
+      'IMAGE CONTEXT (reference only):',
+      normalizedContext || '(none)',
+      '',
+      'ORIGINAL CAPTION:',
+      original,
+    ].join('\n');
+
+    console.log(`  [paraphrasePostCaption] original: "${original}"`);
+
+    const payload = await requestGemini(SYSTEM_INSTRUCTION, userText, { temperature: 0.9 });
+
+    const raw = (payload?.candidates?.[0]?.content?.parts?.[0]?.text || '')
+      .trim()
+      .replace(/^["']|["']$/g, '');
+
+    if (!raw || raw.toUpperCase() === 'SKIP') {
+      console.log(`  [paraphrasePostCaption] empty/SKIP — caller will use original caption`);
+      return '';
+    }
+
+    const caption = raw
+      .replace(/[—–]|(?<= )-(?= )/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
+    console.log(`  [paraphrasePostCaption] paraphrased: "${caption}"`);
+    return caption;
+  } catch (err) {
+    console.warn(`  [paraphrasePostCaption] API error: ${err.message}`);
+    return '';
+  }
+}
+
+module.exports = { generatePostCaption, paraphrasePostCaption };
