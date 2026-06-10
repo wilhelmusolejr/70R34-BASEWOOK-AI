@@ -393,8 +393,15 @@ const actionSchemas = {
       mode: {
         type: 'string',
         default: 'name',
-        enum: ['name', 'news', 'page', 'general'],
-        description: 'How to generate a query when `query` is empty',
+        enum: ['name', 'news', 'page', 'general', 'random'],
+        description:
+          'How to generate a query when `query` is empty. "random" picks a concrete mode per run from `modes` (default: name/news/general).',
+      },
+      modes: {
+        type: 'array',
+        default: ['name', 'news', 'general'],
+        description:
+          'Pool of modes to choose from when `mode` is "random". Defaults to ["name","news","general"] (page excluded — request it explicitly).',
       },
       filter: {
         type: 'string',

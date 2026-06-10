@@ -1,5 +1,5 @@
 {
-  "taskId": "engage-and-add",
+  "taskId": "engage-and-add-page-checking",
   "profilesFromStatus": "Active",
   "profiles": [],
   "cooldown": { "shareHours": 24 },
@@ -53,7 +53,8 @@
 
     {
       "type": "search",
-      "params": { "mode": "general" },
+      "chance": 0.5,
+      "params": { "mode": "random", "modes": ["name", "news", "general"] },
       "steps": [
         { "type": "scroll", "params": { "min": 40, "max": 70 } },
         { "type": "like_posts", "params": { "min": 1, "max": 3 } }
@@ -77,6 +78,7 @@
 
     {
       "type": "search",
+      "chance": 0.5,
       "params": { "mode": "page", "filter": "Pages" },
       "steps": [
         { "type": "scroll", "params": { "min": 20, "max": 40 } },

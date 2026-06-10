@@ -619,6 +619,21 @@ function randomPick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+// Default pool for `mode: "random"` — name lookup, local news, or a
+// topic+location ("near me" / "in {city}") general search. `page` is left out
+// on purpose: a Pages search is usually paired with open_search_result/connect,
+// so it should be requested explicitly rather than rolled in at random.
+const RANDOM_MODE_POOL = ['name', 'news', 'general'];
+
+// Resolve `mode: "random"` to a concrete mode for this run. An optional
+// `modes` array on the step overrides the default pool (e.g. ["news","general"]).
+// Any other mode value passes through unchanged.
+function resolveSearchMode(mode, modes) {
+  if (mode !== 'random') return mode;
+  const pool = Array.isArray(modes) && modes.length ? modes.filter(Boolean) : RANDOM_MODE_POOL;
+  return randomPick(pool.length ? pool : RANDOM_MODE_POOL);
+}
+
 function generateQuery({ mode, category, city, country }) {
   const cc = normalizeCountry(country);
   if (mode === 'name') {
@@ -649,12 +664,25 @@ function generateQuery({ mode, category, city, country }) {
 }
 
 module.exports = async function search(page, params) {
-  const { query = '', mode = 'name', filter = '', category = '', city = '', country = '' } = params;
+  const {
+    query = '',
+    mode = 'name',
+    modes,
+    filter = '',
+    category = '',
+    city = '',
+    country = '',
+  } = params;
+
+  // Resolve "random" to a concrete mode BEFORE generating the query, so the log
+  // and the query agree on what actually ran this time.
+  const effectiveMode = resolveSearchMode(mode, modes);
 
   const searchQuery =
-    String(query || '').trim() || generateQuery({ mode, category, city, country });
+    String(query || '').trim() || generateQuery({ mode: effectiveMode, category, city, country });
 
-  console.log(`  [search] Query: "${searchQuery}" (${query ? 'explicit' : `mode=${mode}`})`);
+  const modeLabel = mode === 'random' ? `mode=${effectiveMode} [random]` : `mode=${effectiveMode}`;
+  console.log(`  [search] Query: "${searchQuery}" (${query ? 'explicit' : modeLabel})`);
 
   if (!page.url().includes('facebook.com')) {
     console.log('  [search] Not on Facebook — navigating home first...');
