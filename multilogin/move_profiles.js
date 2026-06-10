@@ -1,8 +1,28 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import "dotenv/config";
 
-// ---- Edit this list. MongoDB _id values from the online profile API. ----
-const USER_IDS = ["69e21bfbbb8fecced7bfda00","69e21c9bbb8fecced7bfda04","69e21dbcbb8fecced7bfda09","69e21e00bb8fecced7bfda0e","69e21e34bb8fecced7bfda13","69e21e63bb8fecced7bfda18","69e21f41bb8fecced7bfda1d","69e21fd2bb8fecced7bfda22","69e2200ebb8fecced7bfda27","69e22121bb8fecced7bfda36","69e2218dbb8fecced7bfda40","69e221d5bb8fecced7bfda45","69e22210bb8fecced7bfda4a","69e22244bb8fecced7bfda4f","69e222b7bb8fecced7bfda59","69e223ffbb8fecced7bfda68","69e2244abb8fecced7bfda6d","69e22b53bb8fecced7bfda77","69e22b81bb8fecced7bfda7c","69e22c38bb8fecced7bfda81","69e22c72bb8fecced7bfda86","69e22cc3bb8fecced7bfda8b","69e22d7dbb8fecced7bfda96","69e22dc3bb8fecced7bfda9b","69e22f8fbb8fecced7bfdab4","69e23115bb8fecced7bfdac3","69e4c967432434a8d7eb60ec","69e4f475432434a8d7eb62f2","69f3585493738d563ce21828","69f3585493738d563ce21829","69f3585493738d563ce2182e","69f36dd093738d563ce21912","69f3f38993738d563ce21cf0","69f3f38993738d563ce21cf2","69f488af93738d563ce21fee","69f488af93738d563ce21fef","69f488af93738d563ce21ff1","69f4a1997ccc7b69484b3ca6","69f4a5a37ccc7b69484b3e70","69f4a8457ccc7b69484b3e9b","69f4b475e4db22596b581e27","69f4bf1de4db22596b581ea2","69f4bf9de4db22596b581eb5","69f5c624497c702fe2920960","69f5c624497c702fe2920961","69f5c624497c702fe2920962","69f5c624497c702fe2920963","69f5df5d497c702fe29209df","69f831de497c702fe2921a1d","69f85883497c702fe2921bfa","69f85b36497c702fe2921c14","69f85c44497c702fe2921c27","69f85de8497c702fe2921c39","69f85e43497c702fe2921c42","69f85fbb497c702fe2921c58","69f8611a497c702fe2921c6a","69f86260497c702fe2921c7c","69f862da497c702fe2921c85","69f86400497c702fe2921c9a","69f86481497c702fe2921cad","69f86569497c702fe2921cc4","69f86782497c702fe2921ccd","69fab5d4d7f59db2c21aeb16","69fab5d4d7f59db2c21aeb18","69fae84ad7f59db2c21aed24","69fae84ad7f59db2c21aed25","69faf30ad7f59db2c21aee3e","69fb09bad7f59db2c21aeed4"];
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// User IDs come from multilogin/ids.txt (one per line, # = comment) — the SAME
+// list update_name_notes.js reads — or from CLI args, which win over the file:
+//   node multilogin/move_profiles.js <id> <id> ...
+function resolveUserIds() {
+  const args = process.argv.slice(2).filter((a) => a && !a.startsWith("--"));
+  if (args.length) return args;
+  const idsPath = path.resolve(__dirname, "ids.txt");
+  if (!fs.existsSync(idsPath)) return [];
+  return fs
+    .readFileSync(idsPath, "utf8")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/#.*$/, "").trim()) // strip inline + full-line comments
+    .filter(Boolean);
+}
+
+const USER_IDS = resolveUserIds();
 
 const MLX_BASE = "https://api.multilogin.com";
 const API_BASE = process.env.API_BASE ?? process.env.USER_API_BASE_URL ?? "https://7or34.space";
@@ -149,7 +169,9 @@ if (missing.length) {
 }
 
 if (USER_IDS.length === 0) {
-  console.error("USER_IDS array is empty. Edit multilogin/move_profiles.js and add the ids.");
+  console.error(
+    "No user IDs. Paste them into multilogin/ids.txt (one per line) or pass as CLI args."
+  );
   process.exit(1);
 }
 

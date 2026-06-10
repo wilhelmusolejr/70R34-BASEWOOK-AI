@@ -102,12 +102,12 @@ const esc = (s) =>
 function buildNotes(user) {
   const email = pickEmail(user);
   const rows = [
-    ['FB', fbNumericId(user)],
-    ['Pass', user.facebookPassword || ''],
+    ['FB ID', fbNumericId(user)],
+    ['FB PW', user.facebookPassword || ''],
     ['EMAIL', email],
-    ['EMAIL PASS', user.emailPassword || ''],
-    ['RECOVERY', recoveryEmail(email)],
-    ['RECOVERY PASS', ''],
+    ['EMAIL PW', user.emailPassword || ''],
+    ['Email Recovery', recoveryEmail(email)],
+    ['Email Recovery Pw', ''],
     ['2FA', ''],
   ];
   return rows.map(([k, v]) => `<p>${k}: ${esc(v)}</p>`).join('');
