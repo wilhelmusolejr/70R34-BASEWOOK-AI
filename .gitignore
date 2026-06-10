@@ -10,3 +10,6 @@ state/
 delivery_export_*.csv
 profile_ids.json
 profiles.json
+# Debug page captures — full logged-in FB snapshots can embed session tokens/PII
+*.mhtml
+fix/

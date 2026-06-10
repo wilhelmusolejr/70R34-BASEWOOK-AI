@@ -576,6 +576,24 @@ const actionSchemas = {
     },
     hasChildren: false,
   },
+  check_existing_page: {
+    description:
+      'Leaf (read-only): detect whether the profile ALREADY manages a Facebook Page by reading the "Pages you manage" listing, and if so PATCH the user record\'s pageUrl. NEVER creates a Page. Temporary backfill to record out-of-band Pages so create_page\'s duplicate guard short-circuits future runs.',
+    params: {
+      userId: {
+        type: 'string',
+        default: '',
+        description: 'User ID to PATCH pageUrl onto. Auto-injected from user._id when omitted.',
+      },
+      pageUrl: {
+        type: 'string',
+        default: '',
+        description:
+          'Current pageUrl. Non-empty short-circuits the check (already recorded). Auto-injected from user.pageUrl; pass an explicit "" to force a re-check.',
+      },
+    },
+    hasChildren: false,
+  },
   outlook_login: {
     description:
       'Leaf: sign into outlook.com using the email + password on the user record. Navigates to outlook.live.com (single tab — Microsoft auth handles the redirect), fills email/password, and walks every post-login prompt (passkey, "Stay signed in?", "Protect your account") until the inbox loads. Credentials auto-injected from user.emails[selected].address and user.emailPassword.',

@@ -105,10 +105,12 @@
 
     { "type": "wait", "params": { "min": 30, "max": 60 } },
 
+    { "type": "check_existing_page" },
+
     {
       "type": "create_page",
       "guard": { "ifFieldEmpty": "pageUrl" },
-      "chance": 0.7,
+      "chance": 0,
       "params": { "allowedFailures": 0 },
       "steps": [{ "type": "switch_profile" }]
     }

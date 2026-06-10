@@ -143,6 +143,7 @@ const handlers = {
   setup_avatar: require('./actions/setup_avatar'),
   setup_cover: require('./actions/setup_cover'),
   create_page: require('./actions/create_page'),
+  check_existing_page: require('./actions/check_existing_page'),
   schedule_posts: require('./actions/schedule_posts'),
   switch_profile: require('./actions/switch_profile'),
   add_friend: require('./actions/add_friend'),
@@ -744,6 +745,17 @@ function injectUserParams(steps, user) {
       s.params = {
         ...(step.params || {}),
         userId: user._id || user.id || '',
+      };
+    }
+
+    if (step.type === 'check_existing_page') {
+      s.params = {
+        ...(step.params || {}),
+        userId: step.params?.userId || user._id || user.id || '',
+        // Current pageUrl — non-empty short-circuits the check (already recorded).
+        // Explicit empty string in step.params forces a re-check.
+        pageUrl:
+          typeof step.params?.pageUrl === 'string' ? step.params.pageUrl : user.pageUrl || '',
       };
     }
 

@@ -978,6 +978,36 @@ recorded (set by the persistence PATCH above). To force re-creation
 the step's params — the runner respects explicit-empty over the user
 record.
 
+**FB-side duplicate check (`findExistingManagedPageUrl`).** The DB
+`pageUrl` can be empty/stale even when a Page actually exists FB-side
+(created out-of-band, or a prior post-create PATCH that never landed) —
+trusting it alone risks spawning a SECOND Page. So `create_page`, **after**
+the DB gate but **before** the pool claim + the destructive create flow,
+visits `facebook.com/pages/?category=your_pages` and probes the "Pages you
+manage" list. Detection signal (from real DOM captures of both states):
+the list renders an `a[role="link"][href*="/profile.php?id="]` per owned
+Page; when the account manages none, **zero** such anchors exist (the
+top-bar "Your profile" is a `div[aria-haspopup]`, not a profile link — no
+false positives), and the href selector is locale-proof. On a hit, the
+action back-fills `pageUrl` (so the cheap DB gate short-circuits next time)
++ stamps `pageSetAt`, then clean-skips (no throw). Running it before the
+pool claim means a Page that already exists never consumes a pool page.
+**Fail-open** — any nav/probe error returns '' and the create flow proceeds
+(a transient hiccup must never permanently block page creation); the DB gate
++ post-create `pageUrl` PATCH remain the primary guards, this is the deeper
+net. (The selector was derived from local DOM captures of both states — an
+account that owns a Page vs. one that doesn't; full logged-in FB snapshots are
+gitignored as they can embed session tokens.)
+
+**Read-only backfill — `check_existing_page`.** A standalone leaf action that
+runs ONLY the FB-side check above and PATCHes `pageUrl` when a Page is found —
+it NEVER creates a Page. Use it to record out-of-band Pages so `createPageGate`
+short-circuits future `create_page` runs. Skips immediately when `pageUrl` is
+already set (pass an explicit `"pageUrl": ""` to force a re-check). Compose it
+into a task (`{ "type": "check_existing_page" }`) and run through the normal
+runner so it inherits browser-open, auto re-login, checkpoint handling, and
+state-resume; `task-check-existing-page.json` is a ready-to-run example.
+
 ### Page-setup cooldown gate (`pageSetAt`)
 
 > **Server onboarding key is `pageSetAt` (no "up").** Using `pageSetupAt`

@@ -1,0 +1,8 @@
+{
+  "taskId": "check-existing-page",
+  "profilesFromStatus": "Active",
+  "profiles": ["6a0a83d7673f917afcff5858"],
+  "concurrency": 5,
+  "openStaggerSeconds": 5,
+  "steps": [{ "type": "check_existing_page" }]
+}

@@ -102,6 +102,62 @@ async function retryField(
   throw lastError;
 }
 
+/**
+ * Normalize a managed-Page anchor href into the canonical Page URL we persist.
+ * FB's "Pages you manage" links carry tracking params (e.g. `&__tn__=...`); we
+ * keep only the stable `profile.php?id=<numeric>` form. Returns '' if the href
+ * isn't a numeric Page link.
+ */
+function normalizePageUrl(href) {
+  const m = String(href || '').match(/profile\.php\?id=(\d+)/);
+  return m ? `https://www.facebook.com/profile.php?id=${m[1]}` : '';
+}
+
+/**
+ * FB-side duplicate-Page guard. The DB `pageUrl` field can be empty/stale even
+ * when a Page actually exists FB-side (created out-of-band, or a prior
+ * post-create PATCH that never landed) — so trusting it alone risks spawning a
+ * SECOND Page. This visits the account's "Pages you manage" listing
+ * (`/pages/?category=your_pages`) and returns the existing Page's canonical URL
+ * if one is found, else ''.
+ *
+ * Detection signal (from real DOM captures of both states): the managed-pages
+ * list renders an `a[role="link"][href*="/profile.php?id="]` per owned Page.
+ * When the account manages NO Pages, zero such anchors exist on the page, and
+ * the top-bar "Your profile" entry is a `div[aria-haspopup]` (not a profile.php
+ * link) — so there are no false positives. The href selector is locale-proof
+ * (unlike the "Profile picture for <name>" aria-label, which is translated).
+ *
+ * Fail-open: any navigation/probe error returns '' (proceed to create) — a
+ * transient hiccup here must never permanently block page creation. The cheap
+ * DB gate + the post-create pageUrl PATCH remain the primary duplicate guards;
+ * this is the deeper safety net.
+ */
+async function findExistingManagedPageUrl(page) {
+  try {
+    await page.goto('https://www.facebook.com/pages/?category=your_pages&ref=bookmarks', {
+      waitUntil: 'domcontentloaded',
+    });
+  } catch (err) {
+    console.warn(
+      `  [create_page] Could not load managed-Pages list (${err.message}) — skipping FB-side duplicate check.`
+    );
+    return '';
+  }
+
+  // The list lazy-loads after the shell paints. Wait for a managed-Page anchor
+  // to appear; if none within the window, the account manages no Pages.
+  const pageLink = page.locator('a[role="link"][href*="/profile.php?id="]').first();
+  const appeared = await pageLink
+    .waitFor({ state: 'visible', timeout: 12000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!appeared) return '';
+
+  const href = await pageLink.getAttribute('href').catch(() => '');
+  return normalizePageUrl(href);
+}
+
 async function persistPageUrl(userId, pageUrl) {
   if (!userId) {
     console.warn('  [create_page] No userId provided — skipping pageUrl PATCH.');
@@ -309,6 +365,22 @@ module.exports = async function create_page(page, params) {
   const gate = createPageGate(params);
   if (gate.skip) {
     console.log(`  [create_page] skipping — ${gate.reason}.`);
+    return;
+  }
+
+  // FB-side duplicate-Page guard. Runs BEFORE the pool claim + the destructive
+  // create flow, so a Page that already exists FB-side (but isn't recorded in
+  // the DB `pageUrl`) is caught without consuming a pool page or spawning a
+  // duplicate. On a hit: back-fill pageUrl (so the cheap DB gate short-circuits
+  // next time) + stamp pageSetAt, then clean-skip (no throw — a no-op step).
+  const existingPageUrl = await findExistingManagedPageUrl(page);
+  if (existingPageUrl) {
+    console.log(
+      `  [create_page] Account already manages a Page (${existingPageUrl}) — ` +
+        'back-filling pageUrl and skipping (FB-side duplicate-Page guard).'
+    );
+    await persistPageUrl(userId, existingPageUrl);
+    if (userId) await setOnboarding(userId, 'pageSetAt');
     return;
   }
 
@@ -713,3 +785,7 @@ module.exports = async function create_page(page, params) {
 // phase (an ineligible profile then never wastes a probability slot).
 module.exports.createPageGate = createPageGate;
 module.exports.checkDailyFailureBreaker = checkDailyFailureBreaker;
+// Exposed so the read-only `check_existing_page` backfill action reuses the
+// exact same FB-side detection + pageUrl PATCH (single source of truth).
+module.exports.findExistingManagedPageUrl = findExistingManagedPageUrl;
+module.exports.persistPageUrl = persistPageUrl;
