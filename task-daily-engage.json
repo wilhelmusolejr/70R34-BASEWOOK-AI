@@ -1,5 +1,5 @@
 {
-  "taskId": "engage-and-add-page-checking",
+  "taskId": "daily-engage",
   "profilesFromStatus": "Active",
   "profiles": [],
   "cooldown": { "shareHours": 24 },
@@ -53,7 +53,7 @@
 
     {
       "type": "search",
-      "chance": 0.5,
+      "chance": 0.8,
       "params": { "mode": "random", "modes": ["name", "news", "general"] },
       "steps": [
         { "type": "scroll", "params": { "min": 40, "max": 70 } },
@@ -112,7 +112,7 @@
     {
       "type": "create_page",
       "guard": { "ifFieldEmpty": "pageUrl" },
-      "chance": 0,
+      "chance": 0.9,
       "params": { "allowedFailures": 0 },
       "steps": [{ "type": "switch_profile" }]
     }
