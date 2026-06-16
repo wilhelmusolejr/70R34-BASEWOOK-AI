@@ -114,7 +114,58 @@ async function dumpFailure(page, label) {
 }
 
 function isSignedInUrl(url) {
+  // The LOGIN_URL we navigate to ALSO contains "outlook.live.com/mail" plus
+  // prompt=select_account — so a naive substring match false-positives on the
+  // pre-redirect login URL (before Microsoft bounces us to login.live.com).
+  // A genuinely authenticated inbox URL never carries prompt=select_account
+  // (Microsoft drops it once signed in), nor any login/oauth path.
+  if (/prompt=select_account/i.test(url)) return false;
+  if (/login\.live\.com|login\.microsoftonline\.com|\/oauth2?\//i.test(url)) return false;
   return SIGNED_IN_URL_HINTS.some((hint) => url.includes(hint));
+}
+
+/**
+ * Microsoft now defaults consumer accounts to a passwordless "Get a code to
+ * sign in" interstitial after the email step (Send notification / Use your
+ * password). The password field (input[name='passwd']) never renders until
+ * "Use your password" is clicked. Probe + click it; best-effort — on flows
+ * that go straight to the password page this no-ops and returns false.
+ */
+const USE_PASSWORD_SELECTOR =
+  "span[role='button']:has-text('Use your password'), " +
+  "[data-testid='secondaryButton']:has-text('Use your password'), " +
+  "a:has-text('Use your password'), " +
+  "button:has-text('Use your password')";
+
+async function switchToPasswordEntry(page) {
+  // The interstitial's "Use your password" switch and the password field are
+  // mutually exclusive. Race them with real waitFor's (NOT isVisible({timeout}),
+  // which doesn't actually wait): if the password field is already up, no switch
+  // is needed; if the switch appears first, click it to reveal the field.
+  const pwdReady = page
+    .locator("input[name='passwd']")
+    .first()
+    .waitFor({ state: 'visible', timeout: 15000 })
+    .then(() => 'pwd')
+    .catch(() => null);
+  const switchReady = page
+    .locator(USE_PASSWORD_SELECTOR)
+    .first()
+    .waitFor({ state: 'visible', timeout: 15000 })
+    .then(() => 'switch')
+    .catch(() => null);
+
+  const winner = await Promise.race([pwdReady, switchReady]);
+  if (winner !== 'switch') return false;
+
+  const loc = page.locator(USE_PASSWORD_SELECTOR).first();
+  const box = await loc.boundingBox().catch(() => null);
+  if (!box) return false;
+  await humanClick(page, box);
+  console.log('  [outlook_login] passwordless interstitial → "Use your password"');
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+  await humanWait(page, 1000, 2000);
+  return true;
 }
 
 async function clickIfVisible(page, selector, timeout = 1000) {
@@ -313,6 +364,11 @@ module.exports = async function outlook_login(page, params) {
     await page.click('#idSIButton9');
     await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
     await humanWait(page, 1500, 2500);
+
+    // Passwordless interstitial — Microsoft defaults consumer accounts to a
+    // "Get a code to sign in" page; click "Use your password" to reveal the
+    // password field. No-ops on flows that go straight to the password page.
+    await switchToPasswordEntry(page);
 
     // Password
     await fillFormInput(page, "input[name='passwd']", password);

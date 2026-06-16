@@ -307,7 +307,7 @@ signin → user token + refresh_token
   transient retry path without touching the token.
 - `MULTILOGIN_FOLDER_ID` is required (source / "creation" folder); `MULTILOGIN_WORKSPACE_ID` is required for the refresh step.
 - `MULTILOGIN_DELIVERY_FOLDER_ID` is the destination folder used by the `multilogin/move_profiles.js` and `multilogin/export_delivery.js` helpers (the bot itself doesn't read it). The pair lets you separate creation-stage profiles from delivery-ready ones in the MLX UI.
-- `MULTILOGIN_CORE_VERSION` (or `CORE_VERSION` in `multilogin/.env`) — minimum **143** as of 2026-05. MLX rejects older cores with `BAD_REQUEST_BODY: "Can't set core older than 143. Please set higher core version"`. Default in `utils/browserManager.js` is `143`; the `multilogin/.env` template tracks the same floor.
+- `MULTILOGIN_CORE_VERSION` (or `CORE_VERSION` in `multilogin/.env`) — minimum **144** as of 2026-06 (was 143). MLX rejects older cores with `BAD_REQUEST_BODY: "Can't set core older than 144. Please set higher core version"`. Default in `utils/browserManager.js` is `144`. NB: the first time a profile opens on a newly-bumped core, MLX downloads it (`CORE_DOWNLOADING_STARTED` 500 / `CORE_DOWNLOADING_ALREADY_STARTED` 400) — the 3× open-retry may not cover the download; re-run once the download finishes.
 
 `closeProfile(profileId, browser, provider, port?)` and `closeBrowsers`
 dispatch by the `provider` field on the session object. `port` is the
@@ -698,12 +698,21 @@ module.exports = async function my_action(page, params) {
 ## `setup_about`
 
 Self-navigates (no `profileUrl` needed). Sections: bio, city/hometown, relationship,
-work, education, hobbies, interests, travel, name pronunciation. Section order is
-shuffled per run.
+work, education, hobbies, interests, travel, **name pronunciation** (all wired into
+the `sections` array). Section order is shuffled per run.
 
-After all sections complete, PATCHes `{ status: "Active", profileSetup: true }`
-to `/api/profiles/{userId}`. PATCH errors are caught + logged. Mid-setup failure
-leaves flags unchanged so retry re-runs cleanly.
+**Verified-save gating (the anti-false-success model).** Every section returns a
+**verified-save boolean**. A section that had nothing to do (no data, already set,
+panel absent) returns `true`; a section that filled a form whose Save didn't
+commit returns `false`. The main handler aggregates: it PATCHes
+`{ status: "Active", profileSetup: true }` and stamps `aboutSetAt` **only when
+every section verified**. If ANY section failed, it throws `err.noRetry = true`
+(logged PARTIAL, no 3× re-run) and leaves `aboutSetAt` unstamped so the next run
+(guarded by `ifOnboardingMissing: "aboutSetAt"`) retries — instead of locking in
+a half-filled profile reported as done.
+
+`interests` IS injected by `injectUserParams` (was historically omitted → interests
+silently never ran; shape is `{music,tvShows,movies,games,sportsTeams: string[]}`).
 
 **`profileUrl` capture (mirrors `create_page` → `pageUrl`):** when the user record's
 `profileUrl` is empty, `setup_about` waits for the `/me` redirect to settle, captures
@@ -723,40 +732,62 @@ facebook.com/me → About tab → sidebar link → panel button → fill → sav
 - **`clickSubsection` three-tier fallback:** (1) `a[href*="skFragment"]` sidebar link, (2) `getByRole('tab', { name })` text match, (3) **direct URL navigation** — sets `?sk=skFragment` on the current About page URL. The URL fallback is critical for fresh accounts where FB doesn't render sidebar links until data exists.
 - Panel buttons (no aria-label): `xpath=//div[@role="button"][.//span[text()="Button Text"]]`
 
-### Save patterns — three button shapes
+### Save — `commitSave` + the `aria-disabled` enable-gate
 
+**The root-cause fix for "reported saved but wasn't".** A FB inline Save button
+carries `aria-disabled="true"` until the form holds VALID, ACCEPTED input (e.g. a
+typeahead suggestion was actually *selected*, not just typed). Clicking it while
+disabled is a SILENT no-op — the form keeps unsaved changes, the section looks
+done, and the next sidebar nav pops "Leave Page?". So all saves go through
+`commitSave(saveSelector, panelText)`: **wait for the button to leave the disabled
+state → `humanClick` → confirm the form closed** (save button gone). Returns
+`true` only on a verified save; "never enabled" / "form didn't close" → `false`.
+
+Save selectors (the role=button ancestor carries `aria-disabled`, not the inner span):
 | Context | Selector |
 |---------|----------|
-| Inline panel forms (bio, personal, hobbies, interests, travel, names) | `xpath=//span[text()="Save"]` |
+| Generic inline panels (bio, work, education, relationship, interests, hobbies, travel, names) | `GENERIC_SAVE` = `xpath=//div[@role="button"][.//span[text()="Save"]]` |
 | Current city | `[aria-label="Current city save"]` |
 | Hometown | `[aria-label="Hometown save"]` |
-| Bio (`div[role="button"]` form) | `div[role="button"][aria-label="Save"]` |
-
-Always `waitForSaveComplete` after save (3× retry, 10-15s + 5-10s) to confirm
-button is gone + panel closed.
+| Bio | `div[role="button"][aria-label="Save"]` (falls back to `GENERIC_SAVE`) |
 
 ### Duplicate prevention
 
 Edit button only renders when data exists:
 `[aria-label="Edit Workplace"]`, `[aria-label="Edit college"]`, `[aria-label="Edit school"]`.
 
-### "Leave Page" modal on sidebar switch
+### "Leave Page" modal = unsaved-changes SIGNAL
 
-Half-typed input + sidebar click triggers the unsaved-changes modal that blocks
-navigation. `clickSubsection` calls `dismissLeavePageDialog` after every sidebar
-click (probes `[aria-label="Leave Page"]`, 2.5s timeout, click if visible).
+The "Leave Page?" modal ("You have unsaved changes to your profile.", buttons
+"Leave Page" / "Stay on Page") only appears when the section you're leaving did
+NOT save. `dismissLeavePageDialog` (probes `[aria-label="Leave Page"]`) still
+clicks "Leave Page" so navigation proceeds, but logs it as a WARN — it's a
+save-failure signal, not routine. The authoritative per-section signal is
+`commitSave`'s return; the modal is a secondary tell.
 
-### Hobbies / Interests combobox clear
+### Hobbies / Interests — search-combobox selection
 
-After typing → ArrowDown → Enter, FB's combobox sometimes leaves residual
-text/chip. **Ctrl+A + Delete does not clear it reliably.** Mash `Backspace`
-for ~5s (80-140ms intervals) before the next iteration. `Backspace` is the
-only key the field always honors.
+`addSearchItems` (shared by hobbies + every interest category):
+- Search input is `input[aria-label="Search"][role="combobox"]` (NOT `aria-label="Search Facebook"`, the nav bar).
+- After typing, **wait for a real `li[role="option"]` and `humanClick` the first one** — NOT blind ArrowDown+Enter (which committed nothing when no suggestion rendered, leaving raw text → Save stayed disabled). No option → skip the item (don't poison the form). Returns `addedAny`.
+- **Clear via `clearSearchInput`**: reads the input value and Backspaces only while non-empty — NEVER blind-mashes (Backspace-on-empty deletes a committed chip).
+- `fillPanelWithItems` verifies the panel opened (its search field is present) before treating an empty result as "nothing to save" → a panel that fails to open returns `false` (real failure → retry), not silent success. `setInterests` waits 2.5–4s between categories so the prior save settles before opening the next panel.
+- **Privacy**: `setPanelPrivacyPublic` matches the privacy button by PREFIX `[aria-label^="Edit privacy"]` (works whatever the current audience: friends-of-friends / Friends / Only me / already Public), then picks the Public radio + Done. Runs per hobby/interest category + travel.
+- **Implicit category dedup**: once a category has items, its add-panel button stops rendering, so `clickPanelButton` returns false and the category is skipped on re-run (no duplicate adds).
+
+### Name pronunciation
+
+`pickFirstPronunciationOption(name)` selects the FIRST valid radio
+(`input[name="firstname-pronunciation"|"lastname-pronunciation"][type="radio"]`)
+that is enabled with a non-empty value — skipping the disabled, blank "Empty
+pronunciation" default and the `type="text"` custom input. First + last name; if
+no option exists for a name, skip it (not a failure). Then `commitSave`.
 
 ### Key helpers
 
 `typeAndSelect`, `selectYearFromDropdown`, `clickPanelButton`, `setPanelPrivacyPublic`,
-`fillPanelWithItems`, `waitForSaveComplete`, `dismissLeavePageDialog`.
+`fillPanelWithItems`, `addSearchItems`, `clearSearchInput`, `pickFirstPronunciationOption`,
+`commitSave` / `clickSaveWhenEnabled` / `waitForSaveComplete`, `dismissLeavePageDialog`.
 
 ## `setup_avatar`
 
@@ -1692,11 +1723,19 @@ land us on the marketing page).
 
 ```
 goto outlook.live.com/mail (with prompt=select_account)
-  → if URL already on /mail → return early (signed in)
+  → if URL already on /mail → return early (signed in). isSignedInUrl() EXCLUDES
+    any URL with prompt=select_account or a login.live.com/login.microsoftonline
+    /oauth path — the LOGIN url itself contains "outlook.live.com/mail", so a bare
+    substring match falsely reported "already signed in" before the redirect.
   → probe "Use another account" tile BEFORE waitForSelector(#i0116) — when
     present, the email input is hidden until clicked; reverse order burns 60s
   → wait for #i0116 (email input), 60s timeout
   → fillFormInput #i0116 + click #idSIButton9
+  → switchToPasswordEntry — Microsoft now defaults consumer accounts to a
+    passwordless "Get a code to sign in" interstitial; click "Use your password"
+    (span[role='button']:has-text('Use your password')) to reveal the password
+    field. Races the password field vs the switch link with real waitFor's, so
+    it no-ops on flows that go straight to the password page.
   → fillFormInput input[name='passwd'] + click button[data-testid='primaryButton'], #idSIButton9
   → detectCredentialError(page) — fast-fail on Microsoft rejection (~2s)
   → walkPostLoginPrompts(page) — 12 ticks × 2.5-3.5s
@@ -2226,7 +2265,7 @@ Walks step tree before execution, fills missing params from user record.
 
 | Step | Injected |
 |------|----------|
-| `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `travel`, `userId`, `profileUrl` (current value — empty triggers capture+PATCH) |
+| `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `interests`, `travel`, `userId`, `profileUrl` (current value — empty triggers capture+PATCH) |
 | `setup_avatar` | `photoUrl`, `userIdentity`, `userId` |
 | `setup_cover` | `photoUrl`, `userId` |
 | `setup_privacy` | `userId` |

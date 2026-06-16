@@ -1,0 +1,6 @@
+{
+  "taskId": "setup-about",
+  "profiles": ["6a2baebe7c1dc2a307158295"],
+  "concurrency": 1,
+  "steps": [{ "type": "setup_about" }]
+}

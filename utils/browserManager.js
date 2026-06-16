@@ -966,7 +966,7 @@ async function createMultiloginProfile(user) {
   const workspaceId = process.env.MULTILOGIN_WORKSPACE_ID;
   const browserType = process.env.MULTILOGIN_BROWSER_TYPE || process.env.BROWSER_TYPE || 'mimic';
   const osType = process.env.MULTILOGIN_OS_TYPE || process.env.OS_TYPE || 'windows';
-  const coreVersion = Number(process.env.MULTILOGIN_CORE_VERSION || process.env.CORE_VERSION || '143');
+  const coreVersion = Number(process.env.MULTILOGIN_CORE_VERSION || process.env.CORE_VERSION || '144');
 
   if (!folderId) throw new Error('MULTILOGIN_FOLDER_ID is required');
   if (!workspaceId) throw new Error('MULTILOGIN_WORKSPACE_ID is required');

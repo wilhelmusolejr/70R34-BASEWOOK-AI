@@ -619,6 +619,7 @@ function injectUserParams(steps, user) {
         work: user.work,
         education: user.education,
         hobbies: user.hobbies,
+        interests: user.interests,
         travel: user.travel,
         userId: user._id || user.id || '',
         profileUrl: user.profileUrl || '',

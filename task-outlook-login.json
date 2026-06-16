@@ -1,0 +1,6 @@
+{
+  "taskId": "outlook-login",
+  "profiles": ["6a292325dd2552ffa802ba73"],
+  "concurrency": 1,
+  "steps": [{ "type": "outlook_login" }]
+}
