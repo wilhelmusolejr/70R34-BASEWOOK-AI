@@ -32,7 +32,12 @@ const { humanWait, humanClick, humanType } = require('../utils/humanBehavior');
 const { downloadToTemp } = require('../utils/pageSetupHelpers');
 const { generatePostCaption, paraphrasePostCaption } = require('../utils/generatePostCaption');
 const { getProfileLogDir } = require('../utils/sessionLog');
-const { setOnboarding, autoAssignPostToProfile } = require('../utils/userApi');
+const {
+  setOnboarding,
+  autoAssignPostToProfile,
+  fetchUser,
+  updateProfile,
+} = require('../utils/userApi');
 
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
 
@@ -197,7 +202,33 @@ module.exports = async function publish_post(page, params) {
       }
       console.log(`  [publish_post] Assigned post from pool (images=${resolvedImageUrls.length}).`);
     } else if (assign.status === 'owns') {
-      console.log('  [publish_post] Profile already owns a post — using it.');
+      // The profile already owns a post. This is also the path a runWithRetry
+      // RETRY lands on after a first attempt that assigned the post but then
+      // failed (e.g. the composer modal didn't open) — so we must RE-RESOLVE
+      // the owned post's images here, or the retry skips with "no images" and
+      // can never succeed. Re-fetch the profile and pull its post.
+      console.log('  [publish_post] Profile already owns a post — re-fetching it.');
+      if (resolvedImageUrls.length === 0) {
+        try {
+          const fresh = await fetchUser(userId);
+          const owned = (Array.isArray(fresh.posts) ? fresh.posts : []).find(
+            (p) => p && Array.isArray(p.images) && p.images.length > 0
+          );
+          if (owned) {
+            const imgs = resolvePostImageUrls(owned.images);
+            if (imgs.length > 0) resolvedImageUrls = imgs;
+            if (typeof owned.context === 'string' && owned.context) postContext = owned.context;
+            if (typeof owned.caption === 'string' && owned.caption) postCaption = owned.caption;
+            console.log(
+              `  [publish_post] Resolved owned post (images=${resolvedImageUrls.length}).`
+            );
+          } else {
+            console.warn('  [publish_post] Owned post had no resolvable images.');
+          }
+        } catch (err) {
+          console.warn(`  [publish_post] Could not re-fetch owned post: ${err.message}`);
+        }
+      }
     } else if (assign.status === 'none') {
       // Server confirmed there's no post to assign for this profile/country.
       console.log('  [publish_post] No post available to assign — skipping.');
@@ -320,20 +351,50 @@ module.exports = async function publish_post(page, params) {
     await page.goto('https://www.facebook.com/me', { waitUntil: 'domcontentloaded' });
     await humanWait(page, 2500, 4000);
 
-    const fileInput = page.locator('input[type="file"][multiple][accept*="image"]').first();
+    // Wait for the composer surface to HYDRATE before driving its hidden input.
+    // Root cause of the "composer dialog didn't appear" failures: waiting only
+    // for the input's `attached` state can fire setInputFiles a beat before FB
+    // wires the React onChange handler, so the change event is dropped and the
+    // modal never opens. The "Photo/video" composer entry being visible is the
+    // hydration signal that the handler is live.
+    await page
+      .locator('[aria-label="Photo/video"]')
+      .first()
+      .waitFor({ state: 'visible', timeout: 30000 })
+      .catch(() => {
+        console.warn(
+          '  [publish_post] "Photo/video" composer entry not visible in 30s — proceeding anyway'
+        );
+      });
+    await humanWait(page, 1200, 2200);
 
-    // 2. Set files on the hidden input. Fires FB's React change handler
-    // which auto-opens the Create post modal with previews loaded.
-    await fileInput.waitFor({ state: 'attached', timeout: 20000 });
-    await fileInput.setInputFiles(tmpPaths);
-    console.log(
-      `  [publish_post] Uploaded ${tmpPaths.length} file(s) — waiting for composer dialog...`
-    );
-
-    // 3. Wait for the Create post dialog to open in reaction to the file
-    // input change. Bumped to 30s to cover slower image-processing rounds.
+    // 2-3. Set files on the hidden multiple-image input — fires FB's React
+    // change handler which opens the Create post modal with previews. Retry the
+    // set ONCE if the modal doesn't appear (the first set can still land before
+    // hydration fully settles); re-query the input each attempt.
     const dialog = page.locator('div[role="dialog"][aria-label="Create post"]').first();
-    await dialog.waitFor({ state: 'visible', timeout: 30000 });
+    let dialogOpen = false;
+    for (let attempt = 1; attempt <= 2 && !dialogOpen; attempt++) {
+      const fileInput = page.locator('input[type="file"][multiple][accept*="image"]').first();
+      await fileInput.waitFor({ state: 'attached', timeout: 20000 });
+      await fileInput.setInputFiles(tmpPaths);
+      console.log(
+        `  [publish_post] Uploaded ${tmpPaths.length} file(s) (attempt ${attempt}) — waiting for composer dialog...`
+      );
+      dialogOpen = await dialog
+        .waitFor({ state: 'visible', timeout: attempt === 1 ? 20000 : 30000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!dialogOpen && attempt === 1) {
+        console.warn(
+          '  [publish_post] Modal not open yet — re-setting files after a short wait...'
+        );
+        await humanWait(page, 2500, 4000);
+      }
+    }
+    if (!dialogOpen) {
+      throw new Error('publish_post: Create post dialog did not open after upload');
+    }
     await humanWait(page, 1500, 2500);
 
     await dismissNotNow(page);
@@ -397,7 +458,18 @@ module.exports = async function publish_post(page, params) {
 
     console.log('  [publish_post] Done.');
 
-    if (userId) await setOnboarding(userId, 'publishPostAt');
+    if (userId) {
+      await setOnboarding(userId, 'publishPostAt');
+      // Best-effort: a successful image post means the profile has usable
+      // images. Non-throwing — a PATCH hiccup must not fail the post that
+      // already succeeded (same philosophy as setOnboarding).
+      try {
+        await updateProfile(userId, { hasGoodImages: true });
+        console.log('  [publish_post] PATCHed hasGoodImages=true');
+      } catch (err) {
+        console.warn(`  [publish_post] hasGoodImages PATCH failed (non-fatal): ${err.message}`);
+      }
+    }
   } catch (err) {
     await dumpFailure(page, `error-${resolvedImageUrls.length}img`);
     throw err;

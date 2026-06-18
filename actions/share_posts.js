@@ -26,6 +26,14 @@ const SHARE_BTN_SELECTOR = [
   'div[role="button"][aria-label="Share"]',
 ].join(', ');
 
+// FB blocks resharing for flagged accounts with a "You're temporarily restricted
+// from resharing posts until <date>..." message inside the still-open share
+// modal. The date is dynamic, so we match only the stable leading phrase.
+// (Learned from fix/Facebook_restrict_to_Share.mhtml.)
+const RESTRICTION_RE = /temporarily restricted from resharing/i;
+// Max time to wait for the share modal to close after clicking commit.
+const SHARE_RESULT_TIMEOUT_MS = 30000;
+
 module.exports = async function sharePosts(page, params) {
   const targetCount = resolveCount(params, 1);
 
@@ -43,6 +51,7 @@ module.exports = async function sharePosts(page, params) {
   const usedKeys = new Set();
   let shared = 0;
   let attempts = 0;
+  let restricted = false;
   const MAX_ATTEMPTS = 10;
 
   console.log(`  Target: share ${targetCount} post(s) (any visible)`);
@@ -259,6 +268,59 @@ module.exports = async function sharePosts(page, params) {
 
       await modalShareBtn.click();
       usedKeys.add(key);
+      console.log(`  Post ${shared + 1}: Share clicked — waiting for modal to close...`);
+
+      // Validate the outcome instead of assuming success. Poll up to 30s for
+      // ONE of three states:
+      //   - restricted: the "temporarily restricted from resharing" message
+      //                 appears (modal stays open) → account-wide block.
+      //   - shared:     the commit button disappears (modal closed) → success.
+      //   - stuck:      neither within 30s → don't hang; dismiss and move on.
+      const restrictionLoc = page.getByText(RESTRICTION_RE).first();
+      const deadline = Date.now() + SHARE_RESULT_TIMEOUT_MS;
+      let outcome = 'stuck';
+      while (Date.now() < deadline) {
+        if (await restrictionLoc.isVisible().catch(() => false)) {
+          outcome = 'restricted';
+          break;
+        }
+        const stillOpen = await page
+          .locator(commitSelector)
+          .first()
+          .isVisible()
+          .catch(() => false);
+        if (!stillOpen) {
+          outcome = 'shared';
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+
+      if (outcome === 'restricted') {
+        const msg = (await restrictionLoc.innerText().catch(() => ''))
+          .replace(/\s+/g, ' ')
+          .trim();
+        console.warn(
+          `  [share_posts] TEMPORARILY RESTRICTED from resharing — ${msg || '(message text unavailable)'}`
+        );
+        restricted = true;
+        await page.keyboard.press('Escape').catch(() => {});
+        // The restriction is account-wide for reshares — no point trying more
+        // posts this run. Stop the loop and let the task move to the next step.
+        break;
+      }
+
+      if (outcome === 'stuck') {
+        console.warn(
+          `  Post ${shared + 1}: share modal didn't close in 30s and no restriction shown — dismissing and moving on`
+        );
+        await page.keyboard.press('Escape').catch(() => {});
+        attempts++;
+        await humanWait(page, 800, 1500);
+        continue;
+      }
+
+      // outcome === 'shared'
       shared++;
       attempts = 0;
       console.log(`  Shared post ${shared}/${targetCount}`);
@@ -275,7 +337,13 @@ module.exports = async function sharePosts(page, params) {
     }
   }
 
-  console.log(`  Share complete: ${shared}/${targetCount} posts shared`);
+  if (restricted) {
+    console.log(
+      `  Share complete: ${shared}/${targetCount} posts shared — STOPPED EARLY (account temporarily restricted from resharing)`
+    );
+  } else {
+    console.log(`  Share complete: ${shared}/${targetCount} posts shared`);
+  }
 
   if (shared > 0 && userId) await setOnboarding(userId, 'lastSharedAt');
 };

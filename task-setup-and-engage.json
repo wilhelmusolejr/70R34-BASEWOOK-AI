@@ -1,0 +1,85 @@
+{
+  "taskId": "finalize-onboarding",
+  "profilesFromStatus": "Ready",
+  "profiles": ["6a0814809a99600488373f0a","6a0884ba94ca4be700287667","6a15225a9df399293ede62c0","6a195805024059deb2248843","6a1ff6dc58590bfaa861f370","6a1ff6dc58590bfaa861f372","6a1ff6de58590bfaa861f379","6a1ff6de58590bfaa861f37b","6a1ff6de58590bfaa861f380","6a2107d758590bfaa86244f6","6a2107d758590bfaa86244ff"],
+  "cooldown": { "shareHours": 24 },
+  "concurrency": 5,
+  "openStaggerSeconds": 60,
+  "blockMedia": true,
+  "steps": [
+    { "type": "switch_profile", "params": { "target": "user" } },
+
+    { "type": "wait", "params": { "min": 20, "max": 40 } },
+
+    {
+      "type": "homepage_interaction",
+      "steps": [{ "type": "scroll", "params": { "min": 40, "max": 60 } }]
+    },
+
+    {
+      "type": "join_group",
+      "guard": { "ifOnboardingMissing": "groupJoinedAt", "minAccountAgeDays": 7 },
+      "chance": 1,
+      "params": { "count": 1 }
+    },
+
+    { "type": "wait", "params": { "min": 20, "max": 40 } },
+
+    { "type": "setup_about" },
+
+    { "type": "wait", "params": { "min": 20, "max": 40 } },
+
+    {
+      "type": "setup_avatar",
+      "guard": { "ifOnboardingMissing": "profileImageSetAt" },
+      "chance": 1
+    },
+
+    { "type": "wait", "params": { "min": 20, "max": 40 } },
+
+    {
+      "type": "setup_cover",
+      "guard": { "ifOnboardingMissing": "coverImageSetAt" },
+      "chance": 1
+    },
+
+    { "type": "wait", "params": { "min": 20, "max": 40 } },
+
+    {
+      "type": "publish_post",
+      "guard": { "ifOnboardingMissing": "publishPostAt" },
+      "chance": 1,
+      "params": { "captionSource": "paraphrase" }
+    },
+
+    { "type": "wait", "params": { "min": 20, "max": 40 } },
+
+    {
+      "type": "setup_highlight",
+      "guard": { "ifOnboardingMissing": "highlightsSetAt" },
+      "chance": 1
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "scroll", "params": { "min": 30, "max": 60 } },
+        { "type": "like_posts", "params": { "count": 2 } },
+        { "type": "share_posts", "params": { "count": 1 } }
+      ]
+    },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "scroll", "params": { "min": 30, "max": 60 } },
+        { "type": "like_posts", "params": { "count": 2 } },
+        { "type": "share_posts", "params": { "count": 1 } }
+      ]
+    }
+  ]
+}

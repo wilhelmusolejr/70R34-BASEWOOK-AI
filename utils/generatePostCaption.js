@@ -22,6 +22,7 @@ const path = require('path');
 const { geminiGenerate } = require('./geminiClient');
 
 const SYSTEM_PROMPT_PATH = path.join(__dirname, '..', 'system_prompt_post.txt');
+const TOPIC_PROMPT_PATH = path.join(__dirname, '..', 'prompts', 'random_topic_post.txt');
 
 // Read once at module load. Split off the Input Format block so the
 // user-turn owns the variable data and the system instruction stays static.
@@ -29,6 +30,12 @@ const SYSTEM_PROMPT_PATH = path.join(__dirname, '..', 'system_prompt_post.txt');
 // older `INPUT FORMAT:` line marker, so the split regex matches both.
 const RAW_PROMPT = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf8');
 const SYSTEM_INSTRUCTION = RAW_PROMPT.split(/^##\s*Input Format|^INPUT FORMAT:/im)[0].trim();
+
+// Topic-based text-post prompt (used by generateTopicPost / publish_text_post).
+const RAW_TOPIC_PROMPT = fs.readFileSync(TOPIC_PROMPT_PATH, 'utf8');
+const TOPIC_SYSTEM_INSTRUCTION = RAW_TOPIC_PROMPT.split(
+  /^##\s*Input Format|^INPUT FORMAT:/im
+)[0].trim();
 
 // Thin wrapper over the shared client (utils/geminiClient.js), which owns the
 // API-key failover. Keeps this module's voice-variance defaults (higher temp,
@@ -152,4 +159,67 @@ async function paraphrasePostCaption(userIdentity, originalCaption, postContext)
   }
 }
 
-module.exports = { generatePostCaption, paraphrasePostCaption };
+/**
+ * Generate a SHORT text-only Facebook status from a topic seed, in the user's
+ * voice. Uses prompts/random_topic_post.txt as the system instruction.
+ *
+ * Returns the status text on success, or '' on API error / SKIP / empty so the
+ * caller can decide whether to skip the post.
+ *
+ * @param {string} userIdentity — the profile's identityPrompt (voice)
+ * @param {string} topic — the topic seed (from utils/postTopics.pickPostTopic)
+ * @param {object} [extra] — optional grounding ({ city, work })
+ */
+async function generateTopicPost(userIdentity, topic, extra = {}) {
+  try {
+    const normalizedTopic = String(topic || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!normalizedTopic) return '';
+
+    const normalizedIdentity = String(userIdentity || '').trim();
+    const city = String(extra.city || '').trim();
+    const work = String(extra.work || '').trim();
+
+    const userText = [
+      'TOPIC:',
+      normalizedTopic,
+      '',
+      'USER IDENTITY:',
+      normalizedIdentity || '(none)',
+      city ? `\nLOCATION: ${city}` : '',
+      work ? `WORK: ${work}` : '',
+      '',
+      'OUTPUT:',
+      'Write ONLY the Facebook status text.',
+    ]
+      .filter((l) => l !== '')
+      .join('\n');
+
+    console.log(`  [generateTopicPost] topic: "${normalizedTopic}"`);
+
+    const payload = await requestGemini(TOPIC_SYSTEM_INSTRUCTION, userText);
+
+    const raw = (payload?.candidates?.[0]?.content?.parts?.[0]?.text || '')
+      .trim()
+      .replace(/^["']|["']$/g, '');
+
+    if (!raw || raw.toUpperCase() === 'SKIP') {
+      console.log(`  [generateTopicPost] empty/SKIP`);
+      return '';
+    }
+
+    const caption = raw
+      .replace(/[—–]|(?<= )-(?= )/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
+    console.log(`  [generateTopicPost] generated: "${caption}"`);
+    return caption;
+  } catch (err) {
+    console.warn(`  [generateTopicPost] API error: ${err.message}`);
+    return '';
+  }
+}
+
+module.exports = { generatePostCaption, paraphrasePostCaption, generateTopicPost };

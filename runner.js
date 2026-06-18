@@ -142,14 +142,17 @@ const handlers = {
   setup_about: require('./actions/setup_about'),
   setup_avatar: require('./actions/setup_avatar'),
   setup_cover: require('./actions/setup_cover'),
+  setup_highlight: require('./actions/setup_highlight'),
   create_page: require('./actions/create_page'),
   check_existing_page: require('./actions/check_existing_page'),
   schedule_posts: require('./actions/schedule_posts'),
+  join_group: require('./actions/join_group'),
   switch_profile: require('./actions/switch_profile'),
   add_friend: require('./actions/add_friend'),
   visit_profile: require('./actions/visit_profile'),
   share_post: require('./actions/share_post'),
   publish_post: require('./actions/publish_post'),
+  publish_text_post: require('./actions/publish_text_post'),
   check_ip: require('./actions/check_ip'),
   search: require('./actions/search'),
   open_search_result: require('./actions/open_search_result'),
@@ -621,17 +624,28 @@ function injectUserParams(steps, user) {
         hobbies: user.hobbies,
         interests: user.interests,
         travel: user.travel,
+        firstName: user.firstName || '',
+        lastName: user.lastName || '',
+        gender: user.gender || '',
         userId: user._id || user.id || '',
         profileUrl: user.profileUrl || '',
+        status: user.status || '',
       };
     } else if (step.type === 'setup_about') {
       s.params = {
         ...(step.params || {}),
+        firstName: (step.params && step.params.firstName) || user.firstName || '',
+        lastName: (step.params && step.params.lastName) || user.lastName || '',
+        gender: (step.params && step.params.gender) || user.gender || '',
         userId: (step.params && step.params.userId) || user._id || user.id || '',
         profileUrl:
           step.params && typeof step.params.profileUrl === 'string'
             ? step.params.profileUrl
             : user.profileUrl || '',
+        status:
+          step.params && typeof step.params.status === 'string'
+            ? step.params.status
+            : user.status || '',
       };
     }
 
@@ -662,6 +676,18 @@ function injectUserParams(steps, user) {
         const img = user.images && user.images[1];
         if (img) next.photoUrl = `${IMAGE_SERVER_BASE_URL}${img.imageId.filename}`;
       }
+      if (!next.userId) next.userId = user._id || user.id || '';
+      s.params = next;
+    }
+
+    // setup_highlight: images come from a RANDOM post in the shared pool
+    // (fetched country-matched inside the action, read-only — no assignment),
+    // and the title from a country-aware random pool. So we only need country
+    // (drives both the post-pool + title-pool selection) and userId (onboarding
+    // stamp). An explicit imageUrls / title in the task still wins (in-action).
+    if (step.type === 'setup_highlight') {
+      const next = { ...(step.params || {}) };
+      if (!next.country) next.country = user.country || '';
       if (!next.userId) next.userId = user._id || user.id || '';
       s.params = next;
     }
@@ -739,6 +765,13 @@ function injectUserParams(steps, user) {
       s.params = {
         ...(step.params || {}),
         userName: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+      };
+    }
+
+    if (step.type === 'join_group' && !(step.params && step.params.userId)) {
+      s.params = {
+        ...(step.params || {}),
+        userId: user._id || user.id || '',
       };
     }
 
@@ -849,6 +882,20 @@ function injectUserParams(steps, user) {
       }
 
       if (!next.userIdentity) next.userIdentity = user.identityPrompt || '';
+      if (!next.userId) next.userId = user._id || user.id || '';
+      s.params = next;
+    }
+
+    if (step.type === 'publish_text_post') {
+      const next = { ...(step.params || {}) };
+      if (!next.userIdentity) next.userIdentity = user.identityPrompt || '';
+      if (!next.city) next.city = user.city || '';
+      if (!next.hometown) next.hometown = user.hometown || '';
+      if (!next.work) {
+        next.work = String(
+          (user.work && (user.work.title || user.work.company || user.work)) || ''
+        ).trim();
+      }
       if (!next.userId) next.userId = user._id || user.id || '';
       s.params = next;
     }

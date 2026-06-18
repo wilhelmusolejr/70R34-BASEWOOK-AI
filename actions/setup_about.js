@@ -4,7 +4,12 @@ const { setOnboarding } = require('../utils/userApi');
 
 const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
 
-async function markProfileSetup(userId) {
+// Statuses that already represent a profile further along the pipeline than
+// "Active" — completing setup_about must NOT downgrade these back to Active.
+// We still stamp profileSetup: true (the about step genuinely completed).
+const PRESERVE_STATUSES = new Set(['ready', 'available', 'delivered']);
+
+async function markProfileSetup(userId, currentStatus = '') {
   if (!userId) {
     console.warn('  [setup_about] No userId provided — skipping status/profileSetup PATCH.');
     return;
@@ -14,10 +19,21 @@ async function markProfileSetup(userId) {
     return;
   }
 
+  // If the profile is already in a downstream status (Ready/Available/...),
+  // keep it — only mark profileSetup. Otherwise promote to Active.
+  const preserve = PRESERVE_STATUSES.has(String(currentStatus).trim().toLowerCase());
+  const body = preserve ? { profileSetup: true } : { status: 'Active', profileSetup: true };
+
   const target = `${USER_API_BASE_URL}/api/profiles/${userId}`;
   try {
-    await axios.patch(target, { status: 'Active', profileSetup: true }, { timeout: 15000 });
-    console.log(`  [setup_about] PATCHed status=Active, profileSetup=true → ${target}`);
+    await axios.patch(target, body, { timeout: 15000 });
+    if (preserve) {
+      console.log(
+        `  [setup_about] PATCHed profileSetup=true (kept status="${currentStatus}") → ${target}`
+      );
+    } else {
+      console.log(`  [setup_about] PATCHed status=Active, profileSetup=true → ${target}`);
+    }
   } catch (err) {
     console.warn(`  [setup_about] Failed to PATCH profile setup flags: ${err.message}`);
   }
@@ -111,6 +127,26 @@ async function clickAboutTab(page) {
   if (!box) throw new Error('[setup_about] About tab has no bounding box');
   await humanClick(page, box);
   await humanWait(page, 2000, 3000);
+
+  // Re-anchor: a bbox click can drift onto a Reel / other profile tile instead
+  // of the About tab. If we left the profile, recover by navigating to the
+  // About page directly via URL — otherwise every subsequent section builds on
+  // the bad base and fails (the "always goes to reels" cascade).
+  if (!isProfileUrl(page.url())) {
+    console.warn(
+      `  [setup_about] About-tab click drifted off-profile (${page.url().slice(0, 60)}…) — re-anchoring to /me?sk=about`
+    );
+    try {
+      await page.goto('https://www.facebook.com/me', { waitUntil: 'domcontentloaded' });
+      await humanWait(page, 1500, 2500);
+      const u = new URL(page.url());
+      u.searchParams.set('sk', 'about');
+      await page.goto(u.toString(), { waitUntil: 'domcontentloaded' });
+      await humanWait(page, 1500, 2500);
+    } catch (_) {
+      /* best-effort recovery */
+    }
+  }
   console.log('  [setup_about] Clicked About tab');
 }
 
@@ -142,6 +178,18 @@ async function dismissLeavePageDialog(page, { timeout = 2500 } = {}) {
     console.warn(`  [setup_about] Leave Page click failed: ${err.message}`);
     return false;
   }
+}
+
+// A profile page is /me, /profile.php?id=..., or a vanity profile that carries
+// an sk= subsection param. A drifted page (/reel/, /watch/, /stories/, /groups/,
+// /marketplace/, /watch/, a post permalink, etc.) is NOT a valid base for the
+// sk= subsection trick — building `?sk=directory_x` on it keeps you off-profile.
+function isProfileUrl(url) {
+  const u = String(url || '');
+  if (/\/(reel|reels|watch|stories|story\.php|groups|marketplace|events|photo|videos?)\b/i.test(u)) {
+    return false;
+  }
+  return /facebook\.com\/(me\b|profile\.php)/i.test(u) || /[?&]sk=/i.test(u);
 }
 
 async function clickSubsection(page, skFragment, fallbackText) {
@@ -183,9 +231,22 @@ async function clickSubsection(page, skFragment, fallbackText) {
   }
 
   // Direct URL navigation — fresh accounts may not render sidebar links yet.
+  // CRITICAL: build the sk= param on a CLEAN profile base. If a prior bbox
+  // click drifted the page onto a Reel / Watch / Story / other non-profile URL,
+  // trusting page.url() would produce e.g. `/reel/<id>?sk=directory_work` (which
+  // stays on the reel), and then EVERY section fails on that bad base. So when
+  // the current URL isn't a profile page, re-anchor to /me first.
   try {
-    const currentUrl = page.url();
-    const u = new URL(currentUrl);
+    let base = page.url();
+    if (!isProfileUrl(base)) {
+      console.warn(
+        `  [setup_about] Off-profile URL detected (${base.slice(0, 60)}…) — re-anchoring to /me before sk= nav`
+      );
+      await page.goto('https://www.facebook.com/me', { waitUntil: 'domcontentloaded' });
+      await humanWait(page, 1500, 2500);
+      base = page.url();
+    }
+    const u = new URL(base);
     u.searchParams.set('sk', skFragment);
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded' });
     await humanWait(page, 2000, 3000);
@@ -366,7 +427,12 @@ async function checkBox(page, selectors) {
 }
 
 // Click a panel form button by XPath (no aria-label on these divs)
-async function clickPanelButton(page, spanText, timeout = 6000) {
+// timeout default raised to 15s: after a subsection navigation (esp. the URL
+// fallback, which only waits for domcontentloaded) FB's React panel renders the
+// add-button several seconds later. 6s was too short on slow proxies/renders,
+// causing the intermittent "panel button not found" → silently-skipped section.
+// waitForSelector polls, so this only costs extra time when the button is slow.
+async function clickPanelButton(page, spanText, timeout = 15000) {
   const xpath = `xpath=//div[@role="button"][.//span[text()="${spanText}"]]`;
   try {
     const el = await page.waitForSelector(xpath, { timeout });
@@ -381,8 +447,10 @@ async function clickPanelButton(page, spanText, timeout = 6000) {
   }
 }
 
-// Type into an input then ArrowDown + Enter to pick the first suggestion
-async function typeAndSelect(page, selector, value, timeout = 5000) {
+// Type into an input then ArrowDown + Enter to pick the first suggestion.
+// timeout default raised to 10s — the input inside a freshly-opened panel can
+// take a few seconds to mount before it's queryable.
+async function typeAndSelect(page, selector, value, timeout = 10000) {
   const el = await page.waitForSelector(selector, { timeout });
   await el.scrollIntoViewIfNeeded();
   await humanWait(page, 400, 700);
@@ -807,6 +875,26 @@ async function setEducation(page, education) {
 }
 
 // City, hometown, relationship — all live in Personal Details
+// True if a value (e.g. the city/hometown name) is already visible on the
+// current panel — used to tell "already set" (skip) apart from "panel didn't
+// render" (real failure) when the add-button isn't found. Matches the first
+// comma-separated token so "Asti, Italy" still matches a stored "Asti".
+async function valueAlreadyShown(page, value) {
+  const token = String(value || '')
+    .split(',')[0]
+    .trim();
+  if (!token) return false;
+  try {
+    return await page
+      .locator(`xpath=//span[contains(normalize-space(text()),"${token}")]`)
+      .first()
+      .isVisible()
+      .catch(() => false);
+  } catch {
+    return false;
+  }
+}
+
 async function setPersonalDetails(page, city, hometown, personal) {
   const needsCity = !!city;
   const needsHometown = !!hometown;
@@ -844,6 +932,11 @@ async function setPersonalDetails(page, city, hometown, personal) {
         console.log(`  [setup_about] City input error: ${e.message}`);
         ok = false;
       }
+    } else if (!(await valueAlreadyShown(page, city))) {
+      // Panel button missing AND the city isn't already displayed → real
+      // failure (render/timing), not "already set". Fail so the section retries.
+      console.warn('  [setup_about] Current city panel not found and city not set — failing for retry');
+      ok = false;
     }
   }
 
@@ -852,7 +945,7 @@ async function setPersonalDetails(page, city, hometown, personal) {
     const opened = await clickPanelButton(page, 'Hometown');
     if (opened) {
       try {
-        await typeAndSelect(page, '[aria-label="Hometown"]', hometown, 6000);
+        await typeAndSelect(page, '[aria-label="Hometown"]', hometown, 10000);
 
         const saved = await commitSave(page, '[aria-label="Hometown save"]', 'Hometown');
         if (!saved) {
@@ -863,6 +956,9 @@ async function setPersonalDetails(page, city, hometown, personal) {
         console.log(`  [setup_about] Hometown input error: ${e.message}`);
         ok = false;
       }
+    } else if (!(await valueAlreadyShown(page, hometown))) {
+      console.warn('  [setup_about] Hometown panel not found and hometown not set — failing for retry');
+      ok = false;
     }
   }
 
@@ -1114,21 +1210,25 @@ async function setHobbies(page, hobbies) {
   return fillPanelWithItems(page, 'Hobbies', hobbies);
 }
 
-async function setInterests(page, interests) {
+async function setInterests(page, interests, gender) {
   if (!interests) return true;
 
+  // Per-category probability of filling that interest, based on the profile's
+  // gender (from the user record — not a task param). Music/TV/Movies are
+  // gender-neutral 50%; Games skews male; Sports skews high for everyone.
+  const isMale = /^m/i.test(String(gender || '').trim());
   const categories = [
-    { key: 'music', panelText: 'Music' },
-    { key: 'tvShows', panelText: 'TV shows' },
-    { key: 'movies', panelText: 'Movies' },
-    { key: 'games', panelText: 'Games' },
-    { key: 'sportsTeams', panelText: 'Sports teams and athletes' },
+    { key: 'music', panelText: 'Music', chance: 0.5 },
+    { key: 'tvShows', panelText: 'TV shows', chance: 0.5 },
+    { key: 'movies', panelText: 'Movies', chance: 0.5 },
+    { key: 'games', panelText: 'Games', chance: isMale ? 0.8 : 0.2 },
+    { key: 'sportsTeams', panelText: 'Sports teams and athletes', chance: 0.8 },
   ];
 
   const hasAny = categories.some((c) => interests[c.key]?.length > 0);
   if (!hasAny) return true;
 
-  console.log('  [setup_about] Setting interests...');
+  console.log(`  [setup_about] Setting interests (gender=${gender || 'unknown'})...`);
 
   const navigated = await clickSubsection(page, 'directory_interests', 'Interests');
   if (!navigated) {
@@ -1137,15 +1237,23 @@ async function setInterests(page, interests) {
   }
 
   let ok = true;
-  let first = true;
-  for (const { key, panelText } of categories) {
+  let processedAny = false;
+  for (const { key, panelText, chance } of categories) {
     const items = interests[key];
     if (!items || items.length === 0) continue;
+
+    // Probability gate per category. A skipped category is NOT a failure
+    // (ok stays true) — it simply isn't filled this run.
+    if (Math.random() >= chance) {
+      console.log(`  [setup_about] Skipping ${panelText} interests (chance ${Math.round(chance * 100)}%)`);
+      continue;
+    }
+
     // Let the previous category's save fully settle before opening the next
     // panel — opening too soon (mid re-render) was leaving the new panel's
     // search field unmounted.
-    if (!first) await humanWait(page, 2500, 4000);
-    first = false;
+    if (processedAny) await humanWait(page, 2500, 4000);
+    processedAny = true;
     console.log(`  [setup_about] Adding ${panelText} interests: ${items.join(', ')}`);
     const saved = await fillPanelWithItems(page, panelText, items);
     if (!saved) ok = false;
@@ -1281,6 +1389,145 @@ async function setNamePronunciation(page) {
   }
 }
 
+// Derive a short nickname from a name: take everything up to and INCLUDING the
+// first consonant that appears AFTER the first vowel.
+//   Brendan → Bren   (…up to vowel 'e' + consonant 'n')
+//   Dave    → Dav    (…up to vowel 'a' + consonant 'v')
+// No vowel, or no consonant after the vowel → returns the trimmed name as-is.
+function shortName(name) {
+  const s = String(name || '').trim();
+  if (!s) return '';
+  const isVowel = (c) => /[aeiou]/i.test(c);
+  const isConsonant = (c) => /[a-z]/i.test(c) && !isVowel(c);
+
+  let vi = -1;
+  for (let i = 0; i < s.length; i++) {
+    if (isVowel(s[i])) {
+      vi = i;
+      break;
+    }
+  }
+  if (vi === -1) return s; // no vowel — leave as-is
+
+  for (let i = vi + 1; i < s.length; i++) {
+    if (isConsonant(s[i])) return s.slice(0, i + 1); // include this consonant
+  }
+  return s.slice(0, vi + 1); // vowel was effectively last — stop after it
+}
+
+// Add an "Other names" entry (Name Type defaults to "Nickname") under the Names
+// tab. The nickname is shortName() of the first OR last name (random pick).
+// Idempotent: skips if our nickname already shows in the panel, or if the
+// "Add other names" button isn't present.
+async function setOtherName(page, firstName, lastName) {
+  console.log('  [setup_about] Setting other name (nickname)...');
+
+  const source = Math.random() < 0.5 ? firstName : lastName;
+  const nick = shortName(source) || shortName(firstName) || shortName(lastName);
+  if (!nick) {
+    console.log('  [setup_about] No first/last name to derive a nickname — skipping');
+    return true;
+  }
+
+  const navigated = await clickSubsection(page, 'directory_names', 'Names');
+  if (!navigated) {
+    console.log('  [setup_about] Names section not found — skipping other name');
+    return true;
+  }
+
+  try {
+    // Idempotency: if this nickname is already on the panel, don't add a dupe.
+    const existing = await page
+      .locator(`xpath=//span[normalize-space(text())="${nick}"]`)
+      .first()
+      .isVisible()
+      .catch(() => false);
+    if (existing) {
+      console.log(`  [setup_about] Other name "${nick}" already present — skipping`);
+      return true;
+    }
+
+    const addBtn = page
+      .locator('xpath=//div[@role="button"][.//span[contains(text(),"Add other names")]]')
+      .first();
+    const addVisible = await addBtn.isVisible().catch(() => false);
+    if (!addVisible) {
+      console.log('  [setup_about] "Add other names" button not found — skipping');
+      return true;
+    }
+    await addBtn.scrollIntoViewIfNeeded().catch(() => {});
+    await humanWait(page, 600, 1200);
+    await humanClick(page, await addBtn.boundingBox());
+    await humanWait(page, 1200, 2200);
+
+    // Name Type defaults to "Nickname" — leave it. The Name input is the text
+    // input following the "Name Type" combobox (dynamic id, no aria-label, so
+    // anchor off the combobox). Anchor on the LAST such combobox so that when
+    // the profile already has other-name rows, we target the NEW blank row's
+    // input rather than an existing entry's.
+    const nameInput = page
+      .locator(
+        'xpath=(//label[@role="combobox"][.//span[text()="Name Type"]])[last()]/following::input[@type="text"][1]'
+      )
+      .first();
+    await nameInput.waitFor({ state: 'visible', timeout: 8000 });
+    // Scroll the input into view before typing — off-screen fields return a
+    // null bbox / drop keystrokes (the root cause of section interaction fails).
+    await nameInput.scrollIntoViewIfNeeded().catch(() => {});
+    await humanWait(page, 400, 800);
+    await nameInput.click();
+    await humanWait(page, 400, 800);
+    await humanType(page, nick);
+    await humanWait(page, 800, 1500);
+    console.log(`  [setup_about] Typed nickname "${nick}" (from "${source}")`);
+
+    // Tick "Show at top of profile" (input[type=checkbox][name="is_current"]).
+    // The real input is style-hidden, so click its label text and verify
+    // aria-checked flips; fall back to clicking the input's own box.
+    try {
+      const checkbox = page.locator('input[type="checkbox"][name="is_current"]').first();
+      const already = (await checkbox.getAttribute('aria-checked').catch(() => null)) === 'true';
+      if (!already) {
+        const labelText = page
+          .locator('xpath=//span[normalize-space(text())="Show at top of profile"]')
+          .first();
+        await labelText.scrollIntoViewIfNeeded().catch(() => {});
+        await humanWait(page, 400, 800);
+        await humanClick(page, await labelText.boundingBox());
+        await humanWait(page, 500, 1000);
+        let nowChecked = (await checkbox.getAttribute('aria-checked').catch(() => null)) === 'true';
+        if (!nowChecked) {
+          // Label click didn't register — try the checkbox box directly.
+          await checkbox.scrollIntoViewIfNeeded().catch(() => {});
+          const box = await checkbox.boundingBox().catch(() => null);
+          if (box) {
+            await humanClick(page, box);
+            await humanWait(page, 500, 1000);
+            nowChecked =
+              (await checkbox.getAttribute('aria-checked').catch(() => null)) === 'true';
+          }
+        }
+        console.log(
+          nowChecked
+            ? '  [setup_about] "Show at top of profile" enabled'
+            : '  [setup_about] Could not enable "Show at top of profile" (non-fatal)'
+        );
+      } else {
+        console.log('  [setup_about] "Show at top of profile" already enabled');
+      }
+    } catch (e) {
+      console.log(`  [setup_about] "Show at top of profile" toggle error (non-fatal): ${e.message}`);
+    }
+
+    const saved = await commitSave(page, GENERIC_SAVE, 'Other names');
+    if (!saved) console.warn('  [setup_about] Other name NOT saved');
+    return saved;
+  } catch (e) {
+    console.log(`  [setup_about] Other name error: ${e.message}`);
+    return false;
+  }
+}
+
 // ========================= MAIN HANDLER =========================
 
 module.exports = async function setupAbout(page, params) {
@@ -1294,8 +1541,12 @@ module.exports = async function setupAbout(page, params) {
     hobbies,
     interests,
     travel,
+    firstName = '',
+    lastName = '',
+    gender = '',
     userId = '',
     profileUrl = '',
+    status = '',
   } = params;
 
   console.log('  [setup_about] Navigating to own profile...');
@@ -1328,9 +1579,10 @@ module.exports = async function setupAbout(page, params) {
     ['work', () => setWork(page, work)],
     ['education', () => setEducation(page, education)],
     ['hobbies', () => setHobbies(page, hobbies)],
-    ['interests', () => setInterests(page, interests)],
+    ['interests', () => setInterests(page, interests, gender)],
     ['travel', () => setTravel(page, travel)],
     ['name pronunciation', () => setNamePronunciation(page)],
+    ['other name', () => setOtherName(page, firstName, lastName)],
   ];
 
   // Shuffle order so each account fills sections in a different sequence
@@ -1342,14 +1594,31 @@ module.exports = async function setupAbout(page, params) {
   // Each section returns a verified-save boolean. A section that had nothing to
   // do (no data, already set, panel absent) returns true. Only a section that
   // actually filled a form whose Save never committed returns false.
+  //
+  // Each section gets up to SECTION_ATTEMPTS tries with SECTION_RETRY_MS between
+  // them — FB's About panels render slowly after a subsection navigation, so a
+  // panel/input that wasn't there on the first pass is usually present after a
+  // re-navigate + wait (the root cause of the intermittent "panel button not
+  // found" / "input not found" section failures).
+  const SECTION_ATTEMPTS = 3;
+  const SECTION_RETRY_MS = 30000;
   const failed = [];
   for (const [name, run] of sections) {
     let ok = false;
-    try {
-      ok = await run();
-    } catch (e) {
-      console.warn(`  [setup_about] Section "${name}" threw: ${e.message}`);
-      ok = false;
+    for (let attempt = 1; attempt <= SECTION_ATTEMPTS; attempt++) {
+      try {
+        ok = await run();
+      } catch (e) {
+        console.warn(`  [setup_about] Section "${name}" threw (attempt ${attempt}/${SECTION_ATTEMPTS}): ${e.message}`);
+        ok = false;
+      }
+      if (ok !== false) break;
+      if (attempt < SECTION_ATTEMPTS) {
+        console.warn(
+          `  [setup_about] Section "${name}" not saved (attempt ${attempt}/${SECTION_ATTEMPTS}) — retrying in ~30s...`
+        );
+        await humanWait(page, SECTION_RETRY_MS - 2000, SECTION_RETRY_MS + 2000);
+      }
     }
     if (ok === false) failed.push(name);
   }
@@ -1377,7 +1646,7 @@ module.exports = async function setupAbout(page, params) {
 
   console.log('  [setup_about] Profile about setup complete — all sections verified saved');
 
-  await markProfileSetup(userId);
+  await markProfileSetup(userId, status);
 
   if (userId) await setOnboarding(userId, 'aboutSetAt');
 };

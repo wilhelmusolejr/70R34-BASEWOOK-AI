@@ -163,6 +163,44 @@ const actionSchemas = {
     },
     hasChildren: false,
   },
+  publish_text_post: {
+    description:
+      "Leaf: publish a TEXT-ONLY status (no image) to the user's own timeline. Opens the \"What's on your mind?\" composer (no file input), types the caption, and clicks Post. The caption is generated from a random TOPIC seed (5 categories × 10) + the user's identity via Gemini (prompts/random_topic_post.txt). An explicit `caption` param overrides the AI. No onboarding stamp — intended to fire repeatedly, gated by a `chance` roll in the task JSON.",
+    params: {
+      caption: {
+        type: 'string',
+        default: '',
+        description: 'Static text — overrides topic-based AI generation. Use to hardcode test text.',
+      },
+      userIdentity: {
+        type: 'string',
+        default: '',
+        description: 'Persona for AI generation. Auto-injected from user.identityPrompt.',
+      },
+      city: {
+        type: 'string',
+        default: '',
+        description: 'Used to ground location-aware topics. Auto-injected from user.city.',
+      },
+      work: {
+        type: 'string',
+        default: '',
+        description: 'Used to ground work-aware topics. Auto-injected from user.work.',
+      },
+      audience: {
+        type: 'string',
+        default: 'public',
+        enum: ['public', 'friends', 'only-me', 'skip'],
+        description: 'Audience for the post. "skip" leaves FB\'s current default untouched.',
+      },
+      userId: {
+        type: 'string',
+        default: '',
+        description: 'User id — used only as a failure-dump label. Auto-injected from user._id.',
+      },
+    },
+    hasChildren: false,
+  },
   setup_about: {
     description:
       'Fill in Facebook profile About section (bio, work, education, places, relationship). Self-navigates via /me — no profileUrl needed. On completion, PATCHes the user record with status="Active" and profileSetup=true.',
@@ -298,6 +336,44 @@ const actionSchemas = {
     },
     hasChildren: false,
   },
+  setup_highlight: {
+    description:
+      'Leaf: create a new profile "Highlights" (featured collection). Self-navigates to /me, then walks FB\'s 6-step flow: Add highlights → Add new → Upload photos (file chooser) → Next → set collection title → Save. "Next"/"Save" use FB\'s aria-disabled enable-gate. Images: pulls a RANDOM post from the shared pool (GET /api/posts, country-matched) and uploads ITS images — read-only, the post is NOT assigned to the profile. Title: random pick from a country-aware pool (utils/highlightTitle.js). On success, stamps onboarding.highlightsSetAt.',
+    params: {
+      imageUrls: {
+        type: 'array',
+        default: [],
+        description:
+          'Explicit image URLs to upload. When omitted (the normal case), a random pool post is fetched and its images are used instead.',
+        items: { type: 'string' },
+      },
+      title: {
+        type: 'string',
+        default: '',
+        description:
+          'Explicit collection title (max 18 chars, truncated). When empty, a random title is picked from the country-aware pool.',
+      },
+      count: {
+        type: 'number',
+        default: 5,
+        description:
+          "Cap on how many of the picked post's images go into the highlight. Omitted = 5 (large image sets fail to finalize on upload). Set higher to use more.",
+      },
+      country: {
+        type: 'string',
+        default: '',
+        description:
+          'Drives post-pool + title-pool selection (IT vs US). Auto-injected from user.country when omitted.',
+      },
+      userId: {
+        type: 'string',
+        default: '',
+        description:
+          'User id for the onboarding stamp PATCH. Auto-injected from user._id when omitted.',
+      },
+    },
+    hasChildren: false,
+  },
   create_page: {
     description:
       'Navigator: create a Facebook Page, fill all form fields, upload profile + cover, and advance through Steps 2-5. Ends on the new Page URL so child steps (schedule_posts, switch_profile) can run on it.',
@@ -368,15 +444,26 @@ const actionSchemas = {
     },
     hasChildren: false,
   },
+  join_group: {
+    description:
+      'Leaf: join ONE Facebook Group from the Discover list. Navigates Facebook menu → Groups (not the Create section) → Discover, presses exactly one "Join group" card, then verifies via the "Groups you\'ve joined" list. Stamps onboarding.groupJoinedAt ONLY when that list shows > 0 groups; otherwise skips to the next action (no stamp). If FB shows the "unusual activity / confirm your identity" restriction modal, flags the profile Need Checking and aborts. Typically guarded with { ifOnboardingMissing: "groupJoinedAt", minAccountAgeDays: 7 } and no chance.',
+    params: {},
+    hasChildren: false,
+  },
   switch_profile: {
     description:
-      'Switch back to the personal user profile from a Page. Falls back to "Quick switch profiles" when the named button is missing.',
+      'Open the "Your profile" menu and switch to a chosen profile. target="user" (default) switches to the personal Facebook user; target="page" switches to the Page. Anchored ONLY on the user\'s real name (firstName + lastName): the Page is identified as "the profile that is not the user", so no page name is needed. No-ops cleanly when already on the target (the current profile has no "Switch to" button).',
     params: {
+      target: {
+        type: 'string',
+        default: 'user',
+        description: 'Which profile to switch to: "user" (personal profile) or "page" (the Page).',
+      },
       userName: {
         type: 'string',
         default: '',
         description:
-          'Full name on the personal profile. Auto-injected from user firstName + lastName when omitted.',
+          'Full name on the personal profile. Auto-injected from user firstName + lastName when omitted. Required — used to tell the user profile apart from the Page.',
       },
     },
     hasChildren: false,

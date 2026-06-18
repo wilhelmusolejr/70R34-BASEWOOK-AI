@@ -30,13 +30,17 @@ const {
   updateFriendRequestStatus,
 } = require('../utils/userApi');
 const { detectRateLimit, dismissRateLimit } = require('../utils/fbRateLimit');
+const { resolveOwnerAddFriend } = require('../utils/profileOwner');
 
 const STATIC_POOLS = {
   friends: require('../config/friend_targets.json'),
 };
 
-const ADD_FRIEND_SELECTOR =
-  'xpath=//div[@role="button"][.//span[normalize-space(text())="Add friend"]]';
+// NOTE: Add Friend is resolved owner-only via resolveOwnerAddFriend (matched by
+// the profile owner's <h1> name) so we never click a "People you may know"
+// suggestion card — those share the exact aria-label="Add Friend <Name>" format
+// as the owner button. Confirm / Cancel are header-only states with no PYMK
+// collision, so they stay on span-text selectors.
 const CONFIRM_SELECTOR =
   'xpath=//div[@role="button"][.//span[normalize-space(text())="Confirm request"]]';
 const CANCEL_REQUEST_SELECTOR =
@@ -55,7 +59,9 @@ async function pickTarget(pool, { maxFriends, country } = {}) {
     return { profileUrl: urls[Math.floor(Math.random() * urls.length)] };
   }
   if (pool === 'users') {
-    const profiles = await fetchActiveProfiles(5);
+    // Active-only — connect_loop should send friend requests only to fully
+    // set-up profiles, not "Need Setup" ones.
+    const profiles = await fetchActiveProfiles(5, '', ['Active']);
     const eligible =
       typeof maxFriends === 'number'
         ? profiles.filter((p) => p.friends == null || p.friends < maxFriends)
@@ -112,14 +118,11 @@ async function checkProfileAvailability(page, timeoutMs = 60000) {
 }
 
 /**
- * Press a button matching `selector` if it's visible. Returns true if the
- * click was dispatched. No DOM-state verification afterwards — caller should
- * use detectRateLimit for failure detection.
+ * Press a `locator` if it's visible. Returns true if the click was dispatched.
+ * No DOM-state verification afterwards — caller should use detectRateLimit for
+ * failure detection.
  */
-async function pressIfPresent(page, selector) {
-  const locator = page.locator(selector).first();
-  const has = await locator.count().catch(() => 0);
-  if (!has) return false;
+async function pressLocator(page, locator) {
   const visible = await locator.isVisible().catch(() => false);
   if (!visible) return false;
   const handle = await locator.elementHandle().catch(() => null);
@@ -134,6 +137,14 @@ async function pressIfPresent(page, selector) {
   await humanClick(page, box);
   await humanWait(page, 1500, 2500);
   return true;
+}
+
+/**
+ * Press the first element matching `selector` if visible. Thin wrapper over
+ * pressLocator for the span-text targets (Confirm request, etc.).
+ */
+async function pressIfPresent(page, selector) {
+  return pressLocator(page, page.locator(selector).first());
 }
 
 async function isVisible(page, selector) {
@@ -163,7 +174,9 @@ async function syncExistingFriendRequest(receiverId, senderId) {
 
   try {
     await updateFriendRequestStatus(receiverId, senderId, 'Pending');
-    console.log(`[connect_loop] PATCH friend-request status=Pending ok: ${senderId} → ${receiverId}.`);
+    console.log(
+      `[connect_loop] PATCH friend-request status=Pending ok: ${senderId} → ${receiverId}.`
+    );
   } catch (err) {
     const status = err.response?.status;
     const body = err.response?.data;
@@ -290,9 +303,7 @@ module.exports = async function connect_loop(page, params = {}) {
       break;
     }
 
-    const visitLabel = target.name
-      ? `${target.name} — ${target.profileUrl}`
-      : target.profileUrl;
+    const visitLabel = target.name ? `${target.name} — ${target.profileUrl}` : target.profileUrl;
     console.log(`[connect_loop] (${attempts}/${maxAttempts}) Visiting ${visitLabel}`);
 
     try {
@@ -330,9 +341,7 @@ module.exports = async function connect_loop(page, params = {}) {
           await updateProfile(target.userId, { friends });
           console.log(`[connect_loop] PATCHed friends=${friends} on user ${target.userId}.`);
         } catch (err) {
-          console.warn(
-            `[connect_loop] PATCH friends failed for ${target.userId}: ${err.message}`
-          );
+          console.warn(`[connect_loop] PATCH friends failed for ${target.userId}: ${err.message}`);
         }
       } else {
         console.log(`[connect_loop] Friend count selector not found — skip PATCH.`);
@@ -346,14 +355,20 @@ module.exports = async function connect_loop(page, params = {}) {
     // ── 4. Action button check, in priority order ────────────────────
     console.log(`[connect_loop] Probing action buttons...`);
 
-    // 4a. Add friend
-    const hasAddFriend = await isVisible(page, ADD_FRIEND_SELECTOR);
-    console.log(`[connect_loop]   Add friend visible? ${hasAddFriend}`);
-    if (hasAddFriend) {
-      console.log(`[connect_loop] Clicking "Add friend"...`);
-      const clicked = await pressIfPresent(page, ADD_FRIEND_SELECTOR);
+    // 4a. Add friend — OWNER ONLY. Matched by the profile owner's <h1> name so
+    // we never click a "People you may know" suggestion card (those carry the
+    // identical aria-label="Add Friend <Name>" format as the owner button).
+    const { locator: ownerAddFriend } = await resolveOwnerAddFriend(page, {
+      log: (m) => console.log(`[connect_loop]   ${m}`),
+    });
+    console.log(`[connect_loop]   Owner Add friend present? ${!!ownerAddFriend}`);
+    if (ownerAddFriend) {
+      console.log(`[connect_loop] Clicking owner "Add friend"...`);
+      const clicked = await pressLocator(page, ownerAddFriend);
       if (!clicked) {
-        console.warn(`[connect_loop] "Add friend" click could not fire (no bbox/handle) — skipping.`);
+        console.warn(
+          `[connect_loop] "Add friend" click could not fire (no bbox/handle) — skipping.`
+        );
         await humanWait(page, waitMin * 1000, waitMax * 1000);
         continue;
       }
@@ -376,9 +391,7 @@ module.exports = async function connect_loop(page, params = {}) {
       if (senderId && target.userId) {
         try {
           await recordFriendRequest(target.userId, senderId);
-          console.log(
-            `[connect_loop] POST friend-request ok: ${senderId} → ${target.userId}.`
-          );
+          console.log(`[connect_loop] POST friend-request ok: ${senderId} → ${target.userId}.`);
         } catch (err) {
           const status = err.response?.status;
           const body = err.response?.data;
@@ -406,7 +419,9 @@ module.exports = async function connect_loop(page, params = {}) {
     const hasCancel = await isVisible(page, CANCEL_REQUEST_SELECTOR);
     console.log(`[connect_loop]   Cancel request visible? ${hasCancel}`);
     if (hasCancel) {
-      console.log(`[connect_loop] "Cancel request" present — already sent previously, syncing record.`);
+      console.log(
+        `[connect_loop] "Cancel request" present — already sent previously, syncing record.`
+      );
       if (senderId && target.userId) {
         await syncExistingFriendRequest(target.userId, senderId);
       } else {

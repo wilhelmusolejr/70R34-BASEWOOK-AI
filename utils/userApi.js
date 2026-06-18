@@ -31,10 +31,10 @@ async function fetchUser(userId) {
  * @param {number} limit — rows requested per status (default 5; merged list up to 2×limit)
  * @returns {Promise<Object[]>} — list of user objects (each has _id, profileUrl, etc.)
  */
-async function fetchActiveProfiles(limit = 5, country = '') {
+async function fetchActiveProfiles(limit = 5, country = '', statuses = ['Active', 'Need Setup']) {
   if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
 
-  const STATUSES = ['Active', 'Need Setup'];
+  const STATUSES = Array.isArray(statuses) && statuses.length ? statuses : ['Active', 'Need Setup'];
 
   const responses = await Promise.allSettled(
     STATUSES.map((status) => {
@@ -403,10 +403,67 @@ async function autoAssignPostToProfile(profileId) {
   }
 }
 
+/**
+ * Fetch a RANDOM post from the shared post pool and return its image URLs.
+ * Read-only — unlike autoAssignPostToProfile this does NOT assign/link the post
+ * to any profile; it just reads the pool (GET /api/posts) and picks one at
+ * random. Used by setup_highlight to source highlight images from a post's
+ * image set.
+ *
+ * Country-aware: queries `?country=<country>` first (so an IT profile gets IT
+ * post imagery); falls back to the unfiltered pool when the country filter
+ * returns nothing. Filters to posts that actually have images.
+ *
+ * @param {string} country
+ * @returns {Promise<{ imageUrls: string[], post: Object } | null>} null when the
+ *   pool is empty / unreachable.
+ */
+async function fetchRandomPostImages(country = '') {
+  if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
+  const imgBase = process.env.IMAGE_SERVER_BASE_URL || '';
+
+  const resolveUrl = (img) => {
+    if (!img) return '';
+    if (typeof img === 'string') return /^https?:\/\//i.test(img) ? img : `${imgBase}${img}`;
+    const file = img.filename || img.imageId?.filename || img.fileName || img.url || '';
+    if (!file) return '';
+    return /^https?:\/\//i.test(file) ? file : `${imgBase}${file}`;
+  };
+
+  async function query(c) {
+    const params = new URLSearchParams({ limit: '300' });
+    if (c) params.set('country', c);
+    const { data } = await axios.get(`${BASE_URL}/api/posts?${params.toString()}`, {
+      timeout: 15000,
+    });
+    const list = Array.isArray(data) ? data : data.posts || data.data || data.items || [];
+    return list.filter((p) => p && Array.isArray(p.images) && p.images.length > 0);
+  }
+
+  try {
+    let posts = await query(country);
+    if (!posts.length && country) posts = await query('');
+    if (!posts.length) {
+      console.warn('  [posts] fetchRandomPostImages: pool returned no posts with images');
+      return null;
+    }
+    const post = posts[Math.floor(Math.random() * posts.length)];
+    const imageUrls = post.images.map(resolveUrl).filter(Boolean);
+    if (!imageUrls.length) return null;
+    return { imageUrls, post };
+  } catch (err) {
+    console.warn(
+      `  [posts] fetchRandomPostImages failed: ${err.response?.status || ''} ${err.message}`
+    );
+    return null;
+  }
+}
+
 module.exports = {
   fetchUser,
   autoAssignPage,
   autoAssignPostToProfile,
+  fetchRandomPostImages,
   fetchPageSetStats,
   fetchActiveProfiles,
   fetchProfilesByStatus,

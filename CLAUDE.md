@@ -30,11 +30,11 @@ runs in background). `GET /status/:taskId` to check progress.
 │   ├── homepage_interaction.js  visit_profile.js  search.js
 │   ├── open_search_result.js    create_page.js    scroll.js
 │   ├── like_posts.js            share_posts.js    share_post.js
-│   ├── publish_post.js          add_friend.js     follow.js
-│   ├── connect.js               connect_loop.js   accept_loop.js
+│   ├── publish_post.js          publish_text_post.js  add_friend.js  follow.js
+│   ├── join_group.js            connect.js        connect_loop.js   accept_loop.js
 │   ├── setup_about.js           setup_avatar.js   setup_cover.js
-│   ├── setup_privacy.js         schedule_posts.js switch_profile.js
-│   ├── marketplace_location.js  wait.js
+│   ├── setup_highlight.js       setup_privacy.js  schedule_posts.js
+│   ├── switch_profile.js        marketplace_location.js  wait.js
 │   ├── facebook_signup.js       facebook_login.js ensure_login.js
 │   ├── outlook_login.js
 │   └── check_ip.js
@@ -44,14 +44,18 @@ runs in background). `GET /status/:taskId` to check progress.
 │   ├── userApi.js               # 3rd-party user fetch
 │   ├── humanBehavior.js         # human-like interaction
 │   ├── generateMessage.js       # Gemini — share/comment messages
-│   ├── generatePostCaption.js   # Gemini — original post captions (publish_post)
+│   ├── generatePostCaption.js   # Gemini — post captions (publish_post) + generateTopicPost (publish_text_post)
+│   ├── postTopics.js            # 50 random topic seeds (5×10) for publish_text_post
 │   ├── pageSetupHelpers.js      # shared helpers for page setup
+│   ├── profileOwner.js          # owner-only "Add Friend" resolver (connect/connect_loop)
+│   ├── highlightTitle.js        # country-aware random highlight-title pool (setup_highlight)
 │   ├── pageAddressData.js       # city/state parsing + ZIP seeds
 │   ├── randomCount.js           # {count} | {min,max} resolver for feed actions
 │   ├── runLogDir.js             # per-run scoped log directory (logs/{taskId}-{ts}/)
 │   └── sessionLog.js            # per-profile session.log inside the run dir + vault tee
 ├── system_prompt.txt            # generateMessage system instruction (shares/comments)
 ├── system_prompt_post.txt       # generatePostCaption system instruction (publish_post)
+├── prompts/random_topic_post.txt # generateTopicPost system instruction (publish_text_post)
 ├── vault-log.js                 # POSTs to Profile Vault Logs dashboard (gated by VAULT_ENABLED)
 ├── log.md                       # Vault Logs HTTP contract spec
 └── chat/nlToJson.js             # NL → task JSON
@@ -432,6 +436,7 @@ via `resolveSetupPageImages()` (`linkedPage.assets[0]` → profile, `[1]` → co
 | `images[0]` (face annotation) | `setup_avatar` |
 | `images[1]` | `setup_cover` |
 | `posts[].{_id,images[],context,caption?}` | `publish_post` (random pick; `images[].filename` resolved via `buildImageUrl`; `context` seeds `postContext`; `caption` seeds `postCaption` for `captionSource: "post"`) |
+| pool posts (`GET /api/posts?country=`) | `setup_highlight` via `fetchRandomPostImages(country)` — read-only random pool post (NOT assigned); its images seed the highlight. Distinct from `autoAssignPostToProfile` (which links a post). |
 | `linkedPage.{pageName,bio,assets[0..1],posts}` | `create_page`, `schedule_posts` |
 | `browsers[]` | `browserManager` (matched by `provider`) |
 | `pageUrl` | PATCHed back after `create_page` |
@@ -465,15 +470,19 @@ Each setup-style action stamps a completion timestamp on the profile's
 | `setup_privacy` | `privacyPublicAt` | After Confirm on /settings/bundled |
 | `setup_avatar` | `profileImageSetAt` | After Save closes the avatar modal |
 | `setup_cover` | `coverImageSetAt` | After Save changes wins |
-| `setup_about` | `aboutSetAt` | After every section completes + markProfileSetup PATCH |
+| `setup_about` | `aboutSetAt` | After every section completes + markProfileSetup PATCH. **Status preserve:** `markProfileSetup` keeps the profile status when it's already `Ready`/`Available`/`Delivered` (only stamps `profileSetup`); otherwise promotes to `Active`. |
+| `join_group` | `groupJoinedAt` | Only when the "Groups you've joined" list shows **> 0** groups (a button-state-change alone isn't enough — private groups stay pending). |
 | `marketplace_location` | `marketplaceSetAt` | After Apply + verification succeeds |
 | `create_page` | `pageSetAt` | Right after the "Create Page" commit click succeeds (a Page now exists FB-side). Covers the canary early-return + full-completion paths. Pre-commit failures are NOT stamped (nothing was created → stay retriable). Feeds the page-setup cooldown gate so a committed-but-incomplete Page isn't re-attempted daily. **Server key is `pageSetAt`, not `pageSetupAt`.** |
-| `publish_post` | `publishPostAt` | After the Create-post dialog detaches |
-| `share_post` | `lastSharedAt` | After "Share now" click |
-| `share_posts` | `lastSharedAt` | After loop completes with at least 1 share |
+| `publish_post` | `publishPostAt` | After the Create-post dialog detaches. ALSO PATCHes `hasGoodImages: true` (best-effort) — a successful image post means the profile has usable images. |
+| `setup_highlight` | `highlightsSetAt` | After the create dialog closes (highlight finalized — confirmed, not assumed) |
+| `share_post` | `lastSharedAt` | Only after the share modal **confirms closed** (not on click) — see [Share restriction](#share-restriction--temporarily-restricted-from-resharing) |
+| `share_posts` | `lastSharedAt` | After loop completes with at least 1 **confirmed** share |
 
-Other supported keys not currently stamped (future work):
-`groupJoinedAt`, `highlightsSetAt`, `recoveryEmailSetAt`.
+`publish_text_post` (text-only post) deliberately stamps **nothing** — it's
+chance-gated and repeatable.
+
+Other supported keys not currently stamped (future work): `recoveryEmailSetAt`.
 
 **Best-effort, non-throwing.** `setOnboarding` swallows axios errors and warns —
 a transient PATCH hiccup never fails the action that just succeeded. `userId` is
@@ -813,6 +822,73 @@ Self-navigates to `/me`. Flow:
 - "Save changes" starts `aria-disabled="true"` while image processes.
 - **FB renders 2 elements matching `[aria-label="Save changes"]`** — one hidden, one visible. Playwright's `waitForSelector` picks the first match (often hidden) and the visibility gate times out. Fix: `page.locator('[aria-label="Save changes"]').count()`, iterate **last to first** until one is `isVisible() && isEnabled()`, then click that.
 
+## `setup_highlight`
+
+Leaf action. Creates a new profile **Highlights** (featured collection) from a
+pool post's images. Self-navigates to `/me`. Stamps `highlightsSetAt` on success.
+
+### Flow (6 steps, selectors from `fix/highlight/` DOM dumps)
+
+```
+/me → click highlights entry → "Add new" → "Upload photos" (file chooser)
+    → setFiles → "Next" → set title → "Save" → dialog closes (= finalized)
+```
+
+| Step | Selector / note |
+|------|-----------------|
+| entry | `[aria-label="Add highlights"]` (profile has NONE) **OR** `[aria-label="Edit highlights"]` (already has some) — `scrollToFind` accepts both; it's **below the fold + lazy-rendered**, so mouse-wheel down until it mounts (a plain `waitForSelector` at the top of `/me` times out). |
+| add | `[aria-label="Add new"]` |
+| upload | `[aria-label="Upload photos"]` → `filechooser` → `setFiles(tmpPaths)` |
+| next | `[aria-label="Next"]` — **`aria-disabled` enable-gate + double-render** (hidden decoy + real); `clickWhenEnabled` picks the visible, non-disabled one (same as `setup_cover`'s Save changes). |
+| title | `input[aria-label="Edit the current title of the featured collection."]` (real `<input maxlength="18">`, prefilled "Collection"). Focus via **`click({ clickCount: 3 })`** (a bbox humanClick missed focus → the default "Collection" got saved), clear, `pressSequentially` (emoji-safe), then **read back `inputValue()`** to confirm it stuck (fall back to `fill()`). |
+| save | `[aria-label="Save"]` — same enable-gate as Next. |
+
+### Images — random pool post, SHUFFLED, capped
+
+Images come from a **random post in the shared pool** via
+`fetchRandomPostImages(country)` (`utils/userApi.js`): `GET /api/posts?country=<c>`,
+filter to posts with images, pick one at random, return resolved URLs.
+**Read-only — the post is NOT assigned/linked** to the profile (unlike
+`autoAssignPostToProfile`). Falls back to the unfiltered pool when the country
+has no posts. An explicit `imageUrls` param overrides.
+
+- The pool images are **shuffled** (Fisher-Yates) before the cap, so the
+  highlight cover/preview (FB uses the first uploaded image) **varies across
+  profiles that drew the same pool post**. Explicit `imageUrls` keep their order.
+- **Capped to `count` (default 5).** Large sets (e.g. a 10-image post) take too
+  long to upload and the highlight **fails to finalize** — 5 uploads reliably.
+
+### Title — country-aware random pool (`utils/highlightTitle.js`)
+
+`pickHighlightTitle(country)`. Distribution: **20% emoji-only** (two distinct
+emojis, e.g. `✨🎉`), **80% text** with a ~50% chance of a single trailing emoji
+(`Memories ✨`). EN + IT pools (40 each), emoji pool of 10. Always ≤18 UTF-16
+code units (the trailing emoji is dropped if it wouldn't fit; `clampTitle` trims
+surrogate-safe). An explicit `title` param overrides.
+
+### Upload timing + authoritative finalization
+
+- **Upload wait is scaled to the image count** (`3.5s + 1.8s/image`, cap 35s). A
+  fixed short wait let "Next" be clicked while a large batch was still uploading,
+  so the highlight never finalized.
+- **Success is confirmed, not assumed.** `waitDialogClosed` requires the create
+  dialog (title input + "Upload photos") to actually disappear before stamping
+  `highlightsSetAt`; if it doesn't, the action throws (→ runner dump + retry)
+  instead of logging a false success. (The old swallowed detach wait logged
+  "created" even when nothing was created.)
+
+### Auto-injected params
+
+| Param | Source |
+|-------|--------|
+| `country` | `user.country` (post-pool + title-pool selection) |
+| `userId` | `user._id` (onboarding stamp) |
+
+`imageUrls` / `title` / `count` are optional overrides. Typical task usage:
+`{ "type": "setup_highlight", "guard": { "ifOnboardingMissing": "highlightsSetAt" } }`
+(idempotent — a missing guard creates a NEW highlight every run, since the action
+does not self-skip on the stamp).
+
 ## `setup_privacy`
 
 Leaf action. Walks the `/settings/bundled` privacy acknowledgment page
@@ -893,20 +969,34 @@ before re-throwing.
 |--------|------|-----|
 | `create_page` | Navigator | Menu → Pages → Create, fill all fields, upload profile/cover, advance Steps 2-5. Ends on `/profile.php?id=*`. |
 | `schedule_posts` | Leaf | Schedule `params.posts[]` on loaded Page, one per day starting tomorrow. Per-post failures logged, not thrown. |
-| `switch_profile` | Leaf | Your profile → Switch to [userName] → 50s cooldown. Falls back to "Quick switch profiles". |
+| `switch_profile` | Leaf | Open "Your profile" menu → switch to the user OR the Page (by `target`) → validate → 50s cooldown. |
 
-> **⚠️ KNOWN BREAKAGE (2026-06, NOT yet fixed) — `switch_profile` selectors are stale.**
-> FB redesigned the "Your profile" menu: the inline **`[aria-label="Switch to <name>"]`**
-> and **`[aria-label="Quick switch profiles"]`** entries the action waits for **no longer
-> exist** — they were replaced by a single **`[aria-label="See all profiles"]`** button that
-> opens a profile picker. The action opens the menu fine, then both `waitFor`s time out at
-> 15s (×3 retries). Confirmed fleet-wide across every recent run (warmup + engage, 06-03/04);
-> dumps in `logs/.../fail-switch_profile-*.{html,png}` (the PNG shows the new menu clearly).
-> **Impact is non-fatal** — it's the last step (switch back to the personal profile), so the
-> Page still gets created; the session just ends on the Page profile. **Fix (TODO):** click
-> `[aria-label="See all profiles"]`, then select the target profile by `userName` in the
-> picker that opens (its DOM isn't dumped yet — the action times out before clicking it, so
-> it needs a live run to capture the picker's selectors).
+### `switch_profile` — target + validation (rewritten 2026-06)
+
+Switches to either the personal user OR the linked Page, picked by `params.target`:
+`"user"` (default) or `"page"`. **Anchored ONLY on the user's real name**
+(`firstName lastName`) — the Page is identified as "the profile that is NOT the
+user", so no page name is needed (`linkedPage.pageName` drifts and isn't used).
+
+**How it reads/validates** (from `fix/Quick Profile/*.mhtml`):
+- The "Your profile" dropdown (`div[role="dialog"][aria-label="Your profile"]`)
+  is a **global top-bar menu** available on any FB page.
+- Its **first row is the CURRENTLY-ACTIVE profile** — an `<a href=".../me/">`
+  wrapping the active profile's name (true whether on the user OR the page).
+  `openMenuAndRead()` reads that anchor as "who am I now".
+- Every OTHER profile renders a `div[aria-label="Switch to <Name>"]` button.
+
+Flow: `goto facebook.com` (clean base — the menu is global, but a prior step may
+have left the session on `/reel/` etc.) → open menu → read the active profile →
+if already the target, no-op → else click the other profile's "Switch to" button
+→ **re-open the menu and re-read the active profile to confirm the switch landed**
+→ retry the click once if not → 45-55s cooldown. An unconfirmed switch after 2
+attempts is a **non-fatal warning** (proceeds to the next step).
+
+`target="user"` validated when the active name matches the user; `target="page"`
+validated when it does NOT (it's the Page). Auto-injected param: `userName`
+(`firstName + lastName`). Old behavior (no `target`, no validation, "Quick switch
+profiles" fallback) is gone.
 
 Composed via the `setup_page_full` preset, or nested:
 ```json
@@ -1266,11 +1356,25 @@ by `injectUserParams`.
 
 ### `connect` details
 
-Targets via has-text XPath on exact inner `<span>` text (`"Add friend"`, `"Follow"`, `"Like"`)
-— stable across FB's aria-label variants. Already-followed/liked become `"Following"`/`"Liked"`,
-so exact match naturally skips re-clicks. Uses `scrollIntoViewIfNeeded` (header is static
-container, deterministic). Per target: presence → visibility → scroll → bbox → `humanClick`
-→ verify gone. Only logs `Clicked "X"` after post-click verification. Never throws.
+Follow / Like / Confirm-request target via has-text XPath on exact inner `<span>` text
+(`"Follow"`, `"Like"`, `"Confirm request"`) — stable across FB's aria-label variants.
+Already-followed/liked become `"Following"`/`"Liked"`, so exact match naturally skips
+re-clicks. Uses `scrollIntoViewIfNeeded` (header is static container, deterministic). Per
+target: presence → visibility → scroll → bbox → `humanClick` → verify gone. Only logs
+`Clicked "X"` after post-click verification. Never throws.
+
+**Add Friend is owner-only (`utils/profileOwner.js`).** A profile page renders a
+"People you may know" carousel whose suggestion cards carry the **identical**
+`aria-label="Add Friend <Name>"` (capital F + name) as the profile owner's own header
+button — neither aria-label case NOR DOM order distinguishes them (confirmed via real DOM
+dumps: on Alfonso Vitale's profile the only Add Friend button present was "Add Friend
+Amedeo Sanna", a PYMK suggestion). So the **only** reliable discriminator is the name:
+`resolveOwnerAddFriend(page)` reads the profile owner's name from the page `<h1>` and clicks
+ONLY the `Add Friend <Name>` button whose name suffix matches it. No owner match (owner
+already friended, name unreadable, or only suggestions present) → clicks nothing — never
+befriends a stranger. **`connect` AND `connect_loop` both use this shared resolver** (the
+old span-text `"Add friend"` match caught PYMK cards too). The runner's `connect_loop`
+"Add friend" probe was likewise replaced with `resolveOwnerAddFriend`.
 
 ### `search` modes
 
@@ -1560,6 +1664,24 @@ the native-chooser auto-cancel trap.
 The CLAUDE.md `setup_avatar` warning ("Do NOT use `setInputFiles` on the
 hidden input") is about a different React state path — it does not apply to
 the composer's flow.
+
+**Hydration gate (root-cause fix for "composer dialog didn't appear").** The
+hidden input can be `attached` in the DOM *before* FB wires its React
+`onChange` handler. `setInputFiles` fired in that window drops the change event
+and the modal never opens — this was a long-standing flaky failure (many
+historical `publish_post-error-*.html` dumps). Fix: **wait for the composer to
+hydrate** (`[aria-label="Photo/video"]` visible) before setting files, then
+**retry the `setInputFiles` once** if the dialog doesn't appear (re-querying the
+input each attempt). If the dialog still doesn't open after both, throw (→
+runner dump + retry) rather than silently proceeding.
+
+**Retry-resilience on the `owns` path.** When `runWithRetry` retries
+`publish_post` after a first attempt that *assigned* the post but then failed
+(e.g. modal didn't open), the retry hits `autoAssignPostToProfile` → `owns`
+(409). That branch used to do nothing, so `resolvedImageUrls` stayed empty and
+the retry skipped with "no images" — the post was lost for that run. Now the
+`owns` branch **re-fetches the profile (`fetchUser`) and re-resolves the owned
+post's images/caption**, so a retry can actually publish.
 
 ### Other gotchas
 
@@ -2265,13 +2387,16 @@ Walks step tree before execution, fills missing params from user record.
 
 | Step | Injected |
 |------|----------|
-| `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `interests`, `travel`, `userId`, `profileUrl` (current value — empty triggers capture+PATCH) |
+| `setup_about` | `bio`, `city`, `hometown`, `personal`, `work`, `education`, `hobbies`, `interests`, `travel`, `firstName`, `lastName` (Other names), `gender` (interests gender-weighting), `userId`, `profileUrl` (current value — empty triggers capture+PATCH), `status` (status-preserve in markProfileSetup) |
 | `setup_avatar` | `photoUrl`, `userIdentity`, `userId` |
 | `setup_cover` | `photoUrl`, `userId` |
+| `setup_highlight` | `country` (drives post-pool + title-pool selection), `userId`. Images + title resolved INSIDE the action (random pool post + random title), not injected. |
 | `setup_privacy` | `userId` |
 | `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId`, `pageUrl`, `pageSetAt`, `pageCountryMode` |
 | `schedule_posts` | `posts` from `linkedPage.posts` |
-| `switch_profile` | `userName` from `firstName + lastName` |
+| `switch_profile` | `userName` from `firstName + lastName` (+ `target` step param: "user"/"page") |
+| `join_group` | `userId` |
+| `publish_text_post` | `userIdentity`, `city`, `work`, `userId` |
 | `search` | `city` from `user.city` (page/general modes), `country` from `user.country` (all modes — IT vs US pool selection) |
 | `marketplace_location` | `city` from `user.city`, `country` from `user.country`, `userId` |
 | `check_ip` | `userId` |
@@ -2725,11 +2850,90 @@ detection with HTML/PNG forensic dumps + generic step-failure dump safety net,
 per-run `summary.md` + per-run scoped log dirs (`logs/{taskId}-{ts}/profiles/{name}-{shortId}/`),
 `setup_privacy` (extracted from `facebook_signup`), EU cookie consent auto-dismiss,
 `facebook_signup` failure dumps, `setup_about` URL-based subsection fallback for fresh
-accounts, `update-post-captions.js` batch caption regen (PATCHes `/api/posts/:postId`).
+accounts, `update-post-captions.js` batch caption regen (PATCHes `/api/posts/:postId`),
+`setup_highlight` (random pool-post images, shuffled + capped, country-aware random title
+pool with 20%-emoji-only / 80%-text, "Add highlights"/"Edit highlights" entry, confirmed
+finalization), owner-only Add Friend in `connect`/`connect_loop` (`utils/profileOwner.js` —
+never befriends a "People you may know" suggestion), `publish_post` composer-hydration gate +
+`owns`-path retry re-resolve (fixes the flaky "composer dialog didn't appear").
 
-**TODO:** `comment_post`, `join_group`, `send_message`; comment generation; SQLite task state;
+**TODO:** `comment_post`, `send_message`; comment generation; SQLite task state;
 Web UI for chat; schema validation on generated JSON; Multilogin profile creation in
-`create-profile.js`.
+`create-profile.js`. **ensure_login re-auth gaps (from daily-engage forensics):**
+(1) detect the `/auth_platform/challengepicker/` identity-challenge URL → flag
+Need Checking (fail fast instead of the 5-min timeout); (2) when re-auth lands on
+the "Log into Facebook" email/password form (FB redirected `/reg/` → login for an
+existing account), use the `facebook_login` password path instead of the
+signup-as-login flow (which fills nothing and times out).
+
+## Resilience + actions updates (2026-06, batch 3)
+
+**New actions**
+- **`join_group`** — Leaf. Facebook menu → Groups (NOT the Create section) →
+  Discover → press **exactly ONE** `div[aria-label="Join group, <Name>"]` card.
+  Then: (a) if the **"Certain actions have been restricted due to unusual activity"
+  / "Open Facebook on your mobile device to confirm your identity"** modal appears
+  (`UNUSUAL_ACTIVITY_RE`), throw `err.needChecking` (runner PATCHes Need Checking +
+  aborts); (b) verify via the "Groups you've joined" list (`/groups/joins/`) — stamp
+  `groupJoinedAt` ONLY when count **> 0**, else skip to next action (no stamp).
+  Selectors learned from `fix/group/*.mhtml`. Auto-injected: `userId`. No `count`
+  param. Typical task: `guard {ifOnboardingMissing:"groupJoinedAt", minAccountAgeDays:7}`,
+  no `chance`.
+- **`publish_text_post`** — Leaf. TEXT-ONLY status (no image). Opens the composer
+  via "What's on your mind?" (it can be the inline composer OR a modal — targets the
+  active `div[role="textbox"][contenteditable][aria-placeholder*="mind"]` directly,
+  not a dialog). Caption from a **random topic** (`utils/postTopics.pickPostTopic` —
+  50 seeds in 5 categories, with `{city}`/`{work}` grounding) + the user identity via
+  `generateTopicPost` (Gemini, system prompt `prompts/random_topic_post.txt`). Explicit
+  `caption` wins. **No onboarding stamp** — chance-gated + repeatable. Auto-injected:
+  `userIdentity`, `city`, `work`, `userId` (dump label only). Distinct action from
+  `publish_post` (which is image-driven via the hidden file input).
+
+**`setup_about` hardening**
+- **Other names** (`setOtherName`) — adds an "Other names" nickname under the Names
+  tab. Nickname = `shortName(firstName|lastName)` (random pick): the name up to and
+  INCLUDING the first consonant AFTER the first vowel (Brendan→Bren, Dave→Dav). Leaves
+  Name Type at its default "Nickname", types into the input after the Name Type
+  combobox (`(//label[@role="combobox"][.//span[text()="Name Type"]])[last()]/following::input[@type="text"][1]`),
+  ticks **"Show at top of profile"** (`input[type="checkbox"][name="is_current"]`),
+  then saves. Idempotent: skips if the nickname already shows. Needs `firstName`/`lastName`
+  (now injected).
+- **Per-section retry** — each `setup_about` section now retries **3× with ~30s** between
+  attempts (re-navigates the subsection — FB panels render slowly after nav). A
+  chance-skipped/empty section is NOT a failure.
+- **Interests = 5 forms, gender-weighted** — Music/TV shows/Movies (50% each, both
+  genders), **Games (80% male / 20% female)**, Sports teams (80% both). Per-category
+  `Math.random()` roll, hardcoded (not a param); `gender` injected from `user.gender`.
+- **Location false-success fix** — when the Current city / Hometown panel button isn't
+  found, it now checks if the value is **already shown** (`valueAlreadyShown`); if not,
+  it FAILS (→ retry) instead of silently reporting saved.
+- **Selector-wait timeouts raised** — `clickPanelButton` 6s→**15s**, `typeAndSelect`
+  5s→**10s** (panels mount slowly after a subsection nav).
+- **"Always goes to reels" cascade fixed** — a stray bbox click could drift the page
+  onto a `/reel/`, and `clickSubsection`'s URL-fallback then built `?sk=directory_x`
+  on that reel base, failing EVERY section. Now `isProfileUrl()` gates it:
+  `clickSubsection` re-anchors to `/me` when off-profile, and `clickAboutTab`
+  re-anchors after its click if it drifted.
+- **Status preserve** — `markProfileSetup` won't downgrade `Ready`/`Available`/`Delivered`
+  to `Active` (only stamps `profileSetup`).
+
+### Share restriction — "temporarily restricted from resharing"
+
+`share_posts` + `share_post`: after clicking the commit button, **validate the
+outcome** (poll up to 30s) instead of assuming success:
+- **restricted** — the `temporarily restricted from resharing` text appears (date is
+  dynamic, so match only that phrase; from `fix/Facebook_restrict_to_Share.mhtml`).
+  Logged; `share_posts` stops the loop, `share_post` returns. **No `lastSharedAt` stamp.**
+- **shared** — the commit button disappears (modal closed) → counted + stamped.
+- **stuck** — neither within 30s → dismiss (Escape) + move on (no hang, no stamp).
+
+Key fix: `lastSharedAt` is now stamped only on a **confirmed** share (modal actually
+closed), not the instant the button was clicked.
+
+**`connect_loop` users pool = Active only** — `fetchActiveProfiles` gained an optional
+`statuses` arg (default unchanged `['Active','Need Setup']`); `connect_loop` passes
+`['Active']` so friend requests only go to fully set-up profiles. `visit_profile` and
+`ensure_login`'s probe are unchanged.
 
 ## Notes
 

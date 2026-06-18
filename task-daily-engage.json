@@ -3,7 +3,7 @@
   "profilesFromStatus": "Active",
   "profiles": [],
   "cooldown": { "shareHours": 24 },
-  "concurrency": 5,
+  "concurrency": 6,
   "openStaggerSeconds": 60,
   "blockMedia": true,
   "steps": [
@@ -43,6 +43,17 @@
       "guard": { "ifOnboardingMissing": "publishPostAt", "minAccountAgeDays": 4 },
       "chance": 0.3,
       "params": { "captionSource": "paraphrase" }
+    },
+
+    {
+      "type": "publish_text_post",
+      "guard": { "minAccountAgeDays": 4 },
+      "chance": 0.1
+    },
+
+    {
+      "type": "join_group",
+      "guard": { "ifOnboardingMissing": "groupJoinedAt", "minAccountAgeDays": 7 }
     },
 
     { "type": "wait", "params": { "min": 20, "max": 40 } },
@@ -105,16 +116,6 @@
 
     { "type": "connect_loop", "params": { "count": 7, "skipIfFriendsAbove": 30 } },
 
-    { "type": "wait", "params": { "min": 30, "max": 60 } },
-
-    { "type": "check_existing_page" },
-
-    {
-      "type": "create_page",
-      "guard": { "ifFieldEmpty": "pageUrl" },
-      "chance": 0.9,
-      "params": { "allowedFailures": 0 },
-      "steps": [{ "type": "switch_profile" }]
-    }
+    { "type": "wait", "params": { "min": 30, "max": 60 } }
   ]
 }
