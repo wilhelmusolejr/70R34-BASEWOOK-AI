@@ -2392,7 +2392,7 @@ Walks step tree before execution, fills missing params from user record.
 | `setup_cover` | `photoUrl`, `userId` |
 | `setup_highlight` | `country` (drives post-pool + title-pool selection), `userId`. Images + title resolved INSIDE the action (random pool post + random title), not injected. |
 | `setup_privacy` | `userId` |
-| `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId`, `pageUrl`, `pageSetAt`, `pageCountryMode` |
+| `create_page` | `pageName`, `bio`, `email`, `city`, `state`, `zipCode`, `streetAddress`, `profilePhotoUrl`, `coverPhotoUrl`, `userId`, `pageUrl`, `pageSetAt`, `pageCountryMode`, `country` (from `user.country` — shared-pool fallback `fetchRandomPage`) |
 | `schedule_posts` | `posts` from `linkedPage.posts` |
 | `switch_profile` | `userName` from `firstName + lastName` (+ `target` step param: "user"/"page") |
 | `join_group` | `userId` |
@@ -2401,7 +2401,7 @@ Walks step tree before execution, fills missing params from user record.
 | `marketplace_location` | `city` from `user.city`, `country` from `user.country`, `userId` |
 | `check_ip` | `userId` |
 | `share_posts` / `share_post` | `userIdentity`, `userId` |
-| `publish_post` | `imageUrls` (random pick from `user.posts[].images`, resolved via `buildImageUrl`), `postContext` (picked entry's `context`), `postCaption` (picked entry's `caption` — used when `captionSource: "post"`), `userIdentity`, `userId` |
+| `publish_post` | `imageUrls` (random pick from `user.posts[].images`, resolved via `buildImageUrl`), `postContext` (picked entry's `context`), `postCaption` (picked entry's `caption` — used when `captionSource: "post"`), `userIdentity`, `userId`, `country` (from `user.country` — shared-pool fallback `fetchRandomPostImages`) |
 | `facebook_signup` / `ensure_login` | `firstName`, `lastName`, `birthdayDate` (or `dob`), `gender`, `email` (selected or `[0]`), `password` from `user.facebookPassword` |
 | `facebook_login` | `email` (selected or `[0]`), `password` from `user.facebookPassword` |
 | `outlook_login` | `email` (selected or `[0]`), `password` from `user.emailPassword` |
@@ -2934,6 +2934,66 @@ closed), not the instant the button was clicked.
 `statuses` arg (default unchanged `['Active','Need Setup']`); `connect_loop` passes
 `['Active']` so friend requests only go to fully set-up profiles. `visit_profile` and
 `ensure_login`'s probe are unchanged.
+
+## Resilience + actions updates (2026-06, batch 4)
+
+**Country-matched shared-pool fallbacks for `publish_post` AND `create_page`.**
+Both actions could previously skip with "nothing available" when the pool had no
+**unclaimed** item left, even though the pool still held plenty of (already-owned)
+items. Each now has a READ-ONLY fallback that grabs ANY item for the profile's
+country — owned or not — mirroring how `setup_highlight` sources images.
+
+- **`publish_post`** — new param `allowSharedPool` (**default `true`**). Priority:
+  (1) claim an UNASSIGNED post via `autoAssignPostToProfile`; (2) on `none`, if
+  `allowSharedPool`, fall back to `fetchRandomPostImages(country, { strictCountry: true })`
+  — a random country-matched pool post (read-only, NOT linked); (3) skip only if the
+  country has zero posts. `country` is now injected from `user.country`.
+- **`create_page`** — new param `allowSharedPagePool` (**default `true`**). Priority:
+  (1) the profile's own `linkedPage` blueprint (injected as `pageName`); (2) claim an
+  UNOWNED page via `autoAssignPage`; (3) on none, if `allowSharedPagePool`, fall back
+  to `fetchRandomPage(country, { strictCountry: true })` — a random country-matched
+  page blueprint (read-only, owned-or-not); (4) skip only if the country has zero
+  pages. `country` is now injected from `user.country`.
+- **`utils/userApi.js`**: `fetchRandomPostImages(country, { strictCountry })` gained
+  the `strictCountry` flag (when set, never widens to the any-country pool — an IT
+  profile only ever uses IT media). New **`fetchRandomPage(country, { strictCountry })`**
+  — read-only random page by country, returns the `formatPage` shape `autoAssignPage`
+  returns so `create_page` maps it unchanged. **NB:** `GET /api/pages` IGNORES the
+  `?country` query param (returns the whole pool), so the country filter is applied
+  **client-side** on each record's `country` field.
+- **Trade-off (anti-detection):** shared-pool items are NOT consumed/linked, so two
+  profiles can post the same image / create a Page from the same blueprint
+  (duplicate-media hash-detection risk). Acceptable at low volume; set
+  `allowSharedPool: false` / `allowSharedPagePool: false` on a step to keep it
+  claim-only (e.g. high-volume daily-engage).
+
+**`create_page` — "Create" modal selector fix.** `waitForCreateDialog` required the
+modal title "Create" to be an `<h2>`, but FB now renders it as a `<span>` — the wait
+timed out on a LIVE, fully-open modal (the only `role="dialog"` it could find was the
+hidden Messenger popup), so EVERY page creation failed all 3 pre-create attempts.
+Re-anchored on the **"Public Page" option text** inside the dialog (`xpath=//div[@role="dialog"][.//span[text()="Public Page"]]`),
+with the span-title "Create" as a fallback (`.or()`), 15s→20s. This was breaking
+create_page fleet-wide.
+
+**`create_page` — post-create canary 15s→30s + state capture.** The contact-form
+canary (`label:has-text("Email") input`) now waits **30s** (was 15s). On the
+early-return (FB's "no-contact-form" variant — Page committed but the contact form
+never renders), it calls `captureState(page, 'no-contact-form')` to write an
+HTML + full-page PNG (`create_page-no-contact-form-<ts>.{html,png}`) into the profile
+run-scoped folder. Needed because this path is a CLEAN return (not a throw), so the
+runner's generic failure dump never fired for it — there was no record of what FB
+actually rendered. `captureState` swallows its own errors.
+
+**`switch_profile` — 12-minute hang fix + configurable cooldown.** Root cause: in
+`openMenuAndRead`, the active-profile name was read with `innerText()` and
+`getAttribute()` WITHOUT an explicit timeout, so they inherited the page default
+(60s). Right after a switch the page is reloading and that element keeps detaching,
+so each call blocked the full 60s — ×12 in the poll loop ≈ **12 minutes** before the
+"NOT confirmed" warning. Fix: each read now passes `{ timeout: 1500 }`, bounding the
+loop to ~18s worst case. Also: the flat 45-55s end-cooldown is now configurable via
+the **`cooldownSeconds`** param and the default was trimmed to **15-25s** (the task
+already brackets the step with its own waits). No-op switches (already on target)
+were already fast and skip the cooldown.
 
 ## Notes
 

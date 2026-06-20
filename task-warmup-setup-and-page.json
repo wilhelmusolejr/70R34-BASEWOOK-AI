@@ -11,6 +11,7 @@
       "type": "create_page",
       "guard": { "ifFieldEmpty": "pageUrl", "minAccountAgeDays": 5 },
       "chance": 0.8,
+      "params": { "allowSharedPagePool": true },
       "steps": [
         { "type": "switch_profile" }
       ]

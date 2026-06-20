@@ -418,7 +418,8 @@ async function autoAssignPostToProfile(profileId) {
  * @returns {Promise<{ imageUrls: string[], post: Object } | null>} null when the
  *   pool is empty / unreachable.
  */
-async function fetchRandomPostImages(country = '') {
+async function fetchRandomPostImages(country = '', options = {}) {
+  const { strictCountry = false } = options;
   if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
   const imgBase = process.env.IMAGE_SERVER_BASE_URL || '';
 
@@ -442,9 +443,16 @@ async function fetchRandomPostImages(country = '') {
 
   try {
     let posts = await query(country);
-    if (!posts.length && country) posts = await query('');
+    // strictCountry: never widen to the any-country pool — an IT profile must
+    // only ever post IT imagery. Without it, an empty country result falls back
+    // to the unfiltered pool (used by setup_highlight, which tolerates reuse).
+    if (!posts.length && country && !strictCountry) posts = await query('');
     if (!posts.length) {
-      console.warn('  [posts] fetchRandomPostImages: pool returned no posts with images');
+      console.warn(
+        `  [posts] fetchRandomPostImages: pool returned no posts with images${
+          strictCountry && country ? ` for country="${country}"` : ''
+        }`
+      );
       return null;
     }
     const post = posts[Math.floor(Math.random() * posts.length)];
@@ -459,9 +467,63 @@ async function fetchRandomPostImages(country = '') {
   }
 }
 
+/**
+ * Fetch a RANDOM Page blueprint from the shared pool by country — READ-ONLY.
+ * Unlike autoAssignPage (POST /api/pages/auto-assign), this does NOT link the
+ * page to any profile and does NOT care whether the page is already owned by
+ * someone. It just reads the pool (GET /api/pages) and picks one at random
+ * whose `country` matches — used by create_page as a fallback when no UNOWNED
+ * page is left to claim. The returned object is the same formatPage shape
+ * autoAssignPage returns (pageName / bio / assets[]), so create_page maps it
+ * the same way.
+ *
+ * NOTE: GET /api/pages ignores the ?country query param (returns the whole
+ * pool), so the country filter is applied CLIENT-SIDE on each record's
+ * `country` field.
+ *
+ * @param {string} country
+ * @param {object} [options]
+ * @param {boolean} [options.strictCountry=false] — when true, never widen to
+ *   other countries; return null if the country has no pages.
+ * @returns {Promise<Object|null>} a page record, or null when none match / on error.
+ */
+async function fetchRandomPage(country = '', options = {}) {
+  const { strictCountry = false } = options;
+  if (!BASE_URL) throw new Error('USER_API_BASE_URL is not set in .env');
+
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  try {
+    const { data } = await axios.get(`${BASE_URL}/api/pages`, { timeout: 20000 });
+    const all = Array.isArray(data) ? data : data.pages || data.data || data.items || [];
+    const usable = all.filter((p) => p && p.pageName);
+    if (!usable.length) {
+      console.warn('  [pages] fetchRandomPage: pool returned no usable pages');
+      return null;
+    }
+
+    let pool = usable;
+    if (country) {
+      const matched = usable.filter((p) => norm(p.country) === norm(country));
+      if (matched.length) {
+        pool = matched;
+      } else if (strictCountry) {
+        console.warn(`  [pages] fetchRandomPage: no pages for country="${country}"`);
+        return null;
+      }
+      // non-strict + no country match → fall through to the full usable pool
+    }
+
+    return pool[Math.floor(Math.random() * pool.length)];
+  } catch (err) {
+    console.warn(`  [pages] fetchRandomPage failed: ${err.response?.status || ''} ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   fetchUser,
   autoAssignPage,
+  fetchRandomPage,
   autoAssignPostToProfile,
   fetchRandomPostImages,
   fetchPageSetStats,

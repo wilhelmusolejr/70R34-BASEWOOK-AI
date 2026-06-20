@@ -35,6 +35,7 @@ const { getProfileLogDir } = require('../utils/sessionLog');
 const {
   setOnboarding,
   autoAssignPostToProfile,
+  fetchRandomPostImages,
   fetchUser,
   updateProfile,
 } = require('../utils/userApi');
@@ -174,6 +175,8 @@ module.exports = async function publish_post(page, params) {
     userIdentity = '',
     audience = 'public',
     userId = '',
+    country = '',
+    allowSharedPool = true,
   } = params || {};
 
   // These three can be overridden by an auto-assigned post below.
@@ -230,9 +233,37 @@ module.exports = async function publish_post(page, params) {
         }
       }
     } else if (assign.status === 'none') {
-      // Server confirmed there's no post to assign for this profile/country.
-      console.log('  [publish_post] No post available to assign — skipping.');
-      return;
+      // Server confirmed there's no UNASSIGNED post to claim for this
+      // profile/country. With allowSharedPool, fall back to a READ-ONLY random
+      // pool post by country (same source setup_highlight uses via
+      // fetchRandomPostImages) — the post is NOT linked, so it can be reused
+      // across profiles. Opt-in because shared reuse means duplicate media
+      // across the fleet (hash-detection risk); off by default to preserve the
+      // claim-only behavior of daily-engage.
+      if (allowSharedPool) {
+        console.log(
+          `  [publish_post] No unassigned post — falling back to random shared pool post (country="${country}")...`
+        );
+        const picked = await fetchRandomPostImages(country, { strictCountry: true });
+        if (picked && Array.isArray(picked.imageUrls) && picked.imageUrls.length > 0) {
+          resolvedImageUrls = picked.imageUrls;
+          if (picked.post && typeof picked.post.context === 'string' && picked.post.context) {
+            postContext = picked.post.context;
+          }
+          if (picked.post && typeof picked.post.caption === 'string' && picked.post.caption) {
+            postCaption = picked.post.caption;
+          }
+          console.log(
+            `  [publish_post] Using shared pool post (images=${resolvedImageUrls.length}).`
+          );
+        } else {
+          console.log('  [publish_post] Shared pool returned nothing — skipping.');
+          return;
+        }
+      } else {
+        console.log('  [publish_post] No post available to assign — skipping.');
+        return;
+      }
     } else {
       // 'error' (endpoint down / 404 / network) — don't hard-skip: fall back to
       // whatever post was already injected. The empty-images check below skips

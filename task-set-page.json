@@ -1,0 +1,13 @@
+{
+  "taskId": "set-page",
+  "profiles": ["6a0d52c7673f917afcff8eac"],
+  "concurrency": 1,
+  "blockMedia": true,
+  "steps": [
+    { "type": "create_page", "chance": 1, "params": { "allowSharedPagePool": true } },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    { "type": "switch_profile", "chance": 1, "params": { "target": "user" } }
+  ]
+}

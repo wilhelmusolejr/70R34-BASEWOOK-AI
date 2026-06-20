@@ -1,0 +1,55 @@
+{
+  "taskId": "custom-sequence",
+  "profiles": [
+    "6a1e388c9d9f61f4e267b294",
+    "6a1ff6de58590bfaa861f37a",
+    "6a1ce6289d9f61f4e2675e7a",
+    "6a15225a9df399293ede62be",
+    "6a0965afc68f2c604ba663f1",
+    "69facd9ad7f59db2c21aeb8d",
+    "6a15225a9df399293ede62c1"
+  ],
+  "concurrency": 2,
+  "openStaggerSeconds": 60,
+  "blockMedia": true,
+  "steps": [
+    { "type": "switch_profile", "params": { "target": "user" } },
+
+    {
+      "type": "homepage_interaction",
+      "chance": 1,
+      "steps": [
+        { "type": "scroll", "params": { "duration": 60 } },
+        { "type": "like_posts", "params": { "count": 2 } }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    { "type": "join_group", "chance": 1 },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    { "type": "setup_about", "chance": 1 },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    { "type": "check_existing_page", "chance": 1 },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    { "type": "create_page", "chance": 1, "params": { "allowSharedPagePool": true } },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    { "type": "switch_profile", "chance": 1, "params": { "target": "user" } },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "publish_post",
+      "chance": 1,
+      "params": { "allowSharedPool": true, "captionSource": "paraphrase" }
+    }
+  ]
+}

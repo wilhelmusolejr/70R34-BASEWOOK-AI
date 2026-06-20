@@ -7,6 +7,7 @@
 
     {
       "type": "create_page",
+      "params": { "allowSharedPagePool": true },
       "steps": [
         { "type": "switch_profile" },
         { "type": "wait", "params": { "min": 60, "max": 120 } }

@@ -57,10 +57,15 @@ async function openMenuAndRead(page) {
   const scope = dialogVisible ? dialog : page;
 
   // Current/active profile = the first row, an anchor to /me/.
+  // NOTE: innerText()/getAttribute() inherit the page default timeout (60s).
+  // Right after a profile switch the page is reloading and this element keeps
+  // detaching, so an unbounded innerText() can block the full 60s PER iteration
+  // — ×12 that's ~12 minutes of hang (observed in the logs). Cap each read at
+  // 1.5s so the whole poll loop is bounded to ~18s worst case.
   const currentLoc = scope.locator('a[href$="/me/"]').first();
   let currentName = '';
   for (let i = 0; i < 12; i++) {
-    currentName = (await currentLoc.innerText().catch(() => ''))
+    currentName = (await currentLoc.innerText({ timeout: 1500 }).catch(() => ''))
       .replace(/\s+/g, ' ')
       .trim();
     if (currentName) break;
@@ -73,7 +78,7 @@ async function openMenuAndRead(page) {
   const options = [];
   for (let i = 0; i < count; i++) {
     const btn = switchBtns.nth(i);
-    const aria = (await btn.getAttribute('aria-label').catch(() => '')) || '';
+    const aria = (await btn.getAttribute('aria-label', { timeout: 1500 }).catch(() => '')) || '';
     const name = aria.replace(/^Switch to\s+/i, '').trim();
     if (name) options.push({ btn, name });
   }
@@ -81,7 +86,12 @@ async function openMenuAndRead(page) {
 }
 
 module.exports = async function switch_profile(page, params) {
-  const { target = 'user', userName = '' } = params;
+  const { target = 'user', userName = '', cooldownSeconds } = params;
+  // Anti-detection pacing after a real switch. Configurable via cooldownSeconds
+  // (the task already brackets this step with its own wait steps, so the old
+  // flat 45-55s was redundant overhead). Default trimmed to 15-25s.
+  const cooldownLo = Number.isFinite(cooldownSeconds) ? cooldownSeconds * 1000 : 15000;
+  const cooldownHi = Number.isFinite(cooldownSeconds) ? cooldownSeconds * 1000 : 25000;
 
   const wantPage = String(target).trim().toLowerCase() === 'page';
   const label = wantPage ? 'page' : 'user';
@@ -167,6 +177,7 @@ module.exports = async function switch_profile(page, params) {
     );
   }
 
-  console.log('  [switch_profile] Cooling down ~50s...');
-  await humanWait(page, 45000, 55000);
+  const cdLabel = Math.round(((cooldownLo + cooldownHi) / 2 / 1000) * 10) / 10;
+  console.log(`  [switch_profile] Cooling down ~${cdLabel}s...`);
+  await humanWait(page, cooldownLo, cooldownHi);
 };

@@ -733,6 +733,10 @@ function injectUserParams(steps, user) {
         // country, else any), "profile" (strict profile country), or "US"/"IT"
         // (force that country). Defaults to "random". Explicit step param wins.
         pageCountryMode: step.params?.pageCountryMode || 'random',
+        // Raw profile country — used by the shared-pool fallback (fetchRandomPage)
+        // when no UNOWNED pool page is left to claim, so the random page picked is
+        // country-matched to the profile.
+        country: step.params?.country || user.country || '',
         profilePhotoUrl: step.params?.profilePhotoUrl || pageImages.profilePhotoUrl,
         coverPhotoUrl: step.params?.coverPhotoUrl || pageImages.coverPhotoUrl,
         userId: step.params?.userId || user._id || user.id || '',
@@ -883,6 +887,7 @@ function injectUserParams(steps, user) {
 
       if (!next.userIdentity) next.userIdentity = user.identityPrompt || '';
       if (!next.userId) next.userId = user._id || user.id || '';
+      if (!next.country) next.country = user.country || '';
       s.params = next;
     }
 

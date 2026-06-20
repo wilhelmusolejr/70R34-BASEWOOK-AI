@@ -1,0 +1,116 @@
+{
+  "taskId": "engage-and-add",
+  "profilesFromStatus": "Active",
+  "profiles": ["6a19a0ac024059deb2249393","6a19a0ac024059deb2249394","6a1a6d48024059deb224c504", "6a1a5acd024059deb224c33a","6a1a5acd024059deb224c33b","6a1a5acd024059deb224c33c","6a1a5acd024059deb224c33e","6a1a6d48024059deb224c4fe","6a1a6d48024059deb224c4ff","6a1a6d48024059deb224c500","6a1a6d48024059deb224c501","6a1a6d48024059deb224c505","6a1a6d48024059deb224c506","6a1a6d48024059deb224c507","6a1a6d48024059deb224c508","6a1a6d48024059deb224c50b","6a1aeafcd41d49bf0141e17f","6a1b8f78d41d49bf01420bb7","6a1b8f78d41d49bf01420bb9","6a1b8f78d41d49bf01420bba"],
+  "cooldown": { "shareHours": 0 },
+  "concurrency": 3,
+  "openStaggerSeconds": 60,
+  "blockMedia": true,
+  "steps": [
+    {
+      "type": "homepage_interaction",
+      "steps": [
+        { "type": "scroll", "params": { "min": 20, "max": 40 } },
+        { "type": "like_posts", "params": { "min": 1, "max": 3 } }
+      ]
+    },
+
+    {
+      "type": "setup_privacy",
+      "guard": { "ifOnboardingMissing": "privacyPublicAt" }
+    },
+
+    {
+      "type": "setup_about",
+      "guard": { "ifOnboardingMissing": "aboutSetAt", "minAccountAgeDays": 2 },
+      "chance": 0.5
+    },
+
+    {
+      "type": "setup_avatar",
+      "guard": { "ifOnboardingMissing": "profileImageSetAt", "minAccountAgeDays": 3 },
+      "chance": 0.3
+    },
+
+    {
+      "type": "setup_cover",
+      "guard": { "ifOnboardingMissing": "coverImageSetAt", "minAccountAgeDays": 3 },
+      "chance": 0.3
+    },
+
+    {
+      "type": "publish_post",
+      "guard": { "ifOnboardingMissing": "publishPostAt", "minAccountAgeDays": 4 },
+      "chance": 1,
+      "params": { "captionSource": "paraphrase" }
+    },
+
+    { "type": "wait", "params": { "min": 20, "max": 40 } },
+
+    { "type": "accept_loop" },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "search",
+      "params": { "mode": "general" },
+      "steps": [
+        { "type": "scroll", "params": { "min": 40, "max": 70 } },
+        { "type": "like_posts", "params": { "min": 1, "max": 3 } }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "connect" },
+        { "type": "scroll", "params": { "min": 30, "max": 60 } },
+        { "type": "like_posts", "params": { "min": 1, "max": 4 } },
+        { "type": "share_posts", "params": { "count": 1 } }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "search",
+      "params": { "mode": "page", "filter": "Pages" },
+      "steps": [
+        { "type": "scroll", "params": { "min": 20, "max": 40 } },
+        { "type": "open_search_result" },
+        { "type": "scroll", "params": { "min": 20, "max": 40 } },
+        { "type": "connect" }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "visit_profile",
+      "params": { "pool": "sharers" },
+      "steps": [
+        { "type": "connect" },
+        { "type": "scroll", "params": { "min": 30, "max": 60 } },
+        { "type": "like_posts", "params": { "min": 1, "max": 4 } },
+        { "type": "share_posts", "params": { "count": 1 } }
+      ]
+    },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    { "type": "connect_loop", "params": { "count": 7, "skipIfFriendsAbove": 30 } },
+
+    { "type": "wait", "params": { "min": 30, "max": 60 } },
+
+    {
+      "type": "create_page",
+      "guard": { "ifFieldEmpty": "pageUrl" },
+      "chance": 0.7,
+      "params": { "allowedFailures": 0, "allowSharedPagePool": true },
+      "steps": [{ "type": "switch_profile" }]
+    }
+  ]
+}

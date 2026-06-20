@@ -20,7 +20,9 @@
  */
 
 const fs = require('fs');
+const path = require('path');
 const axios = require('axios');
+const { getProfileLogDir } = require('../utils/sessionLog');
 const { humanClick, humanWait } = require('../utils/humanBehavior');
 const { parseCityState, buildPageAddress } = require('../utils/pageAddressData');
 const {
@@ -31,7 +33,12 @@ const {
   clickLocator,
   uploadImageFromButton,
 } = require('../utils/pageSetupHelpers');
-const { setOnboarding, autoAssignPage, fetchPageSetStats } = require('../utils/userApi');
+const {
+  setOnboarding,
+  autoAssignPage,
+  fetchRandomPage,
+  fetchPageSetStats,
+} = require('../utils/userApi');
 
 const USER_API_BASE_URL = process.env.USER_API_BASE_URL || '';
 const IMAGE_SERVER_BASE_URL = process.env.IMAGE_SERVER_BASE_URL || '';
@@ -40,6 +47,46 @@ function buildImageUrl(filename) {
   if (!filename) return '';
   if (/^https?:\/\//i.test(filename)) return filename;
   return `${IMAGE_SERVER_BASE_URL}${filename}`;
+}
+
+/**
+ * Capture an HTML + full-page PNG snapshot of the current page into the
+ * profile's run-scoped log folder (falls back to flat logs/ outside a session).
+ * Used to record the FB page state when the post-create contact form doesn't
+ * render — so the "no-form variant" can be inspected after the fact. Swallows
+ * its own errors so a capture failure never disrupts the action.
+ */
+async function captureState(page, label) {
+  try {
+    if (!page) return;
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeLabel = String(label || 'state').replace(/[^a-z0-9_-]+/gi, '_');
+    const targetDir = getProfileLogDir() || path.join(process.cwd(), 'logs');
+    try {
+      if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+    } catch (_) {}
+
+    const base = `create_page-${safeLabel}-${ts}`;
+    let url = '(unknown)';
+    try {
+      url = page.url();
+    } catch (_) {}
+
+    try {
+      const html = await page.content();
+      fs.writeFileSync(path.join(targetDir, `${base}.html`), `<!-- url: ${url} -->\n${html}`, 'utf8');
+    } catch (err) {
+      console.warn(`  [create_page] HTML capture failed: ${err.message}`);
+    }
+    try {
+      await page.screenshot({ path: path.join(targetDir, `${base}.png`), fullPage: true });
+      console.warn(`  [create_page] captured page state → ${path.join(targetDir, `${base}.png`)}`);
+    } catch (err) {
+      console.warn(`  [create_page] screenshot failed: ${err.message}`);
+    }
+  } catch (err) {
+    console.warn(`  [create_page] captureState swallowed: ${err.message}`);
+  }
 }
 
 /**
@@ -190,8 +237,20 @@ function getCategoryKeyword(pageName, categoryKeyword) {
 }
 
 async function waitForCreateDialog(page) {
-  const dialog = page.locator('xpath=//div[@role="dialog"][.//h2[contains(., "Create")]]').first();
-  await dialog.waitFor({ state: 'visible', timeout: 15000 });
+  // FB's "Create" page-creation modal has role="dialog" but NO aria-label, and
+  // its title "Create" is rendered as a <span> (not an <h2> — the old selector
+  // required an <h2> and timed out on the live modal even though it was open;
+  // see logs/set-page-*/.../fail-create_page-*.png). Anchor on the "Public
+  // Page" option text inside the dialog — unique to this modal and the next
+  // thing we click — with the span-title "Create" as a fallback.
+  const byOption = page
+    .locator('xpath=//div[@role="dialog"][.//span[text()="Public Page"]]')
+    .first();
+  const byTitle = page
+    .locator('xpath=//div[@role="dialog"][.//span[normalize-space(.)="Create"]]')
+    .first();
+  const dialog = byOption.or(byTitle).first();
+  await dialog.waitFor({ state: 'visible', timeout: 20000 });
   await stepWait(page);
   return dialog;
 }
@@ -350,6 +409,8 @@ module.exports = async function create_page(page, params) {
     categoryKeyword = '',
     userId = '',
     pageCountryMode = 'random',
+    country = '',
+    allowSharedPagePool = true,
   } = params;
 
   // Page-derived fields. Mutable because when the profile has no linkedPage
@@ -394,7 +455,26 @@ module.exports = async function create_page(page, params) {
     console.log(
       `  [create_page] No linked Page blueprint — requesting one from the pool (mode=${pageCountryMode})...`
     );
-    const assigned = await autoAssignPage(userId, pageCountryMode);
+    let assigned = await autoAssignPage(userId, pageCountryMode);
+
+    // Fallback: no UNOWNED page left to claim → grab ANY random page from the
+    // pool for the profile's country (READ-ONLY, regardless of whether it's
+    // already owned/claimed by someone). Mirrors publish_post's shared-pool
+    // fallback. Opt-out via allowSharedPagePool:false. Strict-country so an IT
+    // profile only ever uses an IT page blueprint.
+    if ((!assigned || !assigned.pageName) && allowSharedPagePool) {
+      console.log(
+        `  [create_page] No unowned Page — falling back to random shared pool page (country="${country}")...`
+      );
+      const shared = await fetchRandomPage(country, { strictCountry: true });
+      if (shared && shared.pageName) {
+        assigned = shared;
+        console.log(
+          `  [create_page] Using shared pool Page "${shared.pageName}" (country="${shared.country || ''}").`
+        );
+      }
+    }
+
     if (!assigned || !assigned.pageName) {
       console.log('  [create_page] No Page available to assign — nothing to create, skipping.');
       return;
@@ -585,21 +665,24 @@ module.exports = async function create_page(page, params) {
     await stepWait(page);
 
     /* ---------- POST-CREATE phase — each field retried individually ---------- */
-    // Canary probe: if the email input isn't visible within 15s, FB rendered
+    // Canary probe: if the email input isn't visible within 30s, FB rendered
     // a flow variant without the contact form. Bail out cleanly rather than
     // burning ~11 min waitFor'ing every subsequent field × 2 retries × 15s.
     // The Page was already committed in pre-create, so a half-configured
-    // Page is the intended outcome — don't fail the worker over it.
+    // Page is the intended outcome — don't fail the worker over it. We capture
+    // an HTML + screenshot snapshot first so the "no-form variant" can be
+    // inspected later (it's not a thrown failure, so the runner won't dump it).
     const emailProbe = page.locator('label:has-text("Email") input').first();
     const postCreateFormVisible = await emailProbe
-      .waitFor({ state: 'visible', timeout: 15000 })
+      .waitFor({ state: 'visible', timeout: 30000 })
       .then(() => true)
       .catch(() => false);
 
     if (!postCreateFormVisible) {
       console.warn(
-        '  [create_page] Post-create email field not found within 15s — skipping rest of create_page (Page already committed on FB).'
+        '  [create_page] Post-create email field not found within 30s — skipping rest of create_page (Page already committed on FB).'
       );
+      await captureState(page, 'no-contact-form');
       return;
     }
 
