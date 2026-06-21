@@ -765,14 +765,40 @@ Save selectors (the role=button ancestor carries `aria-disabled`, not the inner 
 Edit button only renders when data exists:
 `[aria-label="Edit Workplace"]`, `[aria-label="Edit college"]`, `[aria-label="Edit school"]`.
 
-### "Leave Page" modal = unsaved-changes SIGNAL
+### "Leave Page" modal = unsaved-changes SIGNAL → stay-and-save recovery
 
 The "Leave Page?" modal ("You have unsaved changes to your profile.", buttons
-"Leave Page" / "Stay on Page") only appears when the section you're leaving did
-NOT save. `dismissLeavePageDialog` (probes `[aria-label="Leave Page"]`) still
-clicks "Leave Page" so navigation proceeds, but logs it as a WARN — it's a
-save-failure signal, not routine. The authoritative per-section signal is
-`commitSave`'s return; the modal is a secondary tell.
+"Leave Page" / "Stay on Page") only appears when FB **blocked** the subsection
+navigation we just attempted — we're still on the previous section and it holds
+unsaved input. It only ever pops on subsection nav (the React route guard), so
+recovery is wired into `clickSubsection`. The authoritative per-section signal is
+still `commitSave`'s return; the modal is a secondary tell + a recovery hook.
+
+**Recovery (NOT discard).** The old behaviour clicked "Leave Page", throwing away
+the just-filled data. Now `clickSubsection` routes the in-app click through
+`navWithModalGuard`, which on the modal:
+
+1. **`stayAndSave(page)`** — clicks "Stay on Page" (keeps the form), then triggers
+   the open panel's Save via `recoverySaveSelectors()` (`GENERIC_SAVE` +
+   `[aria-label="Current city save"]` + `[aria-label="Hometown save"]` +
+   `div[role="button"][aria-label="Save"]` — covers every section's save button),
+   and confirms the form closed (= saved). Returns the verified-save boolean; it
+   does NOT discard (the caller owns that decision).
+2. **On save success** → hard-navigate to the target subsection via
+   `navigateSubsectionByUrl` (a `goto`, which bypasses the route guard so it
+   can't re-pop the modal).
+3. **2-strikes cap (`MAX_LEAVE_PAGE_RECOVERIES = 2`).** If the save keeps failing,
+   the loop re-clicks the sidebar (re-popping the modal) and retries. After the
+   modal has shown twice on the same tab with Save still failing, the section is
+   deemed unsavable (e.g. a typeahead FB won't accept) → `discardLeavePage`
+   (click "Leave Page") + force the nav via URL, so we never loop forever.
+
+`leavePageModalPresent` is the short-timeout probe (the `[aria-label="Stay on
+Page"]` button). A recovered section whose own `commitSave` had returned false is
+still reported as a failed section that run (so `aboutSetAt` stays unstamped and
+it re-runs next pass) — the data is saved FB-side, so the retry sees it
+"already set" and passes. Safe direction: never lose good data, at worst one
+extra retry. Reference: `fix/Setup Information/about_leave_page_modal_error.mhtml`.
 
 ### Hobbies / Interests — search-combobox selection
 
@@ -1375,6 +1401,19 @@ already friended, name unreadable, or only suggestions present) → clicks nothi
 befriends a stranger. **`connect` AND `connect_loop` both use this shared resolver** (the
 old span-text `"Add friend"` match caught PYMK cards too). The runner's `connect_loop`
 "Add friend" probe was likewise replaced with `resolveOwnerAddFriend`.
+
+**Owner-name read tolerates the "Other names" nickname (`ownerNameMatches`).** The owner
+name comes from `og:title` → `document.title` → first non-chrome `<h1>`. Once `setup_about`'s
+`setOtherName` ticks "Show at top of profile", FB renders the owner's name in `og:title` as
+`"<Name> (<Nickname>)"` (e.g. `"Giorgia Castelli (Gior)"`), but the Add Friend button's
+aria-label stays the bare `"Add Friend Giorgia Castelli"`. A strict equality check then failed
+for EVERY profile with an Other-names nickname → the resolver skipped the add as if the only
+button were a PYMK suggestion (observed silently skipping ~75% of intended adds in a single
+daily-engage run). The match now compares the button name against BOTH the full read name AND
+the name with a trailing `(...)` parenthetical stripped (`baseName`); a PYMK suggestion carries
+a different person's name so it still matches neither form — the owner-only guarantee holds.
+The `document.title` unread-count strip also handles `"(20+) "` (the `+` the old `\d+` pattern
+missed), not just `"(7) "`.
 
 ### `search` modes
 

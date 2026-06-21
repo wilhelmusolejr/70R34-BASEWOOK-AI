@@ -150,34 +150,105 @@ async function clickAboutTab(page) {
   console.log('  [setup_about] Clicked About tab');
 }
 
-/**
- * If FB shows a "You have unsaved changes — Leave Page?" modal after
- * clicking a sidebar tab, click Leave Page to discard the leftover input
- * and let navigation proceed. Probes with a short timeout so the common
- * (no-modal) case isn't slowed down.
- */
-async function dismissLeavePageDialog(page, { timeout = 2500 } = {}) {
+// Save selectors the leave-page recovery tries, in order. GENERIC_SAVE covers
+// every inline panel (bio/work/education/relationship/interests/hobbies/travel/
+// names); the two aria-label saves cover the Current city / Hometown panels
+// whose Save button is keyed by aria-label rather than the generic Save span.
+// Built lazily (function) because GENERIC_SAVE is declared further down — a
+// module-level const would hit the temporal-dead-zone at load time.
+function recoverySaveSelectors() {
+  return [
+    GENERIC_SAVE,
+    '[aria-label="Current city save"]',
+    '[aria-label="Hometown save"]',
+    'div[role="button"][aria-label="Save"]',
+  ];
+}
+
+// Last-resort discard: click "Leave Page" to drop the unsaved input so we can
+// at least proceed. Only used when stay+save couldn't commit the section, to
+// avoid getting permanently stuck on a section we can't save.
+async function discardLeavePage(page, { timeout = 2000 } = {}) {
   const btn = page.locator('[aria-label="Leave Page"]').first();
   try {
     await btn.waitFor({ state: 'visible', timeout });
+    await btn.click();
+    await humanWait(page, 800, 1500);
+    return true;
   } catch {
     return false;
   }
+}
 
+// Is FB's "You have unsaved changes — Leave Page?" modal showing? Probe the
+// "Stay on Page" button with a short timeout so the common (no-modal) path isn't
+// slowed down.
+async function leavePageModalPresent(page, { timeout = 2500 } = {}) {
+  const stay = page.locator('[aria-label="Stay on Page"]').first();
   try {
-    await btn.click();
-    // The modal appearing AT ALL means the section we just left did not save —
-    // FB only shows it when the form still holds unsaved changes. We discard so
-    // navigation can proceed, but this is a save-failure signal, not routine.
-    console.warn(
-      '  [setup_about] "Leave Page?" modal appeared — previous section had UNSAVED changes (discarding to continue)'
-    );
-    await humanWait(page, 800, 1500);
+    await stay.waitFor({ state: 'visible', timeout });
     return true;
-  } catch (err) {
-    console.warn(`  [setup_about] Leave Page click failed: ${err.message}`);
+  } catch {
     return false;
   }
+}
+
+/**
+ * Recover the unsaved section behind a "Leave Page?" modal:
+ *   1. Click "Stay on Page" — keep the filled form, cancel the (blocked) nav.
+ *   2. Trigger the section's Save button to actually commit it.
+ *   3. Confirm the Save button is gone (form closed) = saved.
+ * Does NOT discard — the caller owns the "give up and leave" decision so it can
+ * cap how many times we try before bailing. Assumes the modal is already showing.
+ *
+ * @returns {Promise<boolean>} true if the section committed (or was already
+ *   saved), false if Save couldn't be committed (button stayed disabled / form
+ *   never closed).
+ */
+async function stayAndSave(page) {
+  // 1. Stay on the page (keep the unsaved data; cancel the blocked nav).
+  try {
+    await page.locator('[aria-label="Stay on Page"]').first().click();
+    await humanWait(page, 1000, 1800);
+  } catch (err) {
+    console.warn(`  [setup_about] "Stay on Page" click failed: ${err.message}`);
+  }
+
+  // 2. Trigger Save on whichever inline panel is still open.
+  for (const selector of recoverySaveSelectors()) {
+    const el = await querySave(page, selector);
+    const present = el ? await el.isVisible().catch(() => false) : false;
+    if (!present) continue;
+
+    const clicked = await clickSaveWhenEnabled(page, selector);
+    if (!clicked) continue; // disabled / not committable via this selector — try next
+
+    // 3. Confirm the form closed = saved.
+    const saved = await waitForSaveComplete(page, selector, 'Leave-page recovery');
+    if (saved) {
+      console.log('  [setup_about] Recovered: section saved after "Stay on Page".');
+      return true;
+    }
+  }
+
+  // No Save button left visible at all? Then the section likely committed on its
+  // own (form already closed) — treat as saved.
+  let anySaveVisible = false;
+  for (const selector of recoverySaveSelectors()) {
+    const el = await querySave(page, selector);
+    if (el && (await el.isVisible().catch(() => false))) {
+      anySaveVisible = true;
+      break;
+    }
+  }
+  if (!anySaveVisible) {
+    console.log(
+      '  [setup_about] No Save button present after "Stay" — section appears already saved.'
+    );
+    return true;
+  }
+
+  return false;
 }
 
 // A profile page is /me, /profile.php?id=..., or a vanity profile that carries
@@ -186,56 +257,24 @@ async function dismissLeavePageDialog(page, { timeout = 2500 } = {}) {
 // sk= subsection trick — building `?sk=directory_x` on it keeps you off-profile.
 function isProfileUrl(url) {
   const u = String(url || '');
-  if (/\/(reel|reels|watch|stories|story\.php|groups|marketplace|events|photo|videos?)\b/i.test(u)) {
+  if (
+    /\/(reel|reels|watch|stories|story\.php|groups|marketplace|events|photo|videos?)\b/i.test(u)
+  ) {
     return false;
   }
   return /facebook\.com\/(me\b|profile\.php)/i.test(u) || /[?&]sk=/i.test(u);
 }
 
-async function clickSubsection(page, skFragment, fallbackText) {
-  try {
-    const el = await page.$(`a[href*="${skFragment}"]`);
-    if (el) {
-      await el.scrollIntoViewIfNeeded();
-      await humanWait(page, 300, 500);
-      const box = await el.boundingBox();
-      if (box) {
-        await humanClick(page, box);
-        await humanWait(page, 1800, 2800);
-        await dismissLeavePageDialog(page);
-        console.log(`  [setup_about] Navigated to subsection: ${skFragment}`);
-        return true;
-      }
-    }
-  } catch {
-    /* fall through */
-  }
-
-  if (fallbackText) {
-    try {
-      const el = page.getByRole('tab', { name: fallbackText }).first();
-      await el.waitFor({ state: 'visible', timeout: 4000 });
-      await el.scrollIntoViewIfNeeded();
-      await humanWait(page, 300, 500);
-      const box = await el.boundingBox();
-      if (box) {
-        await humanClick(page, box);
-        await humanWait(page, 1800, 2800);
-        await dismissLeavePageDialog(page);
-        console.log(`  [setup_about] Navigated to subsection via text: ${fallbackText}`);
-        return true;
-      }
-    } catch {
-      /* not found */
-    }
-  }
-
-  // Direct URL navigation — fresh accounts may not render sidebar links yet.
-  // CRITICAL: build the sk= param on a CLEAN profile base. If a prior bbox
-  // click drifted the page onto a Reel / Watch / Story / other non-profile URL,
-  // trusting page.url() would produce e.g. `/reel/<id>?sk=directory_work` (which
-  // stays on the reel), and then EVERY section fails on that bad base. So when
-  // the current URL isn't a profile page, re-anchor to /me first.
+// Direct URL navigation — fresh accounts may not render sidebar links yet, and
+// it's also our re-navigation path after a leave-page save-recovery (a goto is a
+// hard nav that bypasses the React Router intercept, so it can't re-pop the
+// in-app "Leave Page?" modal). CRITICAL: build the sk= param on a CLEAN profile
+// base. If a prior bbox click drifted the page onto a Reel / Watch / Story /
+// other non-profile URL, trusting page.url() would produce e.g.
+// `/reel/<id>?sk=directory_work` (which stays on the reel), and then EVERY
+// section fails on that bad base. So when the current URL isn't a profile page,
+// re-anchor to /me first.
+async function navigateSubsectionByUrl(page, skFragment) {
   try {
     let base = page.url();
     if (!isProfileUrl(base)) {
@@ -253,8 +292,118 @@ async function clickSubsection(page, skFragment, fallbackText) {
     console.log(`  [setup_about] Navigated to subsection via URL: ${skFragment}`);
     return true;
   } catch {
-    /* fall through */
+    return false;
   }
+}
+
+// Cap on how many times we'll stay+save-recover the SAME tab before giving up
+// and leaving the page (discarding). The modal pops on a blocked in-app nav; we
+// stay, save, and retry the nav. If after this many modal occurrences the save
+// STILL isn't taking, the section is unsavable (e.g. a typeahead FB won't
+// accept) — discard so we don't loop forever, and force the nav via URL.
+const MAX_LEAVE_PAGE_RECOVERIES = 2;
+
+// Navigate to a subsection by repeatedly running `doClick` (an in-app sidebar
+// click that can re-pop the "Leave Page?" route guard) until either the nav goes
+// through (no modal) or we hit the recovery cap.
+//   - No modal after a click            → navigation succeeded, return true.
+//   - Modal + stay+save SUCCEEDS        → re-navigate via URL (hard nav), done.
+//   - Modal recurs MAX times, save fails → discard (Leave Page) + force URL nav.
+// `doClick` returns true if it dispatched a click, false if the target vanished.
+async function navWithModalGuard(page, doClick, skFragment, label) {
+  let modalCount = 0;
+
+  // +1 so the click that triggers the FINAL (cap-th) modal still runs.
+  for (let i = 0; i <= MAX_LEAVE_PAGE_RECOVERIES; i++) {
+    const clicked = await doClick();
+    if (!clicked) break; // target gone — fall through to URL nav
+    await humanWait(page, 1800, 2800);
+
+    if (!(await leavePageModalPresent(page))) {
+      console.log(
+        `  [setup_about] Navigated to subsection${label ? ` ${label}` : ''}: ${skFragment}`
+      );
+      return true;
+    }
+
+    modalCount++;
+    console.warn(
+      `  [setup_about] "Leave Page?" modal (occurrence ${modalCount}/${MAX_LEAVE_PAGE_RECOVERIES}) — navigation BLOCKED by unsaved changes. Stay on Page → Save.`
+    );
+
+    const saved = await stayAndSave(page);
+    if (saved) {
+      // Recovered the previous section — hard-navigate to the target via URL.
+      return navigateSubsectionByUrl(page, skFragment);
+    }
+
+    if (modalCount >= MAX_LEAVE_PAGE_RECOVERIES) {
+      console.warn(
+        `  [setup_about] "Leave Page?" modal shown ${modalCount}× on this tab and Save still failing — LEAVING PAGE (discarding) and forcing nav to ${skFragment}.`
+      );
+      await discardLeavePage(page);
+      return navigateSubsectionByUrl(page, skFragment);
+    }
+
+    // Save failed but cap not reached — loop: re-click the sidebar. If the
+    // section truly saved we'll navigate cleanly; if not, the modal re-pops and
+    // this counts as the next occurrence.
+  }
+
+  // Direct URL navigation fallback (target never clickable, or loop exhausted).
+  if (await navigateSubsectionByUrl(page, skFragment)) return true;
+  console.log(`  [setup_about] Could not navigate to subsection: ${skFragment}`);
+  return false;
+}
+
+async function clickSubsection(page, skFragment, fallbackText) {
+  // Tier 1 — sidebar href link (re-resolved each click so a re-render is fine).
+  const clickHrefLink = async () => {
+    try {
+      const el = await page.$(`a[href*="${skFragment}"]`);
+      if (!el) return false;
+      await el.scrollIntoViewIfNeeded();
+      await humanWait(page, 300, 500);
+      const box = await el.boundingBox();
+      if (!box) return false;
+      await humanClick(page, box);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // Probe once: only enter the guarded loop if the link exists.
+  if (await page.$(`a[href*="${skFragment}"]`).catch(() => null)) {
+    return navWithModalGuard(page, clickHrefLink, skFragment);
+  }
+
+  // Tier 2 — role=tab by text.
+  if (fallbackText) {
+    const tab = page.getByRole('tab', { name: fallbackText }).first();
+    const present = await tab
+      .waitFor({ state: 'visible', timeout: 4000 })
+      .then(() => true)
+      .catch(() => false);
+    if (present) {
+      const clickTab = async () => {
+        try {
+          const el = page.getByRole('tab', { name: fallbackText }).first();
+          await el.scrollIntoViewIfNeeded();
+          await humanWait(page, 300, 500);
+          const box = await el.boundingBox();
+          if (!box) return false;
+          await humanClick(page, box);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      return navWithModalGuard(page, clickTab, skFragment, `via text: ${fallbackText}`);
+    }
+  }
+
+  // Tier 3 — direct URL navigation fallback.
+  if (await navigateSubsectionByUrl(page, skFragment)) return true;
 
   console.log(`  [setup_about] Could not navigate to subsection: ${skFragment}`);
   return false;
@@ -935,7 +1084,9 @@ async function setPersonalDetails(page, city, hometown, personal) {
     } else if (!(await valueAlreadyShown(page, city))) {
       // Panel button missing AND the city isn't already displayed → real
       // failure (render/timing), not "already set". Fail so the section retries.
-      console.warn('  [setup_about] Current city panel not found and city not set — failing for retry');
+      console.warn(
+        '  [setup_about] Current city panel not found and city not set — failing for retry'
+      );
       ok = false;
     }
   }
@@ -957,7 +1108,9 @@ async function setPersonalDetails(page, city, hometown, personal) {
         ok = false;
       }
     } else if (!(await valueAlreadyShown(page, hometown))) {
-      console.warn('  [setup_about] Hometown panel not found and hometown not set — failing for retry');
+      console.warn(
+        '  [setup_about] Hometown panel not found and hometown not set — failing for retry'
+      );
       ok = false;
     }
   }
@@ -1245,7 +1398,9 @@ async function setInterests(page, interests, gender) {
     // Probability gate per category. A skipped category is NOT a failure
     // (ok stays true) — it simply isn't filled this run.
     if (Math.random() >= chance) {
-      console.log(`  [setup_about] Skipping ${panelText} interests (chance ${Math.round(chance * 100)}%)`);
+      console.log(
+        `  [setup_about] Skipping ${panelText} interests (chance ${Math.round(chance * 100)}%)`
+      );
       continue;
     }
 
@@ -1503,8 +1658,7 @@ async function setOtherName(page, firstName, lastName) {
           if (box) {
             await humanClick(page, box);
             await humanWait(page, 500, 1000);
-            nowChecked =
-              (await checkbox.getAttribute('aria-checked').catch(() => null)) === 'true';
+            nowChecked = (await checkbox.getAttribute('aria-checked').catch(() => null)) === 'true';
           }
         }
         console.log(
@@ -1516,7 +1670,9 @@ async function setOtherName(page, firstName, lastName) {
         console.log('  [setup_about] "Show at top of profile" already enabled');
       }
     } catch (e) {
-      console.log(`  [setup_about] "Show at top of profile" toggle error (non-fatal): ${e.message}`);
+      console.log(
+        `  [setup_about] "Show at top of profile" toggle error (non-fatal): ${e.message}`
+      );
     }
 
     const saved = await commitSave(page, GENERIC_SAVE, 'Other names');
@@ -1609,7 +1765,9 @@ module.exports = async function setupAbout(page, params) {
       try {
         ok = await run();
       } catch (e) {
-        console.warn(`  [setup_about] Section "${name}" threw (attempt ${attempt}/${SECTION_ATTEMPTS}): ${e.message}`);
+        console.warn(
+          `  [setup_about] Section "${name}" threw (attempt ${attempt}/${SECTION_ATTEMPTS}): ${e.message}`
+        );
         ok = false;
       }
       if (ok !== false) break;

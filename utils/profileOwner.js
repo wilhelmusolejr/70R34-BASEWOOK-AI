@@ -26,17 +26,91 @@ function normName(s) {
     .toLowerCase();
 }
 
-// Read the profile owner's display name from the page <h1>. FB renders the
-// profile owner's name as the page's primary <h1>. Returns '' if unreadable.
+// Strip a trailing parenthetical from a normalized name, e.g.
+// "giorgia castelli (gior)" -> "giorgia castelli". FB renders the profile
+// owner's "Other names" nickname (set by setup_about's setOtherName with
+// "Show at top of profile" ticked) INSIDE the og:title / document.title as
+// "<Name> (<Nickname>)". The Add Friend button's aria-label, however, only
+// ever carries the bare "<Name>". So an exact og:title-vs-button comparison
+// fails for every profile that has an Other-names nickname shown at top —
+// the bot then skips the add as if the button were a PYMK suggestion. We
+// compare against BOTH the full name and this base form.
+function baseName(s) {
+  return normName(String(s || '').replace(/\s*\([^)]*\)\s*$/, ''));
+}
+
+// Does a button's name suffix identify the profile owner? True when it equals
+// the owner's full read name OR the owner name with a trailing parenthetical
+// nickname stripped. A PYMK suggestion carries a DIFFERENT person's name, so
+// it still never matches either form — the owner-only guarantee is preserved.
+function ownerNameMatches(buttonName, owner) {
+  if (!buttonName) return false;
+  if (buttonName === owner) return true;
+  if (buttonName === baseName(owner)) return true;
+  return false;
+}
+
+// Page-chrome words that can appear as an <h1> on a FB profile page but are
+// NOT the profile owner's name (accessibility / nav landmarks). The first <h1>
+// in DOM order is frequently one of these (observed "Notifications"), so a
+// plain `h1:first` read mis-identified the owner as e.g. "notifications" and
+// then never matched the real Add Friend button.
+const CHROME_HEADINGS = new Set([
+  'notifications',
+  'facebook',
+  'menu',
+  'search',
+  'search results',
+  'messenger',
+  'create',
+  'your profile',
+]);
+
+// Read the profile owner's display name. Strategy (most reliable first):
+//   1. og:title meta — FB sets this to the profile owner's full name on a
+//      profile page; it's never page chrome.
+//   2. document.title — "<Name> | Facebook" / "(N) <Name> | Facebook".
+//   3. first VISIBLE <h1> whose text isn't a known chrome heading.
+// Returns '' if none yields a usable name.
 async function getProfileOwnerName(page) {
+  // 1. og:title meta
   try {
-    const h1 = page.locator('h1').first();
-    if (!(await h1.count().catch(() => 0))) return '';
-    const txt = await h1.innerText({ timeout: 3000 }).catch(() => '');
-    return normName(txt);
-  } catch (_) {
-    return '';
-  }
+    const og =
+      (await page
+        .locator('meta[property="og:title"]')
+        .first()
+        .getAttribute('content', { timeout: 2000 })
+        .catch(() => '')) || '';
+    const ogName = normName(og);
+    if (ogName && !CHROME_HEADINGS.has(ogName)) return ogName;
+  } catch (_) {}
+
+  // 2. document title — strip a leading "(N) " unread count and a trailing
+  //    " | Facebook" / " - Facebook" suffix.
+  try {
+    let title = (await page.title().catch(() => '')) || '';
+    // Strip a leading unread-count badge: "(7) " or "(20+) " (FB caps the
+    // display at "20+", whose "+" the old \d+ pattern missed).
+    title = title
+      .replace(/^\(\d+\+?\)\s*/, '')
+      .replace(/\s*[|\-–—]\s*facebook.*$/i, '');
+    const tName = normName(title);
+    if (tName && !CHROME_HEADINGS.has(tName)) return tName;
+  } catch (_) {}
+
+  // 3. first visible, non-chrome <h1>
+  try {
+    const h1s = page.locator('h1');
+    const n = await h1s.count().catch(() => 0);
+    for (let i = 0; i < n; i++) {
+      const h1 = h1s.nth(i);
+      if (!(await h1.isVisible().catch(() => false))) continue;
+      const txt = normName(await h1.innerText({ timeout: 2000 }).catch(() => ''));
+      if (txt && !CHROME_HEADINGS.has(txt)) return txt;
+    }
+  } catch (_) {}
+
+  return '';
 }
 
 /**
@@ -65,7 +139,7 @@ async function resolveOwnerAddFriend(page, opts = {}) {
     const btn = all.nth(i);
     const label = (await btn.getAttribute('aria-label').catch(() => '')) || '';
     const name = normName(label.replace(/^Add Friend\s+/i, ''));
-    if (name && name === owner) return { locator: btn, owner };
+    if (ownerNameMatches(name, owner)) return { locator: btn, owner };
   }
 
   if (n > 0) {
